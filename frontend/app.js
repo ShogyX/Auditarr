@@ -50,6 +50,7 @@ const MAX_VISIBLE_FILES = 500;  // Cap visible rows for performance
 // Init
 // ──────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  await loadAuthInfo();
   await loadConfig();
   // Pre-load plugins schema (avoids picker race)
   loadPluginsAndIntegrations();
@@ -57,6 +58,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadStats();
   await loadFiles();
   loadIntegrationEvents();
+  loadUpdateStatus();
+  // Refresh update banner every 5 minutes
+  setInterval(loadUpdateStatus, 5 * 60 * 1000);
 });
 
 async function loadPluginsAndIntegrations() {
@@ -81,6 +85,20 @@ async function loadRulesSchema() {
 // ──────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────
+// Wrap fetch to redirect to login on 401
+const _origFetch = window.fetch.bind(window);
+window.fetch = async function(input, init) {
+  const r = await _origFetch(input, init);
+  if (r.status === 401) {
+    const url = (typeof input === 'string') ? input : (input.url || '');
+    // Don't loop on the login endpoint itself
+    if (!url.includes('/api/auth/')) {
+      window.location.href = '/login.html';
+    }
+  }
+  return r;
+};
+
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -138,6 +156,7 @@ function showView(name) {
   if (name === 'integrations') { loadPluginsAndIntegrations(); loadIntegrationEvents(); }
   if (name === 'automation') { loadAutomationRules(); }
   if (name === 'rules') { loadCustomRules(); }
+  if (name === 'config') { loadAuthInfo(); loadUpdateStatus(); }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -192,7 +211,7 @@ function resetScanBtn() {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Dashboard
+// Dashboard v2 — Media-centric, side panels, all clickable
 // ──────────────────────────────────────────────────────────────
 async function loadStats() {
   const r = await fetch('/api/stats');
@@ -209,50 +228,40 @@ async function loadStats() {
   document.getElementById('dashboard-content').style.display = 'block';
   document.getElementById('badge-files').textContent = s.total;
 
-  // Update tab counts
-  document.getElementById('cnt-all').textContent = s.total;
-  for (const cat of ['media','subtitle','image','metadata','junk']) {
-    const c = (s.per_category && s.per_category[cat]) ? s.per_category[cat].total : 0;
-    const el = document.getElementById('cnt-' + cat);
-    if (el) el.textContent = c;
-    // hide tabs with 0 count
-    const tab = document.querySelector(`.dash-tab[data-cat="${cat}"]`);
-    if (tab) tab.style.display = c > 0 ? 'inline-flex' : 'none';
-  }
+  renderHero(s);
+  renderSeverityTiles(s);
+  renderClickableBars('codec-bars', s.codecs || {}, 'codec');
+  renderClickableBars('audio-bars', s.audio_codecs || {}, 'audio_codec');
+  renderClickableBars('res-bars', s.resolutions || {}, 'resolution');
+  renderClickableBars('issue-cat-bars', s.issue_categories || {}, 'category');
+  document.getElementById('codec-total').textContent = sumValues(s.codecs);
+  document.getElementById('audio-total').textContent = sumValues(s.audio_codecs);
+  document.getElementById('res-total').textContent = sumValues(s.resolutions);
+  document.getElementById('issue-cat-total').textContent = Object.values(s.issue_categories || {}).reduce((a,b)=>a+b,0) + ' files';
 
-  renderDashboardForCategory(currentDashCategory);
+  // Highlights
+  document.getElementById('hl-dovi-p5').textContent = s.dovi_p5 || 0;
+  document.getElementById('hl-av1').textContent = s.av1 || 0;
+  document.getElementById('hl-hevc').textContent = s.hevc || 0;
+  document.getElementById('hl-dovi-other').textContent = s.dovi_other || 0;
+
+  renderSideCategories(s);
 }
 
-function setDashCategory(cat) {
-  currentDashCategory = cat;
-  document.querySelectorAll('.dash-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === cat));
-  renderDashboardForCategory(cat);
+function sumValues(obj) {
+  const sum = Object.values(obj || {}).reduce((a,b)=>a+b,0);
+  return `${sum} files`;
 }
 
-function renderDashboardForCategory(cat) {
-  const s = lastStats;
-  if (!s) return;
+// Hero panel always shows MEDIA stats by default
+function renderHero(s) {
+  const pc = (s.per_category && s.per_category.media) || { severity: {}, total: 0, size_gb: 0 };
+  const sev = pc.severity || {};
+  const total = pc.total || 0;
 
-  let sev, total, sizeGb, label;
-  if (cat === 'all') {
-    sev = s.severity || {};
-    total = s.total;
-    sizeGb = s.total_size_gb;
-    label = 'Library';
-  } else {
-    const pc = (s.per_category && s.per_category[cat]) || { severity: {}, total: 0, size_gb: 0 };
-    sev = pc.severity || {};
-    total = pc.total;
-    sizeGb = pc.size_gb;
-    label = CATEGORY_LABELS[cat] || cat;
-  }
-
-  document.getElementById('health-panel-title').textContent = `${label} Health`;
-
-  // Health score
   const okish = (sev.ok || 0) + (sev.info || 0);
   const score = total > 0 ? Math.round(okish / total * 100) : 0;
-  const scoreEl = document.getElementById('health-score');
+  const scoreEl = document.getElementById('hero-score');
   scoreEl.textContent = total > 0 ? score : '—';
   scoreEl.style.color = total === 0 ? 'var(--muted)' :
                         score >= 90 ? 'var(--sev-ok)' :
@@ -262,106 +271,118 @@ function renderDashboardForCategory(cat) {
 
   let statusText, detailText;
   if (total === 0) {
-    statusText = 'NO FILES'; detailText = `No ${label.toLowerCase()} files in this library yet.`;
+    statusText = 'NO MEDIA'; detailText = 'No media files in this library yet.';
   } else if (score >= 90) {
-    statusText = 'EXCELLENT'; detailText = `${total} ${label.toLowerCase()} files; almost all clean.`;
+    statusText = 'EXCELLENT'; detailText = `${total} media files; almost all clean.`;
   } else if (score >= 70) {
-    statusText = 'GOOD'; detailText = `${total} ${label.toLowerCase()} files; some clients may transcode.`;
+    statusText = 'GOOD'; detailText = `${total} media files; some clients may transcode.`;
   } else if (score >= 40) {
-    statusText = 'NEEDS ATTENTION'; detailText = `${total} ${label.toLowerCase()} files; many will transcode.`;
+    statusText = 'NEEDS ATTENTION'; detailText = `${total} media files; many will transcode.`;
   } else {
-    statusText = 'POOR'; detailText = `${total} ${label.toLowerCase()} files; significant playback issues.`;
+    statusText = 'POOR'; detailText = `${total} media files; significant playback issues.`;
   }
-  document.getElementById('health-status').textContent = statusText;
-  document.getElementById('health-detail').textContent = detailText;
-  document.getElementById('health-meta-side').textContent = `${total.toLocaleString()} files · ${sizeGb} GB`;
 
-  renderSeverityBars(sev, total, cat);
-
-  // Category-specific tile grid
-  const tiles = [];
-  if (cat === 'all' || cat === 'media') {
-    tiles.push({ val: s.dovi_p5,    label: 'DoVi Profile 5', click: 'goToFilesWithSearch("Profile 5")' });
-    tiles.push({ val: s.av1,        label: 'AV1' });
-    tiles.push({ val: s.hevc,       label: 'HEVC' });
-    tiles.push({ val: s.dovi_other, label: 'DoVi (other)' });
-  }
-  if (cat === 'all') {
-    tiles.unshift({ val: total, label: 'Total Files' });
-    tiles.unshift({ val: sizeGb + ' GB', label: 'Total Size' });
-  } else {
-    tiles.unshift({ val: sizeGb + ' GB', label: `${label} Size` });
-    tiles.unshift({ val: total, label: `${label} Files` });
-  }
-  document.getElementById('tile-grid').innerHTML = tiles.map(t => `
-    <div class="tile" ${t.click ? `onclick="${t.click}"` : ''}>
-      <div class="tile-val">${escHtml(t.val)}</div>
-      <div class="tile-label">${escHtml(t.label)}</div>
-    </div>
-  `).join('');
-
-  // Bars
-  if (cat === 'all' || cat === 'media') {
-    document.getElementById('distrib-title').textContent = 'Video Codecs';
-    renderBars('codec-bars', s.codecs || {});
-    renderBars('audio-bars', s.audio_codecs || {});
-    renderBars('res-bars', s.resolutions || {});
-    document.getElementById('extra-charts').style.display = 'grid';
-  } else {
-    // For subtitle/image/metadata/junk, hide media-specific charts
-    document.getElementById('distrib-title').textContent = 'Issue Categories';
-    renderBars('codec-bars', s.issue_categories || {});
-    document.getElementById('extra-charts').style.display = 'none';
-  }
-  renderBars('issue-cat-bars', s.issue_categories || {});
+  document.getElementById('hero-cat-name').textContent = 'Media health';
+  document.getElementById('hero-status').textContent = statusText;
+  document.getElementById('hero-detail').textContent = detailText;
+  document.getElementById('hero-quick-total').textContent = total.toLocaleString();
+  document.getElementById('hero-quick-size').textContent = (pc.size_gb || 0).toFixed(1) + ' GB';
 }
 
-function renderSeverityBars(sev, total, cat) {
+function renderSeverityTiles(s) {
+  const pc = (s.per_category && s.per_category.media) || { severity: {} };
+  const sev = pc.severity || {};
   const order = ['unplayable','always_transcode','possible_transcode','high_bitrate','info','ok'];
-  const html = order.map(s => {
-    const n = sev[s] || 0;
-    const pct = total > 0 ? (n / total * 100) : 0;
+  const html = order.map(svKey => {
+    const n = sev[svKey] || 0;
+    const cls = n === 0 ? `sev-tile ${svKey} zero` : `sev-tile ${svKey}`;
+    const label = SEVERITY_LABELS[svKey] || svKey;
     return `
-      <div class="sev-row" onclick="quickFilterSeverity('${s}', '${cat}')">
-        <div class="sev-dot ${s}"></div>
-        <div class="sev-info-col">
-          <div class="sev-name-row">
-            <span class="sev-name">${escHtml(SEVERITY_LABELS[s])}</span>
-          </div>
-          <div class="sev-bar-bg"><div class="sev-bar-fill ${s}" style="width:${pct}%"></div></div>
-        </div>
-        <div class="sev-count">${n}</div>
+      <div class="${cls}" onclick="goToFiles({file_category:'media',severity:'${svKey}'})">
+        <div class="sev-tile-val">${n}</div>
+        <div class="sev-tile-label">${escHtml(label)}</div>
       </div>`;
   }).join('');
-  document.getElementById('severity-bars').innerHTML = html;
+  document.getElementById('sev-tiles').innerHTML = html;
 }
 
-function renderBars(id, data) {
+function renderClickableBars(id, data, filterKey) {
   const el = document.getElementById(id);
   if (!el) return;
   const entries = Object.entries(data || {}).sort((a,b) => b[1]-a[1]).slice(0, 8);
-  if (!entries.length) { el.innerHTML = '<div class="small">No data</div>'; return; }
+  if (!entries.length) {
+    el.innerHTML = '<div class="small" style="padding:6px 8px">No data</div>';
+    return;
+  }
   const max = entries[0][1];
-  el.innerHTML = entries.map(([k,v]) => `
-    <div class="bar-row">
-      <div class="bar-label" title="${escHtml(k)}">${escHtml(k)}</div>
-      <div class="bar-track"><div class="bar-fill" style="width:${(v/max)*100}%"></div></div>
-      <div class="bar-count">${v}</div>
-    </div>
-  `).join('');
+  el.innerHTML = entries.map(([k,v]) => {
+    // For category filter, we go to that category in the file browser instead
+    const click = filterKey === 'category'
+      ? `goToFiles({category:'${escHtml(k)}'})`
+      : `goToFiles({file_category:'media',${filterKey}:'${escHtml(k)}'})`;
+    return `
+      <div class="cbar-row" onclick="${click}" title="Click to filter">
+        <div class="cbar-label">${escHtml(k)}</div>
+        <div class="cbar-track"><div class="cbar-fill" style="width:${(v/max)*100}%"></div></div>
+        <div class="cbar-count">${v}</div>
+      </div>`;
+  }).join('');
 }
 
-function quickFilterSeverity(sev, cat) {
-  showView('files');
-  if (cat && cat !== 'all') {
-    currentFileCategory = cat;
-  }
-  setSeverity(sev);
+function renderSideCategories(s) {
+  const order = ['subtitle','image','metadata','junk'];
+  const html = order
+    .filter(cat => (s.per_category?.[cat]?.total || 0) > 0)
+    .map(cat => {
+      const pc = s.per_category[cat] || { severity: {}, total: 0 };
+      const sev = pc.severity || {};
+      // Highest severity drives the card colour
+      const SEV_ORDER = ['unplayable','always_transcode','possible_transcode','high_bitrate','info','ok'];
+      const worst = SEV_ORDER.find(s => (sev[s] || 0) > 0) || 'ok';
+      // Severity pills (only non-zero counts)
+      const pills = SEV_ORDER
+        .filter(svKey => (sev[svKey] || 0) > 0)
+        .map(svKey => `<span class="cat-side-sev-pill ${svKey}"
+                            title="${escHtml(SEVERITY_LABELS[svKey])} — click to filter"
+                            onclick="event.stopPropagation();goToFiles({file_category:'${cat}',severity:'${svKey}'})">${sev[svKey]} ${SEVERITY_LABELS[svKey]}</span>`)
+        .join('');
+      return `
+        <div class="cat-side-card ${worst}" onclick="goToFiles({file_category:'${cat}'})">
+          <div class="cat-side-head">
+            <div class="cat-side-icon">${CATEGORY_ICONS[cat] || '·'}</div>
+            <div class="cat-side-name">${escHtml(CATEGORY_LABELS[cat] || cat)}</div>
+            <div class="cat-side-count">${pc.total}</div>
+          </div>
+          <div class="cat-side-sev-row">${pills}</div>
+        </div>`;
+    }).join('');
+  document.getElementById('side-cat-list').innerHTML = html ||
+    '<div class="small" style="padding:6px 4px">No other category files.</div>';
 }
-function goToFilesWithSearch(q) {
+
+// ──────────────────────────────────────────────────────────────
+// Click-to-filter helper — single entry point for ALL dashboard clicks
+// ──────────────────────────────────────────────────────────────
+function goToFiles({ file_category, category, severity, codec, audio_codec, resolution, search } = {}) {
   showView('files');
+  if (file_category) currentFileCategory = file_category;
+  if (severity) currentSeverity = severity;
+  else currentSeverity = 'all';
+
+  // Severity filter chip
+  document.querySelectorAll('#filter-bar .chip').forEach(c =>
+    c.classList.toggle('active', c.dataset.sev === currentSeverity));
+
+  // Search/criteria — populate the search box for visibility
+  let q = '';
+  if (search) q = search;
+  else if (codec) q = codec;
+  else if (audio_codec) q = audio_codec;
+  else if (resolution) q = resolution;
+  else if (category && !file_category) q = category;
   document.getElementById('search-input').value = q;
   currentSearch = q.toLowerCase();
+
   applyFilter();
 }
 
@@ -1419,10 +1440,25 @@ async function loadAutomationRules() {
   } catch (e) {}
 }
 
+// State for the rule editor
+let _tdarrLibrariesCache = {};
+let _tdarrPluginsCache = {};
+let _tdarrMode = 'library';
+
+const ACTIONS_BY_KIND = {
+  sonarr:   [{value:'unmonitor', label:'Unmonitor in Sonarr'},
+             {value:'monitor',   label:'Monitor in Sonarr'}],
+  radarr:   [{value:'unmonitor', label:'Unmonitor in Radarr'},
+             {value:'monitor',   label:'Monitor in Radarr'}],
+  bazarr:   [{value:'search_subs_via_bazarr', label:'Re-search subtitles (Bazarr)'},
+             {value:'delete_sub_via_bazarr', label:'Delete subtitle file (Bazarr)'}],
+  tdarr:    [{value:'transcode_via_tdarr', label:'Queue transcode in Tdarr'}],
+};
+
 async function showAddRuleDialog() {
   if (!integrationsCache.length) await loadPluginsAndIntegrations();
   if (!integrationsCache.length) {
-    toast('Add a Sonarr or Radarr integration first', 'err');
+    toast('Add an integration first', 'err');
     return;
   }
   const usable = integrationsCache.filter(i => {
@@ -1430,27 +1466,127 @@ async function showAddRuleDialog() {
     return p && p.supports_automation;
   });
   if (!usable.length) {
-    toast('No Sonarr/Radarr integration available', 'err');
+    toast('No automation-capable integration connected', 'err');
     return;
   }
   const select = document.getElementById('rule-int');
-  select.innerHTML = usable.map(i => `<option value="${i.id}">${escHtml(i.name)} (${escHtml(i.kind)})</option>`).join('');
+  select.innerHTML = usable.map(i => `<option value="${i.id}" data-kind="${i.kind}">${escHtml(i.name)} (${escHtml(i.kind)})</option>`).join('');
   document.getElementById('rule-name').value = '';
   document.getElementById('rule-cmp').value = 'at_least';
   document.getElementById('rule-sev').value = 'unplayable';
-  document.getElementById('rule-action').value = 'unmonitor';
+  document.getElementById('rule-file-cat').value = '';
+  document.getElementById('rule-bazarr-media-type').value = '';
+  onRuleIntegrationChange();  // populates action select
   openModal('modal-add-rule');
 }
 
+function onRuleIntegrationChange() {
+  const sel = document.getElementById('rule-int');
+  const opt = sel.options[sel.selectedIndex];
+  const kind = opt?.dataset.kind || '';
+  const actions = ACTIONS_BY_KIND[kind] || [];
+  const actionSel = document.getElementById('rule-action');
+  actionSel.innerHTML = actions.map(a => `<option value="${a.value}">${escHtml(a.label)}</option>`).join('');
+  // Auto-select sensible default file category
+  if (kind === 'tdarr') document.getElementById('rule-file-cat').value = 'media';
+  if (kind === 'bazarr') document.getElementById('rule-file-cat').value = '';
+  onRuleActionChange();
+}
+
+async function onRuleActionChange() {
+  const sel = document.getElementById('rule-action');
+  const action = sel.value;
+  const tdarrCfg = document.getElementById('rule-tdarr-config');
+  const bazarrCfg = document.getElementById('rule-bazarr-config');
+  tdarrCfg.style.display = (action === 'transcode_via_tdarr') ? 'block' : 'none';
+  bazarrCfg.style.display = (action === 'search_subs_via_bazarr' || action === 'delete_sub_via_bazarr') ? 'block' : 'none';
+
+  if (action === 'transcode_via_tdarr') {
+    setTdarrMode('library');
+    await populateTdarrLibrariesAndPlugins();
+  }
+}
+
+async function populateTdarrLibrariesAndPlugins() {
+  const sel = document.getElementById('rule-int');
+  const sid = sel.value;
+  if (!sid) return;
+  // Cache to avoid repeated fetches
+  if (!_tdarrLibrariesCache[sid]) {
+    try {
+      const [lr, pr] = await Promise.all([
+        fetch(`/api/tdarr/${sid}/libraries`),
+        fetch(`/api/tdarr/${sid}/plugins`),
+      ]);
+      _tdarrLibrariesCache[sid] = await lr.json();
+      _tdarrPluginsCache[sid] = await pr.json();
+    } catch (e) {
+      _tdarrLibrariesCache[sid] = []; _tdarrPluginsCache[sid] = [];
+    }
+  }
+  const libs = _tdarrLibrariesCache[sid] || [];
+  const plugins = _tdarrPluginsCache[sid] || [];
+  document.getElementById('rule-tdarr-library').innerHTML =
+    '<option value="">— pick a library —</option>' +
+    libs.map(l => `<option value="${escHtml(l.id)}">${escHtml(l.name)}${l.folder ? ' — ' + escHtml(l.folder) : ''}</option>`).join('');
+  document.getElementById('rule-tdarr-plugin').innerHTML =
+    '<option value="">— pick a plugin / flow —</option>' +
+    plugins.map(p => `<option value="${escHtml(p.id)}">${escHtml(p.name)}${p.type ? ' [' + escHtml(p.type) + ']' : ''}</option>`).join('');
+}
+
+function setTdarrMode(mode) {
+  _tdarrMode = mode;
+  ['library','plugin','inline'].forEach(m => {
+    const btn = document.getElementById(`tdarr-mode-${m}`);
+    if (btn) btn.classList.toggle('active', m === mode);
+    const pick = document.getElementById(`tdarr-${m}-pick`);
+    if (pick) pick.style.display = (m === mode) ? 'block' : 'none';
+  });
+}
+
 async function saveAddRule() {
+  const intSel = document.getElementById('rule-int');
+  const opt = intSel.options[intSel.selectedIndex];
+  const kind = opt?.dataset.kind || '';
+  const action = document.getElementById('rule-action').value;
+  const fileCat = document.getElementById('rule-file-cat').value;
+
   const data = {
-    integration_id: parseInt(document.getElementById('rule-int').value),
+    integration_id: parseInt(intSel.value),
     name: document.getElementById('rule-name').value.trim(),
     when_severity: document.getElementById('rule-sev').value,
     comparison: document.getElementById('rule-cmp').value,
-    action: document.getElementById('rule-action').value,
+    action: action,
+    file_category: fileCat || null,
+    action_config: {},
   };
   if (!data.name) { toast('Name required', 'err'); return; }
+
+  // Build action_config based on action type
+  if (action === 'transcode_via_tdarr') {
+    if (_tdarrMode === 'library') {
+      const libId = document.getElementById('rule-tdarr-library').value;
+      if (!libId) { toast('Pick a Tdarr library', 'err'); return; }
+      data.action_config.library_id = libId;
+    } else if (_tdarrMode === 'plugin') {
+      const pluginId = document.getElementById('rule-tdarr-plugin').value;
+      if (!pluginId) { toast('Pick a Tdarr plugin', 'err'); return; }
+      data.action_config.plugin_id = pluginId;
+    } else {  // inline
+      data.action_config.inline_profile = {
+        codec:          document.getElementById('inline-codec').value,
+        container:      document.getElementById('inline-container').value,
+        audio_codec:    document.getElementById('inline-audio').value,
+        crf:            parseInt(document.getElementById('inline-crf').value) || 22,
+        hardware_accel: document.getElementById('inline-hwa').value || null,
+        resolution_max: document.getElementById('inline-resmax').value || null,
+      };
+    }
+  } else if (action === 'search_subs_via_bazarr' || action === 'delete_sub_via_bazarr') {
+    const mt = document.getElementById('rule-bazarr-media-type').value;
+    if (mt) data.action_config.media_type = mt;
+  }
+
   try {
     const r = await fetch('/api/automation/rules', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1603,4 +1739,228 @@ async function saveConfig() {
     if (r.ok) toast('Configuration saved', 'ok');
     else toast('Save failed', 'err');
   } catch { toast('Save failed', 'err'); }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Auth (logout, password change, API token)
+// ──────────────────────────────────────────────────────────────
+async function loadAuthInfo() {
+  try {
+    const r = await fetch('/api/auth/status');
+    const s = await r.json();
+    if (!s.authenticated) {
+      window.location.href = '/login.html';
+      return;
+    }
+    const w = document.getElementById('user-widget');
+    w.style.display = 'flex';
+    document.getElementById('user-icon-letter').textContent =
+      (s.username || '?').charAt(0).toUpperCase();
+    document.getElementById('user-name-text').textContent = s.username || '';
+
+    const acctU = document.getElementById('account-username');
+    if (acctU) acctU.value = s.username || '';
+
+    // Pull API token (only when on Settings)
+    const tokenEl = document.getElementById('account-api-token');
+    if (tokenEl && !tokenEl.value) {
+      try {
+        const tr = await fetch('/api/auth/api-token');
+        const td = await tr.json();
+        tokenEl.value = td.api_token || '';
+      } catch (e) {}
+    }
+  } catch (e) {
+    window.location.href = '/login.html';
+  }
+}
+
+async function doLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) {}
+  window.location.href = '/login.html';
+}
+
+async function changePassword() {
+  const oldp = document.getElementById('account-old-pw').value;
+  const newp = document.getElementById('account-new-pw').value;
+  if (!oldp || !newp) { toast('Both passwords required', 'err'); return; }
+  if (newp.length < 8) { toast('New password must be ≥ 8 chars', 'err'); return; }
+  try {
+    const r = await fetch('/api/auth/change-password', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ old_password: oldp, new_password: newp })
+    });
+    const d = await r.json();
+    if (r.ok && d.ok) {
+      toast('Password changed; please log in again', 'ok');
+      setTimeout(() => doLogout(), 1500);
+    } else {
+      toast(d.error || 'Failed', 'err');
+    }
+  } catch { toast('Failed', 'err'); }
+}
+
+async function regenerateApiToken() {
+  if (!confirm('Regenerate the API token? Existing scripts will stop working.')) return;
+  try {
+    const r = await fetch('/api/auth/api-token', { method:'POST' });
+    const d = await r.json();
+    document.getElementById('account-api-token').value = d.api_token || '';
+    toast('New API token generated', 'ok');
+  } catch { toast('Failed', 'err'); }
+}
+
+async function copyApiToken() {
+  const v = document.getElementById('account-api-token').value;
+  try {
+    await navigator.clipboard.writeText(v);
+    toast('Token copied to clipboard', 'ok');
+  } catch {
+    toast('Could not copy — select & Ctrl+C', 'err');
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Update banner
+// ──────────────────────────────────────────────────────────────
+let _updateState = null;
+
+async function loadUpdateStatus() {
+  try {
+    const r = await fetch('/api/update/check');
+    const s = await r.json();
+    _updateState = s;
+    renderUpdateBanner(s);
+    renderUpdateStatusCard(s);
+  } catch (e) {}
+}
+
+function renderUpdateBanner(s) {
+  const banner = document.getElementById('update-banner');
+  if (!banner) return;
+  const dismissed = sessionStorage.getItem('auditarr_update_dismissed') === (s.latest_sha || '');
+  if (s.available && !dismissed) {
+    banner.classList.add('visible');
+    document.getElementById('update-banner-detail').innerHTML =
+      ` — ${escHtml(s.latest_message || '')} <code>${escHtml(s.latest_short || '')}</code>`;
+    const link = document.getElementById('update-banner-view');
+    link.onclick = () => { if (s.latest_url) window.open(s.latest_url, '_blank'); };
+  } else {
+    banner.classList.remove('visible');
+  }
+}
+
+function renderUpdateStatusCard(s) {
+  const el = document.getElementById('update-status-card');
+  if (!el) return;
+  if (s.last_error) {
+    el.innerHTML = `
+      <div style="color: var(--sev-unplayable);">⚠ ${escHtml(s.last_error)}</div>
+      <div class="small" style="margin-top: 4px">Last checked: ${escHtml(s.last_checked || 'never')}</div>`;
+    return;
+  }
+  if (!s.latest_sha) {
+    el.innerHTML = `<div class="small">Not checked yet — click <strong>Check now</strong>.</div>`;
+    return;
+  }
+  const same = s.current_sha && s.current_sha === s.latest_sha;
+  if (same) {
+    el.innerHTML = `
+      <div style="color: var(--sev-ok);">✓ Up to date — running <code>${escHtml(s.current_short)}</code></div>
+      <div class="small" style="margin-top: 4px">${escHtml(s.latest_message || '')}</div>
+      <div class="small" style="margin-top: 2px">Last checked: ${escHtml(s.last_checked || '')}</div>`;
+    return;
+  }
+  el.innerHTML = `
+    <div><strong style="color: var(--sev-ok)">⬆ Update available</strong></div>
+    <div style="margin-top: 6px">
+      <span class="small">Current:</span> <code>${escHtml(s.current_short || 'unknown')}</code>
+      <span class="small" style="margin-left: 8px">→</span>
+      <span class="small">Latest:</span> <code>${escHtml(s.latest_short)}</code>
+    </div>
+    <div class="small" style="margin-top: 6px">${escHtml(s.latest_message || '')}</div>
+    ${s.latest_committed_at ? `<div class="small" style="margin-top: 2px">Committed ${escHtml(s.latest_committed_at)}</div>` : ''}
+    <div class="small" style="margin-top: 8px">
+      Pull with <code>git pull</code> in the Auditarr folder, then click <strong>Mark current as latest</strong>.
+    </div>
+  `;
+}
+
+async function forceUpdateCheck() {
+  toast('Checking GitHub…', 'ok');
+  try {
+    const r = await fetch('/api/update/refresh', { method: 'POST' });
+    const s = await r.json();
+    _updateState = s;
+    renderUpdateBanner(s);
+    renderUpdateStatusCard(s);
+    if (s.last_error) toast(s.last_error, 'err');
+    else if (s.available) toast('Update available!', 'ok');
+    else toast('Up to date', 'ok');
+  } catch { toast('Check failed', 'err'); }
+}
+
+async function markCurrentVersion() {
+  if (!_updateState || !_updateState.latest_sha) {
+    toast('Run "Check now" first', 'err');
+    return;
+  }
+  try {
+    const r = await fetch('/api/update/mark-current', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ sha: _updateState.latest_sha })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`Marked ${(d.current_sha||'').slice(0,7)} as current`, 'ok');
+      sessionStorage.removeItem('auditarr_update_dismissed');
+      loadUpdateStatus();
+    }
+  } catch { toast('Failed', 'err'); }
+}
+
+function dismissUpdateBanner() {
+  if (_updateState && _updateState.latest_sha) {
+    sessionStorage.setItem('auditarr_update_dismissed', _updateState.latest_sha);
+  }
+  document.getElementById('update-banner').classList.remove('visible');
+}
+
+// ──────────────────────────────────────────────────────────────
+// Bazarr / Tdarr action buttons (used from file detail modal)
+// ──────────────────────────────────────────────────────────────
+async function bazarrSearchSubs(serverId, mediaType, bazarrId) {
+  try {
+    const r = await fetch(`/api/bazarr/${serverId}/search-subs`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ media_type: mediaType, bazarr_id: bazarrId })
+    });
+    const d = await r.json();
+    toast(d.message || (d.ok ? 'OK' : 'Failed'), d.ok ? 'ok' : 'err');
+  } catch { toast('Failed', 'err'); }
+}
+
+async function bazarrDeleteSub(serverId, path, mediaType, bazarrId) {
+  if (!confirm('Tell Bazarr to delete this subtitle?')) return;
+  try {
+    const r = await fetch(`/api/bazarr/${serverId}/delete-sub`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ path, media_type: mediaType, bazarr_id: bazarrId })
+    });
+    const d = await r.json();
+    toast(d.message || (d.ok ? 'OK' : 'Failed'), d.ok ? 'ok' : 'err');
+  } catch { toast('Failed', 'err'); }
+}
+
+async function tdarrQueue(fileId, serverId, opts) {
+  try {
+    const r = await fetch(`/api/tdarr/${serverId}/queue`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ file_id: fileId, ...opts })
+    });
+    const d = await r.json();
+    toast(d.message || (d.ok ? 'Queued' : 'Failed'), d.ok ? 'ok' : 'err');
+  } catch { toast('Failed', 'err'); }
 }
