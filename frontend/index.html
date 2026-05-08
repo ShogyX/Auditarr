@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Auditarr</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    /* Black & white sleek palette */
+    --bg:        #0c0c0d;
+    --surface:   #131316;
+    --surface2:  #1a1a1d;
+    --surface3:  #232327;
+    --hover:     #2a2a2e;
+    --border:    #25252a;
+    --border2:   #34343a;
+
+    --text:      #f0f0f2;
+    --text2:     #b0b0b5;
+    --muted:     #6e6e75;
+    --dim:       #4a4a50;
+
+    --accent:    #ffffff;
+    --accent2:   #d4d4d8;
+
+    /* Severity colours - kept distinct but muted to match B&W aesthetic */
+    --sev-unplayable:         #ef4444;
+    --sev-always-transcode:   #f97316;
+    --sev-possible-transcode: #eab308;
+    --sev-high-bitrate:       #8b5cf6;
+    --sev-info:               #6e6e75;
+    --sev-ok:                 #22c55e;
+
+    --status-fail:      #ef4444;
+    --status-transcode: #eab308;
+    --status-partial:   #6e6e75;
+    --status-ok:        #22c55e;
+
+    --sans:  'Inter', system-ui, -apple-system, sans-serif;
+    --mono:  'JetBrains Mono', ui-monospace, Menlo, monospace;
+    --r:     6px;
+    --r2:    10px;
+    --sidebar: 230px;
+    --topbar: 56px;
+  }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    font-size: 13.5px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  button { font-family: inherit; }
+  input, select, textarea { font-family: inherit; color: var(--text); }
+  code { font-family: var(--mono); font-size: 0.9em; }
+  a { color: var(--text); }
+
+  /* ═══ Sidebar ═══ */
+  #sidebar {
+    width: var(--sidebar); min-width: var(--sidebar);
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    height: 100vh; overflow: hidden;
+  }
+  .brand {
+    padding: 18px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .brand-icon {
+    width: 28px; height: 28px;
+    background: var(--text);
+    color: var(--bg);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 14px;
+  }
+  .brand-name { font-weight: 700; font-size: 15px; letter-spacing: -0.3px; }
+  .brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; margin-top: 1px; font-weight: 500; }
+
+  nav { padding: 12px 8px; flex: 1; overflow-y: auto; }
+  .nav-section { margin-bottom: 16px; }
+  .nav-label { font-size: 10px; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; padding: 0 12px 8px; font-weight: 600; }
+
+  .nav-btn {
+    display: flex; align-items: center; gap: 11px;
+    width: 100%; padding: 8px 12px;
+    background: none; border: none; color: var(--text2);
+    border-radius: var(--r); cursor: pointer;
+    font-size: 13px; font-weight: 500;
+    transition: background 0.12s, color 0.12s;
+    text-align: left;
+  }
+  .nav-btn:hover { background: var(--surface2); color: var(--text); }
+  .nav-btn.active { background: var(--surface3); color: var(--text); }
+  .nav-btn .icon { font-size: 14px; width: 18px; text-align: center; opacity: 0.85; }
+  .nav-btn .badge { margin-left: auto; font-size: 10px; padding: 2px 6px; border-radius: 10px; background: var(--border2); color: var(--text2); font-weight: 600; }
+
+  .scan-area { padding: 12px; border-top: 1px solid var(--border); }
+  .btn-scan {
+    width: 100%; padding: 11px;
+    background: var(--text); color: var(--bg);
+    border: none; border-radius: var(--r);
+    font-weight: 600; font-size: 13px;
+    cursor: pointer; transition: opacity 0.15s;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-bottom: 6px;
+  }
+  .btn-scan:hover:not(:disabled) { opacity: 0.85; }
+  .btn-scan:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-scan.secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border2); }
+  .btn-scan.secondary:hover:not(:disabled) { border-color: var(--text2); background: var(--surface3); opacity: 1; }
+
+  .progress-wrap { margin-bottom: 8px; }
+  .progress-bar-bg { background: var(--surface3); border-radius: 3px; height: 4px; overflow: hidden; }
+  .progress-bar { height: 100%; background: var(--text); transition: width 0.3s; width: 0%; }
+  .progress-text { font-size: 10px; color: var(--muted); margin-top: 5px; font-family: var(--mono); }
+
+  /* ═══ Main ═══ */
+  #main { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  #topbar {
+    height: var(--topbar); min-height: var(--topbar);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+    display: flex; align-items: center; gap: 14px;
+    background: var(--surface);
+  }
+  .top-title { font-size: 16px; font-weight: 600; flex: 1; letter-spacing: -0.2px; }
+  .top-sub { font-size: 11px; color: var(--muted); margin-left: 8px; font-weight: 500; }
+
+  .top-input {
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: var(--r);
+    padding: 7px 12px; font-size: 12.5px;
+    width: 240px; outline: none;
+    transition: border 0.15s;
+  }
+  .top-input:focus { border-color: var(--text2); }
+  .top-input::placeholder { color: var(--muted); }
+
+  #content { flex: 1; overflow: hidden; position: relative; }
+  .view { display: none; height: 100%; overflow-y: auto; }
+  .view.active { display: block; }
+
+  /* ═══ Welcome ═══ */
+  .welcome {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: var(--text2); gap: 14px; padding: 40px;
+    text-align: center;
+  }
+  .welcome-icon { font-size: 64px; opacity: 0.12; }
+  .welcome h2 { font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: -0.4px; }
+  .welcome p { font-size: 13px; max-width: 440px; line-height: 1.7; color: var(--text2); }
+
+  /* ═══ Dashboard ═══ */
+  #view-dashboard { padding: 24px; }
+  .dash-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r2);
+    padding: 18px 20px;
+  }
+  .panel-title {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 1.4px; text-transform: uppercase;
+    font-weight: 600; margin-bottom: 16px;
+  }
+  .panel-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+
+  /* Health hero */
+  .health-hero {
+    display: flex; align-items: center; gap: 22px; margin-bottom: 16px;
+    padding-bottom: 16px; border-bottom: 1px solid var(--border);
+  }
+  .health-score-wrap { display: flex; align-items: baseline; gap: 6px; }
+  .health-score { font-size: 56px; font-weight: 800; letter-spacing: -2px; line-height: 1; }
+  .health-pct { font-size: 18px; color: var(--muted); font-weight: 500; }
+  .health-meta { flex: 1; }
+  .health-label { font-size: 11px; color: var(--muted); letter-spacing: 1.4px; text-transform: uppercase; font-weight: 600; }
+  .health-detail { font-size: 13px; margin-top: 4px; line-height: 1.6; color: var(--text2); }
+
+  /* Severity bars */
+  .sev-list { display: flex; flex-direction: column; gap: 10px; }
+  .sev-row {
+    display: grid;
+    grid-template-columns: 18px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--r);
+    cursor: pointer;
+    transition: background 0.12s;
+    border: 1px solid transparent;
+  }
+  .sev-row:hover { background: var(--surface2); border-color: var(--border); }
+  .sev-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .sev-dot.unplayable         { background: var(--sev-unplayable); }
+  .sev-dot.always_transcode   { background: var(--sev-always-transcode); }
+  .sev-dot.possible_transcode { background: var(--sev-possible-transcode); }
+  .sev-dot.high_bitrate       { background: var(--sev-high-bitrate); }
+  .sev-dot.info               { background: var(--sev-info); }
+  .sev-dot.ok                 { background: var(--sev-ok); }
+  .sev-info-col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .sev-name-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .sev-name { font-size: 13px; font-weight: 500; color: var(--text); }
+  .sev-bar-bg { background: var(--surface3); border-radius: 2px; height: 4px; overflow: hidden; }
+  .sev-bar-fill { height: 100%; transition: width 0.5s ease; }
+  .sev-bar-fill.unplayable         { background: var(--sev-unplayable); }
+  .sev-bar-fill.always_transcode   { background: var(--sev-always-transcode); }
+  .sev-bar-fill.possible_transcode { background: var(--sev-possible-transcode); }
+  .sev-bar-fill.high_bitrate       { background: var(--sev-high-bitrate); }
+  .sev-bar-fill.info               { background: var(--sev-info); }
+  .sev-bar-fill.ok                 { background: var(--sev-ok); }
+  .sev-count { font-family: var(--mono); font-size: 13px; font-weight: 600; min-width: 50px; text-align: right; }
+
+  /* Stat tiles */
+  .tile-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  }
+  .tile {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px 14px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .tile:hover { background: var(--surface3); border-color: var(--border2); }
+  .tile-val { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; line-height: 1; }
+  .tile-label { font-size: 10.5px; color: var(--muted); margin-top: 6px; font-weight: 500; letter-spacing: 0.3px; }
+
+  /* Categories breakdown row */
+  .cat-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 10px; border-radius: var(--r);
+    cursor: pointer; transition: background 0.12s;
+    border: 1px solid transparent;
+  }
+  .cat-row:hover { background: var(--surface2); border-color: var(--border); }
+  .cat-icon { font-size: 16px; width: 24px; text-align: center; opacity: 0.7; }
+  .cat-name { flex: 1; font-size: 13px; }
+  .cat-count { font-family: var(--mono); font-size: 13px; color: var(--text2); font-weight: 500; }
+
+  /* Bar chart */
+  .bars { display: flex; flex-direction: column; gap: 6px; }
+  .bar-row { display: grid; grid-template-columns: 110px 1fr 30px; align-items: center; gap: 10px; }
+  .bar-label { font-size: 12px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { background: var(--surface3); border-radius: 2px; height: 6px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--text2); transition: width 0.6s ease; }
+  .bar-count { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
+
+  /* ═══ Files view ═══ */
+  #view-files { display: none; flex-direction: column; height: 100%; }
+  #view-files.active { display: flex; }
+
+  /* Subnav (categories: Media | Subtitles | Junk | etc) */
+  .subnav {
+    display: flex; gap: 4px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    overflow-x: auto;
+  }
+  .subnav-btn {
+    padding: 7px 14px; border: 1px solid transparent; background: none;
+    color: var(--text2); border-radius: var(--r);
+    font-size: 12.5px; cursor: pointer; transition: all 0.12s;
+    white-space: nowrap; font-weight: 500;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .subnav-btn:hover { background: var(--surface2); color: var(--text); }
+  .subnav-btn.active { background: var(--surface3); color: var(--text); border-color: var(--border2); }
+  .subnav-btn .count { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-left: 2px; }
+  .subnav-btn.active .count { color: var(--text2); }
+
+  /* Filter bar */
+  .filter-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-wrap: wrap;
+  }
+  .chip {
+    padding: 5px 12px; border-radius: 999px;
+    border: 1px solid var(--border2); background: none;
+    color: var(--text2); font-size: 11.5px;
+    cursor: pointer; transition: all 0.12s;
+    display: flex; align-items: center; gap: 5px;
+    font-weight: 500;
+  }
+  .chip:hover { border-color: var(--text2); color: var(--text); }
+  .chip.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .chip-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .chip-dot.unplayable         { background: var(--sev-unplayable); }
+  .chip-dot.always_transcode   { background: var(--sev-always-transcode); }
+  .chip-dot.possible_transcode { background: var(--sev-possible-transcode); }
+  .chip-dot.high_bitrate       { background: var(--sev-high-bitrate); }
+  .chip-dot.info               { background: var(--sev-info); }
+  .chip-dot.ok                 { background: var(--sev-ok); }
+
+  .filter-spacer { flex: 1; }
+  .file-count { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+
+  /* Files list (cards, not table) */
+  .files-list { flex: 1; overflow-y: auto; padding: 6px 16px 16px; }
+
+  .file-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--r);
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 14px;
+    align-items: center;
+  }
+  .file-card:hover { background: var(--surface2); }
+  .file-card.unplayable         { border-left-color: var(--sev-unplayable); }
+  .file-card.always_transcode   { border-left-color: var(--sev-always-transcode); }
+  .file-card.possible_transcode { border-left-color: var(--sev-possible-transcode); }
+  .file-card.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
+  .file-card.info               { border-left-color: var(--sev-info); }
+  .file-card.ok                 { border-left-color: var(--sev-ok); }
+
+  .file-card .check {
+    margin: 0; cursor: pointer; accent-color: var(--text); width: 14px; height: 14px;
+  }
+
+  .file-main { min-width: 0; }
+  .file-title-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  }
+  .file-name {
+    font-size: 14.5px; font-weight: 600; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    letter-spacing: -0.2px;
+  }
+  .file-path-row {
+    font-size: 11px; color: var(--muted);
+    font-family: var(--mono);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-bottom: 6px;
+  }
+  .file-meta-row {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; color: var(--text2); flex-wrap: wrap;
+  }
+  .file-meta-row .meta { display: inline-flex; align-items: center; gap: 4px; }
+  .file-meta-row .meta-icon { opacity: 0.6; font-size: 12px; }
+  .file-meta-row .sep { color: var(--dim); }
+
+  /* Severity badge */
+  .sev-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border: 1px solid;
+  }
+  .sev-badge.unplayable         { background: rgba(239,68,68,0.10);  color: var(--sev-unplayable);         border-color: rgba(239,68,68,0.4); }
+  .sev-badge.always_transcode   { background: rgba(249,115,22,0.10); color: var(--sev-always-transcode);   border-color: rgba(249,115,22,0.4); }
+  .sev-badge.possible_transcode { background: rgba(234,179,8,0.10);  color: var(--sev-possible-transcode); border-color: rgba(234,179,8,0.4); }
+  .sev-badge.high_bitrate       { background: rgba(139,92,246,0.10); color: var(--sev-high-bitrate);       border-color: rgba(139,92,246,0.4); }
+  .sev-badge.info               { background: var(--surface3);       color: var(--text2);                  border-color: var(--border2); }
+  .sev-badge.ok                 { background: rgba(34,197,94,0.08);  color: var(--sev-ok);                 border-color: rgba(34,197,94,0.3); }
+
+  .file-actions { display: flex; align-items: center; gap: 4px; }
+
+  /* arr badges */
+  .arr-pill {
+    display: inline-block; padding: 1px 7px; font-size: 10px;
+    border-radius: 3px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px;
+    background: var(--surface3); color: var(--text2);
+    border: 1px solid var(--border2);
+  }
+  .arr-pill.sonarr { color: #5b8fff; border-color: rgba(91,143,255,0.3); }
+  .arr-pill.radarr { color: #ffaa55; border-color: rgba(255,170,85,0.3); }
+  .monitored-pill {
+    display: inline-block; padding: 1px 7px; font-size: 10px;
+    border-radius: 3px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.4px;
+  }
+  .monitored-pill.on  { background: rgba(34,197,94,0.10); color: var(--sev-ok); }
+  .monitored-pill.off { background: var(--surface3); color: var(--muted); }
+
+  /* Issue chips inside card */
+  .issues-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; max-width: 100%; }
+  .issue-chip {
+    padding: 2px 8px; border-radius: 3px; font-size: 10.5px;
+    background: var(--surface3); color: var(--text2);
+    border: 1px solid var(--border2);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 280px;
+  }
+  .issue-chip.unplayable         { color: var(--sev-unplayable); border-color: rgba(239,68,68,0.3); }
+  .issue-chip.always_transcode   { color: var(--sev-always-transcode); border-color: rgba(249,115,22,0.3); }
+  .issue-chip.possible_transcode { color: var(--sev-possible-transcode); border-color: rgba(234,179,8,0.3); }
+  .issue-chip.high_bitrate       { color: var(--sev-high-bitrate); border-color: rgba(139,92,246,0.3); }
+  .issue-chip.info               { color: var(--text2); }
+
+  .icon-btn {
+    background: none; border: 1px solid var(--border2);
+    color: var(--text2);
+    width: 30px; height: 30px;
+    border-radius: var(--r);
+    cursor: pointer; transition: all 0.12s;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+  }
+  .icon-btn:hover { background: var(--surface3); color: var(--text); border-color: var(--text2); }
+  .icon-btn.danger:hover { color: var(--sev-unplayable); border-color: var(--sev-unplayable); }
+
+  /* Bulk bar */
+  .bulk-bar {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface2);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .bulk-bar.hidden { display: none; }
+  .bulk-count { font-size: 12px; color: var(--text); font-weight: 600; }
+
+  .empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 60px 20px; gap: 10px; color: var(--muted); text-align: center;
+  }
+  .empty-icon { font-size: 36px; opacity: 0.2; }
+
+  /* ═══ Settings (Integrations + Config) ═══ */
+  .settings-wrap { padding: 24px; max-width: 800px; }
+  .settings-section { margin-bottom: 28px; }
+  .settings-section-title {
+    font-size: 14px; font-weight: 700; margin-bottom: 14px;
+    padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .settings-section-title .help { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: auto; }
+
+  .field { margin-bottom: 14px; }
+  .field-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; display: block; text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+  .field-input {
+    width: 100%; padding: 9px 12px;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); border-radius: var(--r);
+    font-size: 13px; outline: none;
+    transition: border 0.15s;
+  }
+  .field-input:focus { border-color: var(--text2); }
+  .field-help { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; background: var(--surface2);
+    border: 1px solid var(--border); border-radius: var(--r);
+    font-size: 11.5px; font-family: var(--mono);
+  }
+  .tag-x { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0; line-height: 1; }
+  .tag-x:hover { color: var(--sev-unplayable); }
+  .tag-input-wrap { display: flex; gap: 6px; margin-top: 6px; }
+
+  .btn {
+    padding: 9px 16px; border-radius: var(--r);
+    border: 1px solid var(--border2); background: var(--surface2);
+    color: var(--text); font-size: 12.5px; font-weight: 500;
+    cursor: pointer; transition: all 0.12s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: var(--surface3); border-color: var(--text2); }
+  .btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
+  .btn-primary:hover { opacity: 0.85; background: var(--text); }
+  .btn-danger { background: rgba(239,68,68,0.1); color: var(--sev-unplayable); border-color: rgba(239,68,68,0.4); }
+  .btn-danger:hover { background: rgba(239,68,68,0.15); border-color: var(--sev-unplayable); }
+  .btn-sm { padding: 5px 10px; font-size: 11.5px; }
+
+  .toggle {
+    position: relative; width: 36px; height: 20px;
+    background: var(--surface3); border: 1px solid var(--border2);
+    border-radius: 10px; cursor: pointer; transition: all 0.2s; flex-shrink: 0;
+  }
+  .toggle.on { background: var(--text); border-color: var(--text); }
+  .toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; background: var(--bg); border-radius: 50%;
+    transition: left 0.2s;
+  }
+  .toggle.on::after { left: 18px; }
+  .toggle.disabled { opacity: 0.4; pointer-events: none; }
+  .toggle-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; }
+  .toggle-label { font-size: 13px; flex: 1; }
+  .toggle-help { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  .range-row { display: flex; align-items: center; gap: 12px; }
+  .range-row input[type="range"] { flex: 1; accent-color: var(--text); }
+  .range-val { font-family: var(--mono); font-size: 13px; min-width: 50px; text-align: right; color: var(--text); font-weight: 600; }
+
+  /* Integration cards */
+  .int-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 14px 16px; margin-bottom: 8px;
+  }
+  .int-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .int-card-name { font-weight: 600; font-size: 14px; flex: 1; }
+  .int-card-kind { font-size: 10.5px; color: var(--muted); padding: 2px 8px; background: var(--surface3); border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+  .int-card-meta { font-size: 11.5px; color: var(--muted); font-family: var(--mono); margin-top: 4px; }
+  .int-card-status { font-size: 11px; margin-top: 6px; }
+  .int-card-status.ok { color: var(--sev-ok); }
+  .int-card-status.err { color: var(--sev-unplayable); }
+  .webhook-box {
+    margin-top: 8px; padding: 8px 10px;
+    background: var(--surface2); border-radius: var(--r);
+    font-family: var(--mono); font-size: 10.5px;
+    color: var(--text2); user-select: all;
+    word-break: break-all; border: 1px solid var(--border);
+  }
+
+  /* Plugin picker */
+  .plugin-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .plugin-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px 14px;
+    cursor: pointer; transition: all 0.12s;
+  }
+  .plugin-card:hover { border-color: var(--text2); background: var(--surface3); }
+  .plugin-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .plugin-card-name { font-weight: 600; font-size: 13.5px; }
+  .plugin-card-desc { font-size: 11px; color: var(--muted); line-height: 1.5; }
+  .plugin-tags { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+  .plugin-tag { font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: var(--surface3); color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+
+  /* Automation rules */
+  .rule-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px 14px;
+    margin-bottom: 8px; display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center;
+  }
+  .rule-name { font-weight: 600; font-size: 13px; }
+  .rule-desc { font-size: 11.5px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+
+  /* ═══ Modal ═══ */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.78); z-index: 100; display: none; align-items: center; justify-content: center; padding: 20px; }
+  .modal-bg.open { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 12px; padding: 22px;
+    max-height: 92vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    animation: mIn 0.18s ease;
+  }
+  .modal.sm { width: 460px; max-width: 100%; }
+  .modal.md { width: 640px; max-width: 100%; }
+  .modal.lg { width: 940px; max-width: 100%; }
+  @keyframes mIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+
+  .modal-head {
+    font-size: 16px; font-weight: 700; margin-bottom: 16px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .modal-head .x { margin-left: auto; }
+  .modal-body { margin-bottom: 18px; }
+  .modal-foot { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* File detail */
+  .detail-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .detail-tab {
+    padding: 8px 14px; background: none; border: none;
+    color: var(--muted); cursor: pointer; font-size: 12.5px;
+    border-bottom: 2px solid transparent; font-weight: 500;
+  }
+  .detail-tab.active { color: var(--text); border-bottom-color: var(--text); }
+  .detail-tab:hover { color: var(--text); }
+  .detail-pane { display: none; }
+  .detail-pane.active { display: block; }
+
+  .meta-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 16px; font-size: 12.5px; margin-bottom: 16px; }
+  .meta-grid dt { color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10.5px; font-weight: 600; }
+  .meta-grid dd { color: var(--text); word-break: break-word; }
+
+  /* Unified device matrix in modal */
+  .matrix-explainer { font-size: 11.5px; color: var(--text2); margin-bottom: 12px; line-height: 1.6; }
+  .matrix-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; margin-bottom: 16px; }
+  .device-cell {
+    padding: 9px 11px; border-radius: var(--r);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-left: 3px solid;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center;
+  }
+  .device-cell:hover { background: var(--surface3); }
+  .device-cell.unplayable          { border-left-color: var(--sev-unplayable);         background: rgba(239,68,68,0.06); }
+  .device-cell.always_transcode    { border-left-color: var(--sev-always-transcode);   background: rgba(249,115,22,0.05); }
+  .device-cell.possible_transcode  { border-left-color: var(--sev-possible-transcode); background: rgba(234,179,8,0.05); }
+  .device-cell.high_bitrate        { border-left-color: var(--sev-high-bitrate);       background: rgba(139,92,246,0.05); }
+  .device-cell.info                { border-left-color: var(--sev-info); }
+  .device-cell.ok                  { border-left-color: var(--sev-ok); }
+  .device-name { font-size: 11.5px; font-weight: 500; color: var(--text); }
+  .device-issue-count { font-family: var(--mono); font-size: 10px; color: var(--muted); padding: 1px 6px; background: var(--surface3); border-radius: 8px; }
+  .device-status-icon { font-size: 13px; }
+  .device-status-icon.ok        { color: var(--sev-ok); }
+  .device-status-icon.transcode { color: var(--sev-possible-transcode); }
+  .device-status-icon.fail      { color: var(--sev-unplayable); }
+  .device-status-icon.partial   { color: var(--sev-info); }
+
+  /* Device cell expanded panel */
+  .device-issues-panel {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px;
+    margin-top: 8px;
+  }
+  .device-issues-panel-head { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; font-weight: 600; }
+  .device-issue-item {
+    padding: 8px 10px; background: var(--surface);
+    border-radius: var(--r); margin-bottom: 4px;
+    font-size: 12px; display: flex; align-items: center; gap: 10px;
+  }
+
+  /* Issue card */
+  .issue-card {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-left: 3px solid; border-radius: var(--r);
+    padding: 14px 16px; margin-bottom: 10px;
+  }
+  .issue-card.unplayable         { border-left-color: var(--sev-unplayable); }
+  .issue-card.always_transcode   { border-left-color: var(--sev-always-transcode); }
+  .issue-card.possible_transcode { border-left-color: var(--sev-possible-transcode); }
+  .issue-card.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
+  .issue-card.info               { border-left-color: var(--sev-info); }
+  .issue-card-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
+  .issue-card-title { font-weight: 600; font-size: 14px; flex: 1; line-height: 1.4; }
+  .issue-card-detail { font-size: 12.5px; color: var(--text2); line-height: 1.7; }
+  .issue-card-meta { margin-top: 10px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+
+  /* Probe JSON */
+  pre.probe { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--r); padding: 14px; font-size: 11px; max-height: 460px; overflow: auto; color: var(--text2); }
+
+  /* Toasts */
+  #toast-area { position: fixed; bottom: 20px; right: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    padding: 10px 16px; border-radius: var(--r);
+    font-size: 12.5px;
+    animation: tIn 0.2s ease;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--border2);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    max-width: 360px;
+  }
+  .toast.ok  { border-color: rgba(34,197,94,0.5); }
+  .toast.err { border-color: rgba(239,68,68,0.5); }
+  @keyframes tIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; } }
+  .small { font-size: 11px; color: var(--muted); }
+
+  select.field-input {
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236e6e75' d='M6 8L2 4h8z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 30px;
+  }
+
+  /* Dashboard category tabs */
+  .dash-tabs { display: flex; gap: 6px; padding: 0 24px; padding-top: 18px; padding-bottom: 0; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+  .dash-tab {
+    padding: 10px 18px; background: none; border: none; color: var(--text2);
+    cursor: pointer; font-size: 13px; font-weight: 500;
+    border-bottom: 2px solid transparent; transition: all 0.15s;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .dash-tab:hover { color: var(--text); }
+  .dash-tab.active { color: var(--text); border-bottom-color: var(--text); }
+  .dash-tab .count { font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 1px 7px; background: var(--surface3); border-radius: 8px; }
+  .dash-tab.active .count { color: var(--text2); }
+
+  #view-dashboard { padding: 0; }
+  .dash-body { padding: 18px 24px 24px; }
+
+  /* File card - tighter for performance */
+  .file-card { padding: 11px 14px; }
+  .file-name { font-size: 14px; }
+  .file-card .check { width: 13px; height: 13px; }
+
+  /* Rule builder */
+  .rule-builder {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 14px; margin-bottom: 12px;
+  }
+  .rule-cond-row {
+    display: grid; grid-template-columns: 150px 130px 1fr auto; gap: 6px;
+    align-items: center; margin-bottom: 6px;
+  }
+  .rule-cond-row .field-input { padding: 7px 10px; font-size: 12px; }
+  .rule-cond-row .icon-btn { width: 28px; height: 28px; }
+  .match-toggle { display: inline-flex; gap: 0; border: 1px solid var(--border2); border-radius: var(--r); overflow: hidden; }
+  .match-toggle button { padding: 5px 14px; background: none; border: none; color: var(--text2); cursor: pointer; font-size: 11.5px; }
+  .match-toggle button.active { background: var(--text); color: var(--bg); }
+  .json-editor {
+    width: 100%; min-height: 220px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    font-family: var(--mono); font-size: 12px; padding: 10px; border-radius: var(--r);
+    outline: none; resize: vertical;
+  }
+  .json-editor:focus { border-color: var(--text2); }
+  .json-toggle-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .preview-box {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--r); padding: 12px; margin-top: 10px;
+  }
+  .preview-count { font-size: 14px; font-weight: 600; }
+  .preview-sample { font-family: var(--mono); font-size: 11px; color: var(--text2); margin-top: 6px; max-height: 160px; overflow-y: auto; }
+  .preview-sample div { padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Compact integration cards */
+  .int-card { padding: 12px 14px; }
+
+  /* Custom rule list cards */
+  .custom-rule-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid; border-radius: var(--r); padding: 12px 14px;
+    margin-bottom: 8px;
+    display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+  }
+  .custom-rule-card.unplayable         { border-left-color: var(--sev-unplayable); }
+  .custom-rule-card.always_transcode   { border-left-color: var(--sev-always-transcode); }
+  .custom-rule-card.possible_transcode { border-left-color: var(--sev-possible-transcode); }
+  .custom-rule-card.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
+  .custom-rule-card.info               { border-left-color: var(--sev-info); }
+  .custom-rule-card.ok                 { border-left-color: var(--sev-ok); }
+
+  .custom-rule-name { font-weight: 600; font-size: 13.5px; }
+  .custom-rule-desc { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+  .custom-rule-cond { font-family: var(--mono); font-size: 11px; color: var(--text2); margin-top: 4px; }
+
+  /* Compat-mode segmented selector */
+  .seg-row { display: flex; gap: 0; border: 1px solid var(--border2); border-radius: var(--r); overflow: hidden; max-width: 320px; }
+  .seg-row button {
+    flex: 1; padding: 8px 12px; background: none; border: none; color: var(--text2);
+    cursor: pointer; font-size: 12.5px; transition: all 0.15s; font-weight: 500;
+  }
+  .seg-row button.active { background: var(--text); color: var(--bg); }
+  .seg-row button:not(:last-child) { border-right: 1px solid var(--border2); }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="brand">
+    <div class="brand-icon">A</div>
+    <div>
+      <div class="brand-name">Auditarr</div>
+      <div class="brand-sub">Library auditor</div>
+    </div>
+  </div>
+
+  <nav>
+    <div class="nav-section">
+      <div class="nav-label">Views</div>
+      <button class="nav-btn active" id="nav-dashboard" onclick="showView('dashboard')"><span class="icon">◈</span> Dashboard</button>
+      <button class="nav-btn" id="nav-files" onclick="showView('files')"><span class="icon">≡</span> Files <span class="badge" id="badge-files">0</span></button>
+      <button class="nav-btn" id="nav-integrations" onclick="showView('integrations')"><span class="icon">⌬</span> Integrations</button>
+      <button class="nav-btn" id="nav-rules" onclick="showView('rules')"><span class="icon">⊕</span> Custom Rules</button>
+      <button class="nav-btn" id="nav-automation" onclick="showView('automation')"><span class="icon">⚙</span> Automation</button>
+      <button class="nav-btn" id="nav-config" onclick="showView('config')"><span class="icon">✎</span> Settings</button>
+    </div>
+  </nav>
+
+  <div class="scan-area">
+    <div class="progress-wrap" id="progress-wrap" style="display:none">
+      <div class="progress-bar-bg"><div class="progress-bar" id="progress-bar"></div></div>
+      <div class="progress-text" id="progress-text">0 / 0</div>
+    </div>
+    <button class="btn-scan" id="btn-scan" onclick="startScan()">▶ Run Full Scan</button>
+    <button class="btn-scan secondary" id="btn-reeval" onclick="startReeval()" title="Re-evaluate stored data — fast, no ffprobe">⚡ Re-eval Rules</button>
+  </div>
+</aside>
+
+<main id="main">
+  <header id="topbar">
+    <span class="top-title" id="top-title">Dashboard</span>
+    <span class="top-sub" id="top-sub"></span>
+    <input class="top-input" type="text" id="search-input" placeholder="Search files…" oninput="onSearch()" style="display:none" />
+  </header>
+
+  <div id="content">
+
+    <!-- Dashboard -->
+    <div class="view active" id="view-dashboard">
+      <div class="welcome" id="welcome-dash">
+        <div class="welcome-icon">◈</div>
+        <h2>Welcome to Auditarr</h2>
+        <p>Configure your library paths in <strong>Settings</strong>, then click <strong>Run Full Scan</strong>. All findings stay in the database — when rules change, just <strong>Re-eval Rules</strong> for instant updates without re-scanning.</p>
+      </div>
+
+      <div id="dashboard-content" style="display:none">
+        <div class="dash-tabs" id="dash-tabs">
+          <button class="dash-tab active" data-cat="all" onclick="setDashCategory('all')">All <span class="count" id="cnt-all">0</span></button>
+          <button class="dash-tab" data-cat="media" onclick="setDashCategory('media')">🎬 Media <span class="count" id="cnt-media">0</span></button>
+          <button class="dash-tab" data-cat="subtitle" onclick="setDashCategory('subtitle')">💬 Subtitles <span class="count" id="cnt-subtitle">0</span></button>
+          <button class="dash-tab" data-cat="image" onclick="setDashCategory('image')">🖼 Images <span class="count" id="cnt-image">0</span></button>
+          <button class="dash-tab" data-cat="metadata" onclick="setDashCategory('metadata')">📄 Metadata <span class="count" id="cnt-metadata">0</span></button>
+          <button class="dash-tab" data-cat="junk" onclick="setDashCategory('junk')">❓ Junk <span class="count" id="cnt-junk">0</span></button>
+        </div>
+
+        <div class="dash-body">
+          <div class="dash-grid">
+            <div class="panel">
+              <div class="panel-title-row">
+                <div class="panel-title" id="health-panel-title">Library Health</div>
+                <span class="small" id="health-meta-side"></span>
+              </div>
+              <div class="health-hero">
+                <div class="health-score-wrap">
+                  <div class="health-score" id="health-score">—</div>
+                  <div class="health-pct">/ 100</div>
+                </div>
+                <div class="health-meta">
+                  <div class="health-label" id="health-status">No data</div>
+                  <div class="health-detail" id="health-detail">Run a scan to see results.</div>
+                </div>
+              </div>
+              <div class="sev-list" id="severity-bars"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-title">Library Composition</div>
+              <div class="tile-grid" id="tile-grid"></div>
+            </div>
+          </div>
+
+          <div class="dash-grid" style="grid-template-columns: 1fr 1fr">
+            <div class="panel">
+              <div class="panel-title">Top Issue Categories</div>
+              <div class="bars" id="issue-cat-bars"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-title" id="distrib-title">Video Codecs</div>
+              <div class="bars" id="codec-bars"></div>
+            </div>
+          </div>
+
+          <div class="dash-grid" style="grid-template-columns: 1fr 1fr" id="extra-charts">
+            <div class="panel">
+              <div class="panel-title">Audio Codecs</div>
+              <div class="bars" id="audio-bars"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-title">Resolutions</div>
+              <div class="bars" id="res-bars"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Files -->
+    <div class="view" id="view-files">
+      <div class="welcome" id="welcome-files">
+        <div class="welcome-icon">≡</div>
+        <h2>No files yet</h2>
+        <p>Run a scan first.</p>
+      </div>
+      <div id="files-wrap" style="display:none; height:100%; flex-direction:column">
+        <div class="subnav" id="cat-subnav"></div>
+
+        <div class="filter-bar" id="filter-bar">
+          <button class="chip active" onclick="setSeverity('all')" data-sev="all">All</button>
+          <button class="chip" onclick="setSeverity('unplayable')" data-sev="unplayable"><span class="chip-dot unplayable"></span>Unplayable</button>
+          <button class="chip" onclick="setSeverity('always_transcode')" data-sev="always_transcode"><span class="chip-dot always_transcode"></span>Always Transcode</button>
+          <button class="chip" onclick="setSeverity('possible_transcode')" data-sev="possible_transcode"><span class="chip-dot possible_transcode"></span>Possible Transcode</button>
+          <button class="chip" onclick="setSeverity('high_bitrate')" data-sev="high_bitrate"><span class="chip-dot high_bitrate"></span>High Bitrate</button>
+          <button class="chip" onclick="setSeverity('info')" data-sev="info"><span class="chip-dot info"></span>Info</button>
+          <button class="chip" onclick="setSeverity('ok')" data-sev="ok"><span class="chip-dot ok"></span>OK</button>
+          <span class="filter-spacer"></span>
+          <span class="file-count" id="file-count">0 files</span>
+        </div>
+
+        <div class="bulk-bar hidden" id="bulk-bar">
+          <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)" />
+          <span class="bulk-count" id="bulk-count">0 selected</span>
+          <button class="btn btn-sm" onclick="bulkRescan()">↻ Rescan</button>
+          <button class="btn btn-sm" onclick="bulkMoveDialog()">→ Move</button>
+          <button class="btn btn-sm btn-danger" onclick="bulkDelete()">✕ Delete</button>
+        </div>
+
+        <div class="files-list" id="files-list"></div>
+      </div>
+    </div>
+
+    <!-- Integrations -->
+    <div class="view" id="view-integrations">
+      <div class="settings-wrap">
+        <div class="settings-section">
+          <div class="settings-section-title">Connected Integrations <span class="help">External services that MediaAudit talks to</span></div>
+          <div id="int-list"></div>
+          <button class="btn" style="margin-top:10px" onclick="showPluginPicker()">+ Add integration</button>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Recent Webhook Events</div>
+          <div id="int-events"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Custom Rules -->
+    <div class="view" id="view-rules">
+      <div class="settings-wrap">
+        <div class="settings-section">
+          <div class="settings-section-title">Custom Rules
+            <span class="help">Define your own severity rules from file metadata</span>
+          </div>
+          <div class="field-help" style="margin-bottom: 12px">
+            Custom rules let you tag files with a severity based on their codec, size, bitrate, container, or any other field gathered during scan.
+            Click <strong>Re-eval Rules</strong> in the sidebar to apply them, or use <strong>Apply Rules Only</strong> below to update without re-evaluating built-ins.
+          </div>
+          <div id="custom-rules-list"></div>
+          <div style="display:flex; gap: 8px; margin-top: 12px">
+            <button class="btn btn-primary" onclick="showRuleEditor()">+ New Custom Rule</button>
+            <button class="btn" onclick="applyCustomRules()">▶ Apply Rules Only</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Automation -->
+    <div class="view" id="view-automation">
+      <div class="settings-wrap">
+        <div class="settings-section">
+          <div class="settings-section-title">Automation Rules <span class="help">Auto-toggle monitoring in Sonarr/Radarr based on file severity</span></div>
+          <div class="field-help" style="margin-bottom: 12px">When a file's worst severity matches a rule's condition, the linked monitor state will be set automatically. Rules run after every scan or re-evaluation.</div>
+          <div id="rules-list"></div>
+          <button class="btn" style="margin-top:10px" onclick="showAddRuleDialog()">+ New rule</button>
+          <button class="btn" style="margin-top:10px; margin-left: 6px" onclick="runAutomation()">▶ Run rules now</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Config -->
+    <div class="view" id="view-config">
+      <div class="settings-wrap">
+
+        <div class="settings-section">
+          <div class="settings-section-title">Compatibility Mode
+            <span class="help">Which media servers to evaluate against</span>
+          </div>
+          <div class="field-help" style="margin-bottom: 10px">
+            Each issue includes a per-device playback impact. Choose which ecosystem(s) to show in the device matrix.
+          </div>
+          <div class="seg-row">
+            <button id="compat-plex" data-mode="plex" onclick="setCompatMode('plex')">Plex only</button>
+            <button id="compat-jellyfin" data-mode="jellyfin" onclick="setCompatMode('jellyfin')">Jellyfin only</button>
+            <button id="compat-both" data-mode="both" onclick="setCompatMode('both')">Both</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Library Paths</div>
+          <div class="field-help">Folders that will be scanned. Will be walked recursively.</div>
+          <div id="paths-tags" class="tag-list"></div>
+          <div class="tag-input-wrap">
+            <input class="field-input" id="new-path" placeholder="/mnt/media/movies" />
+            <button class="btn" onclick="addPath()">+ Add</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Scheduled Scans</div>
+          <div class="toggle-row">
+            <div class="toggle" id="schedule-toggle" onclick="toggleSchedule()"></div>
+            <div style="flex:1">
+              <div class="toggle-label">Auto-scan library</div>
+              <div class="toggle-help">Run a full scan every day at the configured time.</div>
+            </div>
+          </div>
+          <div class="field" id="schedule-time-wrap" style="display:none; margin-top: 12px;">
+            <label class="field-label">Scan time (24h, server timezone)</label>
+            <input type="time" class="field-input" id="schedule-time" style="width:160px" />
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Scanner</div>
+          <div class="field">
+            <label class="field-label">Workers — <span class="range-val" id="workers-val">4</span></label>
+            <div class="range-row">
+              <input type="range" id="workers-range" min="1" max="16" value="4" oninput="document.getElementById('workers-val').textContent=this.value" />
+            </div>
+            <div class="field-help">Parallel ffprobe processes during full scan.</div>
+          </div>
+          <div class="field">
+            <label class="field-label">Sample offset — <span class="range-val" id="offset-val">60</span> sec</label>
+            <div class="range-row">
+              <input type="range" id="offset-range" min="0" max="300" value="60" oninput="document.getElementById('offset-val').textContent=this.value" />
+            </div>
+            <div class="field-help">How far into each file ffprobe samples; 60s avoids credits sequences.</div>
+          </div>
+          <div class="field">
+            <label class="field-label">Bitrate threshold — <span class="range-val" id="bitrate-val">80</span> Mbps</label>
+            <div class="range-row">
+              <input type="range" id="bitrate-range" min="10" max="200" step="5" value="80" oninput="document.getElementById('bitrate-val').textContent=this.value" />
+            </div>
+            <div class="field-help">Files above this bitrate get a "High Bitrate" severity flag.</div>
+          </div>
+          <div class="toggle-row">
+            <div class="toggle" id="prune-toggle" onclick="togglePrune()"></div>
+            <div style="flex:1">
+              <div class="toggle-label">Prune missing files on full scan</div>
+              <div class="toggle-help">Remove DB entries for files no longer on disk.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Ignore Patterns</div>
+          <div class="field-help">Filenames or path components to skip entirely (won't be added to the database).</div>
+          <div id="ignore-tags" class="tag-list"></div>
+          <div class="tag-input-wrap">
+            <input class="field-input" id="new-ignore" placeholder=".plexmatch" />
+            <button class="btn" onclick="addIgnore()">+ Add</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Media Extensions</div>
+          <div class="field-help">Files with these extensions will be probed by ffprobe.</div>
+          <div id="media-ext-tags" class="tag-list"></div>
+          <div class="tag-input-wrap">
+            <input class="field-input" id="new-media-ext" placeholder=".mkv" />
+            <button class="btn" onclick="addExt('media_extensions','new-media-ext')">+ Add</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Subtitle Extensions</div>
+          <div class="field-help">External subtitles. Will be paired to media files in the same folder by base name.</div>
+          <div id="subtitle-ext-tags" class="tag-list"></div>
+          <div class="tag-input-wrap">
+            <input class="field-input" id="new-subtitle-ext" placeholder=".srt" />
+            <button class="btn" onclick="addExt('subtitle_extensions','new-subtitle-ext')">+ Add</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Image / Metadata Extensions</div>
+          <div class="field-help">Cover art, NFOs etc — recorded but not analyzed beyond integrity.</div>
+          <div class="field-row">
+            <div>
+              <label class="field-label">Images</label>
+              <div id="image-ext-tags" class="tag-list"></div>
+              <div class="tag-input-wrap">
+                <input class="field-input" id="new-image-ext" placeholder=".jpg" />
+                <button class="btn" onclick="addExt('image_extensions','new-image-ext')">+ Add</button>
+              </div>
+            </div>
+            <div>
+              <label class="field-label">Metadata</label>
+              <div id="metadata-ext-tags" class="tag-list"></div>
+              <div class="tag-input-wrap">
+                <input class="field-input" id="new-metadata-ext" placeholder=".nfo" />
+                <button class="btn" onclick="addExt('metadata_extensions','new-metadata-ext')">+ Add</button>
+              </div>
+            </div>
+          </div>
+          <div class="field-help" style="margin-top: 8px">Anything not matching media, subtitle, image or metadata extensions falls into the <strong>Junk</strong> category.</div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">VirusTotal</div>
+          <div class="field">
+            <label class="field-label">API Key (free tier works)</label>
+            <input class="field-input" type="password" id="vt-key" placeholder="Free key from virustotal.com" />
+            <div class="field-help">Used to look up hashes of unknown / junk files.</div>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" onclick="saveConfig()">Save Configuration</button>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<!-- Modals -->
+<div class="modal-bg" id="modal-detail">
+  <div class="modal lg">
+    <div class="modal-head">
+      <span id="detail-title">File details</span>
+      <button class="icon-btn x" onclick="closeModal('modal-detail')">✕</button>
+    </div>
+    <div class="modal-body" id="detail-body"></div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-plugin-picker">
+  <div class="modal md">
+    <div class="modal-head">Add integration <button class="icon-btn x" onclick="closeModal('modal-plugin-picker')">✕</button></div>
+    <div class="modal-body">
+      <div class="field-help">Select the type of service to connect:</div>
+      <div class="plugin-grid" id="plugin-grid"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-add-int">
+  <div class="modal sm">
+    <div class="modal-head" id="add-int-head">Add integration <button class="icon-btn x" onclick="closeModal('modal-add-int')">✕</button></div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="field-label">Name</label>
+        <input class="field-input" id="add-int-name" />
+      </div>
+      <div class="field">
+        <label class="field-label">Base URL</label>
+        <input class="field-input" id="add-int-url" placeholder="http://localhost:8989" />
+      </div>
+      <div class="field">
+        <label class="field-label">API Key / Token</label>
+        <input class="field-input" id="add-int-key" type="password" />
+      </div>
+      <div class="field" id="add-int-poll-wrap">
+        <label class="field-label">Poll interval (seconds)</label>
+        <input class="field-input" id="add-int-poll" type="number" value="900" />
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-add-int')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAddInt()">Add</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-add-rule">
+  <div class="modal sm">
+    <div class="modal-head">New automation rule <button class="icon-btn x" onclick="closeModal('modal-add-rule')">✕</button></div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="field-label">Rule name</label>
+        <input class="field-input" id="rule-name" placeholder="Unmonitor unplayable files" />
+      </div>
+      <div class="field">
+        <label class="field-label">Apply to integration</label>
+        <select class="field-input" id="rule-int"></select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">When severity is</label>
+          <select class="field-input" id="rule-cmp">
+            <option value="at_least">at least</option>
+            <option value="at_most">at most</option>
+            <option value="equals">equals</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Severity</label>
+          <select class="field-input" id="rule-sev">
+            <option value="unplayable">Unplayable</option>
+            <option value="always_transcode">Always Transcode</option>
+            <option value="possible_transcode">Possible Transcode</option>
+            <option value="high_bitrate">High Bitrate</option>
+            <option value="info">Info</option>
+            <option value="ok">OK</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Then</label>
+        <select class="field-input" id="rule-action">
+          <option value="unmonitor">Unmonitor in *arr</option>
+          <option value="monitor">Monitor in *arr</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-add-rule')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveAddRule()">Save rule</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-rule-edit">
+  <div class="modal lg">
+    <div class="modal-head">
+      <span id="rule-editor-title">New Custom Rule</span>
+      <button class="icon-btn x" onclick="closeModal('modal-rule-edit')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label">Rule name</label>
+          <input class="field-input" id="rule-edit-name" placeholder="e.g. Big HEVC files" />
+        </div>
+        <div class="field">
+          <label class="field-label">Severity</label>
+          <select class="field-input" id="rule-edit-severity">
+            <option value="unplayable">Unplayable</option>
+            <option value="always_transcode">Always Transcode</option>
+            <option value="possible_transcode">Possible Transcode</option>
+            <option value="high_bitrate">High Bitrate</option>
+            <option value="info" selected>Info</option>
+            <option value="ok">OK</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label">Description (optional)</label>
+        <input class="field-input" id="rule-edit-description" placeholder="What does this rule do?" />
+      </div>
+
+      <div class="field">
+        <div class="json-toggle-row">
+          <label class="field-label" style="margin: 0">Conditions</label>
+          <span class="filter-spacer" style="flex:1"></span>
+          <div class="seg-row" style="max-width: 240px">
+            <button id="builder-mode-visual" class="active" onclick="switchBuilderMode('visual')">Visual</button>
+            <button id="builder-mode-json" onclick="switchBuilderMode('json')">JSON</button>
+          </div>
+        </div>
+
+        <div id="builder-visual">
+          <div class="rule-builder">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom: 10px">
+              <span style="font-size: 12px; color: var(--text2)">Match</span>
+              <div class="match-toggle">
+                <button id="match-all" class="active" onclick="setRuleMatch('all')">ALL</button>
+                <button id="match-any" onclick="setRuleMatch('any')">ANY</button>
+              </div>
+              <span style="font-size: 12px; color: var(--text2)">of these conditions:</span>
+            </div>
+            <div id="rule-conds"></div>
+            <button class="btn btn-sm" style="margin-top: 6px" onclick="addRuleCondition()">+ Add condition</button>
+          </div>
+        </div>
+
+        <div id="builder-json" style="display:none">
+          <textarea class="json-editor" id="rule-edit-json" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field-label">Issue message (shown to users)</label>
+        <input class="field-input" id="rule-edit-message" placeholder="What to show in the file's issue list" />
+      </div>
+      <div class="field">
+        <label class="field-label">Detail (long explanation)</label>
+        <input class="field-input" id="rule-edit-detail" placeholder="Why this matters and what to do about it" />
+      </div>
+
+      <div class="preview-box" id="rule-preview" style="display: none">
+        <div class="preview-count" id="rule-preview-count">— matches</div>
+        <div class="preview-sample" id="rule-preview-sample"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="testRule()">Test rule</button>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="closeModal('modal-rule-edit')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRule()">Save rule</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-rename">
+  <div class="modal sm">
+    <div class="modal-head">Rename file <button class="icon-btn x" onclick="closeModal('modal-rename')">✕</button></div>
+    <div class="modal-body">
+      <div class="small" id="rename-orig"></div>
+      <input class="field-input" id="rename-input" style="margin-top: 8px" />
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-rename')">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmRename()">Rename</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-move">
+  <div class="modal sm">
+    <div class="modal-head">Move file(s) <button class="icon-btn x" onclick="closeModal('modal-move')">✕</button></div>
+    <div class="modal-body">
+      <label class="field-label">Destination folder</label>
+      <input class="field-input" id="move-input" placeholder="/path/to/dest" />
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-move')">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmMove()">Move</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-delete">
+  <div class="modal sm">
+    <div class="modal-head">Delete file(s) <button class="icon-btn x" onclick="closeModal('modal-delete')">✕</button></div>
+    <div class="modal-body"><p id="delete-msg" class="small"></p></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-delete')">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="modal-rescan">
+  <div class="modal sm">
+    <div class="modal-head">Re-probe file(s)? <button class="icon-btn x" onclick="closeModal('modal-rescan')">✕</button></div>
+    <div class="modal-body" id="rescan-msg"></div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('modal-rescan')">Cancel</button>
+      <button class="btn btn-primary" onclick="confirmRescan()">Re-probe</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast-area"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
