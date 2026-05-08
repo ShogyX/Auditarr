@@ -766,6 +766,227 @@
   }
   .seg-row button.active { background: var(--text); color: var(--bg); }
   .seg-row button:not(:last-child) { border-right: 1px solid var(--border2); }
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Update banner
+  ───────────────────────────────────────────────────────────────────────── */
+  .update-banner {
+    display: none; padding: 10px 24px;
+    background: linear-gradient(90deg, rgba(34,197,94,0.12), rgba(34,197,94,0.04));
+    border-bottom: 1px solid rgba(34,197,94,0.3);
+    font-size: 12.5px;
+    align-items: center; gap: 14px;
+  }
+  .update-banner.visible { display: flex; }
+  .update-banner-icon { font-size: 16px; }
+  .update-banner-msg { flex: 1; color: var(--text); }
+  .update-banner-msg strong { color: var(--sev-ok); }
+  .update-banner-actions { display: flex; gap: 6px; }
+  .update-banner code { font-family: var(--mono); font-size: 11px; background: var(--surface3); padding: 1px 5px; border-radius: 3px; }
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Dashboard v2 — clean layout: Media center, side panels for other categories
+  ───────────────────────────────────────────────────────────────────────── */
+  .dash-v2 {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 16px;
+    padding: 22px 24px;
+  }
+  .dash-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .dash-side { display: flex; flex-direction: column; gap: 10px; }
+
+  /* Hero summary panel */
+  .hero {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r2);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 22px;
+    align-items: center;
+  }
+  .hero-score-block { display: flex; align-items: baseline; gap: 6px; }
+  .hero-score { font-size: 52px; font-weight: 800; letter-spacing: -2px; line-height: 1; }
+  .hero-score-pct { font-size: 16px; color: var(--muted); font-weight: 500; }
+  .hero-meta { min-width: 0; }
+  .hero-cat-name {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 1.5px; text-transform: uppercase; font-weight: 600;
+  }
+  .hero-status { font-size: 17px; font-weight: 700; margin-top: 2px; letter-spacing: -0.2px; }
+  .hero-detail { font-size: 12.5px; color: var(--text2); margin-top: 4px; line-height: 1.6; }
+  .hero-quick-stats { display: flex; gap: 22px; padding-left: 14px; border-left: 1px solid var(--border); }
+  .quick-stat { text-align: right; }
+  .quick-stat-val { font-size: 18px; font-weight: 700; line-height: 1; letter-spacing: -0.5px; }
+  .quick-stat-label { font-size: 10px; color: var(--muted); margin-top: 4px; letter-spacing: 0.4px; text-transform: uppercase; font-weight: 600; }
+
+  /* Severity grid (clickable tiles) */
+  .sev-grid {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r2);
+    padding: 16px 20px;
+  }
+  .sev-grid-head {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 1.4px; text-transform: uppercase;
+    font-weight: 600; margin-bottom: 12px;
+  }
+  .sev-tiles {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .sev-tile {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-left: 3px solid;
+    border-radius: var(--r);
+    padding: 11px 12px;
+    cursor: pointer;
+    transition: background 0.12s, transform 0.1s;
+  }
+  .sev-tile:hover { background: var(--surface3); transform: translateY(-1px); }
+  .sev-tile.unplayable         { border-left-color: var(--sev-unplayable); }
+  .sev-tile.always_transcode   { border-left-color: var(--sev-always-transcode); }
+  .sev-tile.possible_transcode { border-left-color: var(--sev-possible-transcode); }
+  .sev-tile.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
+  .sev-tile.info               { border-left-color: var(--sev-info); }
+  .sev-tile.ok                 { border-left-color: var(--sev-ok); }
+  .sev-tile-val { font-size: 22px; font-weight: 800; line-height: 1; letter-spacing: -0.5px; }
+  .sev-tile-label { font-size: 10px; color: var(--muted); margin-top: 5px; letter-spacing: 0.3px; text-transform: uppercase; font-weight: 600; }
+  .sev-tile.zero { opacity: 0.5; }
+
+  /* Media-stat panels (clickable bars) */
+  .stat-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r2);
+    padding: 16px 20px;
+  }
+  .stat-panel-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .stat-panel-title {
+    font-size: 11px; color: var(--muted);
+    letter-spacing: 1.4px; text-transform: uppercase; font-weight: 600;
+  }
+  .stat-panel-total { font-size: 11px; color: var(--text2); font-family: var(--mono); }
+
+  .clickable-bars { display: flex; flex-direction: column; gap: 5px; }
+  .cbar-row {
+    display: grid; grid-template-columns: 130px 1fr 50px;
+    align-items: center; gap: 10px;
+    padding: 6px 8px; border-radius: var(--r);
+    cursor: pointer; transition: background 0.12s;
+    border: 1px solid transparent;
+  }
+  .cbar-row:hover { background: var(--surface2); border-color: var(--border); }
+  .cbar-label { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+  .cbar-track { background: var(--surface3); border-radius: 2px; height: 6px; overflow: hidden; }
+  .cbar-fill { height: 100%; background: var(--text2); transition: width 0.5s; }
+  .cbar-count { font-family: var(--mono); font-size: 11.5px; color: var(--muted); text-align: right; font-weight: 500; }
+
+  .stat-row-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* Side category cards */
+  .cat-side-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--border);
+    border-radius: var(--r);
+    padding: 12px 14px;
+    cursor: pointer; transition: all 0.12s;
+  }
+  .cat-side-card:hover { background: var(--surface2); border-color: var(--border2); }
+  .cat-side-card.unplayable         { border-left-color: var(--sev-unplayable); }
+  .cat-side-card.always_transcode   { border-left-color: var(--sev-always-transcode); }
+  .cat-side-card.possible_transcode { border-left-color: var(--sev-possible-transcode); }
+  .cat-side-card.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
+  .cat-side-card.info               { border-left-color: var(--sev-info); }
+  .cat-side-card.ok                 { border-left-color: var(--sev-ok); }
+
+  .cat-side-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 8px;
+  }
+  .cat-side-icon { font-size: 16px; }
+  .cat-side-name { font-size: 13px; font-weight: 600; flex: 1; }
+  .cat-side-count { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .cat-side-sev-row {
+    display: flex; gap: 4px;
+    font-family: var(--mono); font-size: 10px;
+  }
+  .cat-side-sev-pill {
+    padding: 2px 6px; border-radius: 3px;
+    background: var(--surface3); color: var(--muted);
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+  .cat-side-sev-pill:hover { transform: translateY(-1px); }
+  .cat-side-sev-pill.unplayable         { background: rgba(239,68,68,0.15);  color: var(--sev-unplayable); }
+  .cat-side-sev-pill.always_transcode   { background: rgba(249,115,22,0.15); color: var(--sev-always-transcode); }
+  .cat-side-sev-pill.possible_transcode { background: rgba(234,179,8,0.15);  color: var(--sev-possible-transcode); }
+  .cat-side-sev-pill.high_bitrate       { background: rgba(139,92,246,0.15); color: var(--sev-high-bitrate); }
+  .cat-side-sev-pill.info               { background: var(--surface3); }
+  .cat-side-sev-pill.ok                 { background: rgba(34,197,94,0.15);  color: var(--sev-ok); }
+
+  /* Side mini-stat (counts) */
+  .side-quick {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 12px 14px;
+  }
+  .side-quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .side-quick-row {
+    cursor: pointer; padding: 4px 0;
+    border-radius: var(--r);
+    transition: background 0.1s;
+  }
+  .side-quick-row:hover { background: var(--surface2); }
+  .side-quick-val { font-size: 16px; font-weight: 700; }
+  .side-quick-label { font-size: 10px; color: var(--muted); margin-top: 1px; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600; }
+
+  /* Logout / user widget */
+  .user-widget {
+    margin-top: auto; padding: 10px 12px; border-top: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .user-icon {
+    width: 26px; height: 26px;
+    background: var(--surface3); color: var(--text);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 11px;
+    flex-shrink: 0;
+  }
+  .user-name { font-size: 12.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .user-logout {
+    background: none; border: 1px solid var(--border2); color: var(--text2);
+    padding: 4px 8px; border-radius: var(--r); cursor: pointer; font-size: 11px;
+    transition: all 0.12s;
+  }
+  .user-logout:hover { color: var(--text); border-color: var(--text2); }
+
+  /* Tdarr profile editor inline */
+  .tdarr-mode-row { display: flex; gap: 6px; margin-bottom: 10px; }
+  .tdarr-mode-row button {
+    flex: 1; padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text2); border-radius: var(--r); cursor: pointer; font-size: 11.5px;
+    font-weight: 500; transition: all 0.12s;
+  }
+  .tdarr-mode-row button.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .tdarr-mode-row button:hover:not(.active) { color: var(--text); }
+
+  .path-mapping-row {
+    display: grid; grid-template-columns: 1fr auto 1fr auto;
+    gap: 6px; align-items: center; margin-bottom: 6px;
+  }
+  .path-mapping-arrow { color: var(--muted); padding: 0 4px; }
 </style>
 </head>
 <body>
@@ -799,6 +1020,12 @@
     <button class="btn-scan" id="btn-scan" onclick="startScan()">▶ Run Full Scan</button>
     <button class="btn-scan secondary" id="btn-reeval" onclick="startReeval()" title="Re-evaluate stored data — fast, no ffprobe">⚡ Re-eval Rules</button>
   </div>
+
+  <div class="user-widget" id="user-widget" style="display:none">
+    <div class="user-icon" id="user-icon-letter">?</div>
+    <div class="user-name" id="user-name-text">…</div>
+    <button class="user-logout" onclick="doLogout()" title="Log out">⏻</button>
+  </div>
 </aside>
 
 <main id="main">
@@ -807,6 +1034,19 @@
     <span class="top-sub" id="top-sub"></span>
     <input class="top-input" type="text" id="search-input" placeholder="Search files…" oninput="onSearch()" style="display:none" />
   </header>
+
+  <div class="update-banner" id="update-banner">
+    <span class="update-banner-icon">⬆</span>
+    <span class="update-banner-msg" id="update-banner-msg">
+      <strong>New version available</strong>
+      <span id="update-banner-detail"></span>
+    </span>
+    <span class="update-banner-actions">
+      <button class="btn btn-sm" onclick="markCurrentVersion()">I've updated</button>
+      <button class="btn btn-sm" id="update-banner-view">View on GitHub</button>
+      <button class="btn btn-sm" onclick="dismissUpdateBanner()">Dismiss</button>
+    </span>
+  </div>
 
   <div id="content">
 
@@ -819,60 +1059,104 @@
       </div>
 
       <div id="dashboard-content" style="display:none">
-        <div class="dash-tabs" id="dash-tabs">
-          <button class="dash-tab active" data-cat="all" onclick="setDashCategory('all')">All <span class="count" id="cnt-all">0</span></button>
-          <button class="dash-tab" data-cat="media" onclick="setDashCategory('media')">🎬 Media <span class="count" id="cnt-media">0</span></button>
-          <button class="dash-tab" data-cat="subtitle" onclick="setDashCategory('subtitle')">💬 Subtitles <span class="count" id="cnt-subtitle">0</span></button>
-          <button class="dash-tab" data-cat="image" onclick="setDashCategory('image')">🖼 Images <span class="count" id="cnt-image">0</span></button>
-          <button class="dash-tab" data-cat="metadata" onclick="setDashCategory('metadata')">📄 Metadata <span class="count" id="cnt-metadata">0</span></button>
-          <button class="dash-tab" data-cat="junk" onclick="setDashCategory('junk')">❓ Junk <span class="count" id="cnt-junk">0</span></button>
-        </div>
-
-        <div class="dash-body">
-          <div class="dash-grid">
-            <div class="panel">
-              <div class="panel-title-row">
-                <div class="panel-title" id="health-panel-title">Library Health</div>
-                <span class="small" id="health-meta-side"></span>
+        <div class="dash-v2">
+          <!-- Main column: Media -->
+          <div class="dash-main">
+            <!-- Hero summary -->
+            <div class="hero">
+              <div class="hero-score-block">
+                <div class="hero-score" id="hero-score">—</div>
+                <div class="hero-score-pct">/ 100</div>
               </div>
-              <div class="health-hero">
-                <div class="health-score-wrap">
-                  <div class="health-score" id="health-score">—</div>
-                  <div class="health-pct">/ 100</div>
+              <div class="hero-meta">
+                <div class="hero-cat-name" id="hero-cat-name">Media health</div>
+                <div class="hero-status" id="hero-status">No data</div>
+                <div class="hero-detail" id="hero-detail">Run a scan to see results.</div>
+              </div>
+              <div class="hero-quick-stats">
+                <div class="quick-stat" onclick="goToFiles({file_category:'media'})" style="cursor:pointer">
+                  <div class="quick-stat-val" id="hero-quick-total">0</div>
+                  <div class="quick-stat-label">Files</div>
                 </div>
-                <div class="health-meta">
-                  <div class="health-label" id="health-status">No data</div>
-                  <div class="health-detail" id="health-detail">Run a scan to see results.</div>
+                <div class="quick-stat">
+                  <div class="quick-stat-val" id="hero-quick-size">0 GB</div>
+                  <div class="quick-stat-label">Size</div>
                 </div>
               </div>
-              <div class="sev-list" id="severity-bars"></div>
             </div>
-            <div class="panel">
-              <div class="panel-title">Library Composition</div>
-              <div class="tile-grid" id="tile-grid"></div>
+
+            <!-- Severity tiles (clickable) -->
+            <div class="sev-grid">
+              <div class="sev-grid-head">Severity breakdown — click to filter</div>
+              <div class="sev-tiles" id="sev-tiles"></div>
+            </div>
+
+            <!-- Two-column stats: codecs + audio + resolutions + DV/HDR -->
+            <div class="stat-row-grid">
+              <div class="stat-panel">
+                <div class="stat-panel-head">
+                  <div class="stat-panel-title">Video codecs</div>
+                  <span class="stat-panel-total" id="codec-total"></span>
+                </div>
+                <div class="clickable-bars" id="codec-bars"></div>
+              </div>
+              <div class="stat-panel">
+                <div class="stat-panel-head">
+                  <div class="stat-panel-title">Audio codecs</div>
+                  <span class="stat-panel-total" id="audio-total"></span>
+                </div>
+                <div class="clickable-bars" id="audio-bars"></div>
+              </div>
+            </div>
+
+            <div class="stat-row-grid">
+              <div class="stat-panel">
+                <div class="stat-panel-head">
+                  <div class="stat-panel-title">Resolutions</div>
+                  <span class="stat-panel-total" id="res-total"></span>
+                </div>
+                <div class="clickable-bars" id="res-bars"></div>
+              </div>
+              <div class="stat-panel">
+                <div class="stat-panel-head">
+                  <div class="stat-panel-title">Issue categories</div>
+                  <span class="stat-panel-total" id="issue-cat-total"></span>
+                </div>
+                <div class="clickable-bars" id="issue-cat-bars"></div>
+              </div>
             </div>
           </div>
 
-          <div class="dash-grid" style="grid-template-columns: 1fr 1fr">
-            <div class="panel">
-              <div class="panel-title">Top Issue Categories</div>
-              <div class="bars" id="issue-cat-bars"></div>
+          <!-- Side column: other categories + special highlights -->
+          <div class="dash-side">
+            <div class="side-quick">
+              <div class="stat-panel-head" style="margin-bottom:8px">
+                <div class="stat-panel-title">Highlights</div>
+              </div>
+              <div class="side-quick-grid">
+                <div class="side-quick-row" onclick="goToFiles({search:'Profile 5'})">
+                  <div class="side-quick-val" id="hl-dovi-p5">0</div>
+                  <div class="side-quick-label">DoVi P5</div>
+                </div>
+                <div class="side-quick-row" onclick="goToFiles({codec:'av1'})">
+                  <div class="side-quick-val" id="hl-av1">0</div>
+                  <div class="side-quick-label">AV1</div>
+                </div>
+                <div class="side-quick-row" onclick="goToFiles({codec:'hevc'})">
+                  <div class="side-quick-val" id="hl-hevc">0</div>
+                  <div class="side-quick-label">HEVC</div>
+                </div>
+                <div class="side-quick-row" onclick="goToFiles({search:'Profile'})">
+                  <div class="side-quick-val" id="hl-dovi-other">0</div>
+                  <div class="side-quick-label">DoVi other</div>
+                </div>
+              </div>
             </div>
-            <div class="panel">
-              <div class="panel-title" id="distrib-title">Video Codecs</div>
-              <div class="bars" id="codec-bars"></div>
-            </div>
-          </div>
 
-          <div class="dash-grid" style="grid-template-columns: 1fr 1fr" id="extra-charts">
-            <div class="panel">
-              <div class="panel-title">Audio Codecs</div>
-              <div class="bars" id="audio-bars"></div>
+            <div class="stat-panel-head" style="margin-top:6px;margin-bottom:0px;padding: 0 4px">
+              <div class="stat-panel-title">Other categories</div>
             </div>
-            <div class="panel">
-              <div class="panel-title">Resolutions</div>
-              <div class="bars" id="res-bars"></div>
-            </div>
+            <div id="side-cat-list"></div>
           </div>
         </div>
       </div>
@@ -1099,6 +1383,52 @@
           </div>
         </div>
 
+        <div class="settings-section">
+          <div class="settings-section-title">Account</div>
+          <div class="field">
+            <label class="field-label">Username</label>
+            <input class="field-input" id="account-username" disabled />
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label">Current password</label>
+              <input class="field-input" type="password" id="account-old-pw" />
+            </div>
+            <div class="field">
+              <label class="field-label">New password (≥ 8 chars)</label>
+              <input class="field-input" type="password" id="account-new-pw" />
+            </div>
+          </div>
+          <button class="btn" onclick="changePassword()">Change Password</button>
+
+          <div style="height: 14px"></div>
+
+          <div class="field">
+            <label class="field-label">API Token</label>
+            <div style="display:flex; gap: 6px; align-items: center">
+              <input class="field-input" type="text" id="account-api-token" readonly style="font-family: var(--mono); font-size: 11.5px" />
+              <button class="btn" onclick="copyApiToken()" title="Copy">📋</button>
+              <button class="btn btn-danger" onclick="regenerateApiToken()" title="Regenerate">↻</button>
+            </div>
+            <div class="field-help">Send as <code>Authorization: Bearer &lt;token&gt;</code> or <code>X-API-Key: &lt;token&gt;</code> for headless API access.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Updates
+            <span class="help">Auditarr checks GitHub every 6 hours</span>
+          </div>
+          <div class="field-help" style="margin-bottom:10px">When a newer commit is found on the <code>main</code> branch you'll see a banner; pull the changes manually with <code>git pull</code> (or download a tarball) and restart Auditarr.</div>
+          <div id="update-status-card"
+               style="background: var(--surface2); border:1px solid var(--border); border-radius: var(--r); padding: 12px; font-size: 12.5px; line-height: 1.7;">
+            Loading update status…
+          </div>
+          <div style="margin-top: 8px; display: flex; gap: 6px;">
+            <button class="btn" onclick="forceUpdateCheck()">Check now</button>
+            <button class="btn" onclick="markCurrentVersion()">Mark current as latest</button>
+          </div>
+        </div>
+
         <button class="btn btn-primary" onclick="saveConfig()">Save Configuration</button>
       </div>
     </div>
@@ -1156,16 +1486,16 @@
 </div>
 
 <div class="modal-bg" id="modal-add-rule">
-  <div class="modal sm">
+  <div class="modal md">
     <div class="modal-head">New automation rule <button class="icon-btn x" onclick="closeModal('modal-add-rule')">✕</button></div>
     <div class="modal-body">
       <div class="field">
         <label class="field-label">Rule name</label>
-        <input class="field-input" id="rule-name" placeholder="Unmonitor unplayable files" />
+        <input class="field-input" id="rule-name" placeholder="e.g. Transcode Hi10P → HEVC 10-bit" />
       </div>
       <div class="field">
         <label class="field-label">Apply to integration</label>
-        <select class="field-input" id="rule-int"></select>
+        <select class="field-input" id="rule-int" onchange="onRuleIntegrationChange()"></select>
       </div>
       <div class="field-row">
         <div class="field">
@@ -1189,10 +1519,106 @@
         </div>
       </div>
       <div class="field">
+        <label class="field-label">Restrict to file category (optional)</label>
+        <select class="field-input" id="rule-file-cat">
+          <option value="">All categories</option>
+          <option value="media">Media</option>
+          <option value="subtitle">Subtitles</option>
+          <option value="image">Images</option>
+          <option value="metadata">Metadata</option>
+          <option value="junk">Junk</option>
+        </select>
+      </div>
+      <div class="field">
         <label class="field-label">Then</label>
-        <select class="field-input" id="rule-action">
-          <option value="unmonitor">Unmonitor in *arr</option>
-          <option value="monitor">Monitor in *arr</option>
+        <select class="field-input" id="rule-action" onchange="onRuleActionChange()"></select>
+      </div>
+
+      <!-- Tdarr-specific config: profile mode -->
+      <div class="field" id="rule-tdarr-config" style="display:none">
+        <label class="field-label">Tdarr profile</label>
+        <div class="tdarr-mode-row">
+          <button id="tdarr-mode-library" onclick="setTdarrMode('library')">Library</button>
+          <button id="tdarr-mode-plugin" onclick="setTdarrMode('plugin')">Plugin / Flow</button>
+          <button id="tdarr-mode-inline" onclick="setTdarrMode('inline')">Custom profile</button>
+        </div>
+
+        <div id="tdarr-library-pick" style="display:none">
+          <select class="field-input" id="rule-tdarr-library">
+            <option value="">— pick a library —</option>
+          </select>
+          <div class="field-help">Files will be queued into this Tdarr library.</div>
+        </div>
+
+        <div id="tdarr-plugin-pick" style="display:none">
+          <select class="field-input" id="rule-tdarr-plugin">
+            <option value="">— pick a plugin / flow —</option>
+          </select>
+          <div class="field-help">Files will be processed by this specific flow.</div>
+        </div>
+
+        <div id="tdarr-inline-pick" style="display:none">
+          <div class="field-row">
+            <div>
+              <label class="field-label">Codec</label>
+              <select class="field-input" id="inline-codec">
+                <option value="hevc">HEVC (H.265)</option>
+                <option value="h264">H.264</option>
+                <option value="av1">AV1</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Container</label>
+              <select class="field-input" id="inline-container">
+                <option value="mkv">MKV</option>
+                <option value="mp4">MP4</option>
+              </select>
+            </div>
+          </div>
+          <div class="field-row">
+            <div>
+              <label class="field-label">Audio codec</label>
+              <select class="field-input" id="inline-audio">
+                <option value="copy">Copy (passthrough)</option>
+                <option value="aac">AAC</option>
+                <option value="ac3">AC3</option>
+                <option value="eac3">E-AC3</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">CRF (quality, lower = better)</label>
+              <input class="field-input" type="number" id="inline-crf" value="22" min="0" max="51" />
+            </div>
+          </div>
+          <div class="field-row">
+            <div>
+              <label class="field-label">Hardware accel</label>
+              <select class="field-input" id="inline-hwa">
+                <option value="">None (CPU)</option>
+                <option value="qsv">Intel QSV</option>
+                <option value="nvenc">NVIDIA NVENC</option>
+                <option value="vaapi">VAAPI</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Max resolution</label>
+              <select class="field-input" id="inline-resmax">
+                <option value="">Source</option>
+                <option value="1080p">1080p</option>
+                <option value="720p">720p</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bazarr-specific config: media type filter -->
+      <div class="field" id="rule-bazarr-config" style="display:none">
+        <label class="field-label">Apply to</label>
+        <select class="field-input" id="rule-bazarr-media-type">
+          <option value="">Both episodes and movies</option>
+          <option value="episode">Episodes only (Sonarr-linked)</option>
+          <option value="movie">Movies only (Radarr-linked)</option>
         </select>
       </div>
     </div>
