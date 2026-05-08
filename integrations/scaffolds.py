@@ -76,58 +76,7 @@ class JellyfinIntegration(Integration):
             return False, f"Error: {e}"
 
 
-# ─── Tdarr ────────────────────────────────────────────────────────────────────
-
-@register
-class TdarrIntegration(Integration):
-    KIND = "tdarr"
-    DISPLAY_NAME = "Tdarr"
-    SUPPORTS_SYNC = False
-    SUPPORTS_WEBHOOK = False
-    SUPPORTS_AUTOMATION = False
-    DESCRIPTION = "Tdarr — distributed transcoding orchestrator. Future: queue files with severity ≥ X for automatic transcoding"
-
-    def test_connection(self):
-        try:
-            url = f"{self.base_url}/api/v2/status"
-            req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-            return True, f"Connected — Tdarr {data.get('version','?') if isinstance(data, dict) else 'OK'}"
-        except urllib.error.HTTPError as e:
-            return False, f"HTTP {e.code}"
-        except urllib.error.URLError as e:
-            return False, f"Cannot reach server: {e.reason}"
-        except Exception as e:
-            return False, f"Error: {e}"
+# ─── Tdarr — moved to tdarr.py with full implementation ─────────────────────
 
 
-# ─── Bazarr ───────────────────────────────────────────────────────────────────
-
-@register
-class BazarrIntegration(Integration):
-    KIND = "bazarr"
-    DISPLAY_NAME = "Bazarr"
-    SUPPORTS_SYNC = False
-    SUPPORTS_WEBHOOK = False
-    SUPPORTS_AUTOMATION = False
-    DESCRIPTION = "Bazarr — subtitle management for Sonarr/Radarr. Future: re-search subtitles for files we flag as orphan or invalid"
-
-    def test_connection(self):
-        try:
-            url = f"{self.base_url}/api/system/status"
-            req = urllib.request.Request(url, headers={
-                "Accept": "application/json",
-                "X-API-KEY": self.api_key,
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-            d = data.get("data", data) if isinstance(data, dict) else {}
-            ver = d.get("bazarr_version") or d.get("version", "?")
-            return True, f"Connected — Bazarr {ver}"
-        except urllib.error.HTTPError as e:
-            return False, f"HTTP {e.code}"
-        except urllib.error.URLError as e:
-            return False, f"Cannot reach server: {e.reason}"
-        except Exception as e:
-            return False, f"Error: {e}"
+# ─── Bazarr — moved to bazarr.py with full implementation ────────────────────

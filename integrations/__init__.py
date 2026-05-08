@@ -11,6 +11,8 @@ import db
 from integrations.base import Integration, REGISTRY, get_plugin, all_plugins  # noqa
 from integrations import sonarr_radarr  # noqa
 from integrations import scaffolds      # noqa
+from integrations import bazarr         # noqa
+from integrations import tdarr          # noqa
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -114,14 +116,18 @@ SEVERITY_RANK = {
 
 def run_automation_rules():
     """
-    For every enabled rule, find files matching the condition and apply the action.
-    Called after every scan/eval cycle.
+    For every enabled rule, find files matching the condition and apply the
+    rule's action. Supported actions:
+
+      monitor / unmonitor             — Sonarr/Radarr (existing)
+      transcode_via_tdarr             — Tdarr (queues file)
+      search_subs_via_bazarr          — Bazarr (re-search subs for a media)
+      delete_sub_via_bazarr           — Bazarr (deletes the subtitle file)
     """
     rules = [r for r in db.list_automation_rules() if r["enabled"]]
-    if not rules: return
+    if not rules: return 0
     actions_run = 0
 
-    # Group rules by integration
     by_integration = {}
     for r in rules:
         by_integration.setdefault(r["integration_id"], []).append(r)
@@ -131,37 +137,93 @@ def run_automation_rules():
         if not server or not server.get("enabled"): continue
         kind = server["kind"]
         plugin = make_plugin(server)
-        if not plugin or not hasattr(plugin, "set_monitored"): continue
+        if not plugin: continue
 
-        files = db.files_for_automation(kind)
-        for f in files:
-            sev_rank = f.get("sev_rank") or 0
-            current_monitored = f.get("monitored")
-            for r in ruleset:
-                if not _rule_matches(r, sev_rank): continue
-                target_monitored = (r["action"] == "monitor")
-                if current_monitored == (1 if target_monitored else 0):
-                    continue  # already at target state
-                # Apply
-                arg = f["arr_file_id"] if kind == "sonarr" else f["arr_id"]
-                try:
-                    ok, _ = plugin.set_monitored(arg, target_monitored)
-                    if ok:
-                        db.update_file_monitored(f["id"], target_monitored)
-                        actions_run += 1
-                except Exception: pass
-
-        # Mark rules as run
         for r in ruleset:
-            db.update_automation_rule(r["id"], last_run=datetime.now().isoformat())
+            count = _apply_one_rule(r, server, kind, plugin)
+            actions_run += count
+            db.update_automation_rule(
+                r["id"],
+                last_run=datetime.now().isoformat(),
+                runs_count=(r.get("runs_count") or 0) + 1,
+                last_action_count=count,
+            )
 
     return actions_run
 
 
+def _apply_one_rule(rule, server, kind, plugin):
+    """Apply one automation rule. Returns number of actions taken."""
+    action = rule["action"]
+    cfg = rule.get("action_config_obj") or {}
+    file_cat = rule.get("file_category")
+
+    # Find candidate files
+    if action in ("monitor", "unmonitor"):
+        if not hasattr(plugin, "set_monitored"): return 0
+        files = db.files_for_automation(kind)
+    elif action == "transcode_via_tdarr":
+        if kind != "tdarr": return 0
+        files = db.files_for_severity_filter(min_rank=0, file_category="media")
+    elif action in ("search_subs_via_bazarr", "delete_sub_via_bazarr"):
+        if kind != "bazarr": return 0
+        cat = "subtitle" if action == "delete_sub_via_bazarr" else "media"
+        files = db.files_for_severity_filter(min_rank=0, file_category=cat)
+    else:
+        return 0
+
+    threshold = SEVERITY_RANK.get(rule["when_severity"], 0)
+    cmp_op = rule["comparison"]
+
+    count = 0
+    for f in files:
+        sev_rank = f.get("sev_rank") or 0
+        if not _matches_threshold(sev_rank, threshold, cmp_op): continue
+        if file_cat and f.get("category") and f.get("category") != file_cat:
+            continue
+
+        try:
+            if action == "monitor" or action == "unmonitor":
+                target = (action == "monitor")
+                if f.get("monitored") == (1 if target else 0): continue
+                arg = f["arr_file_id"] if kind == "sonarr" else f["arr_id"]
+                if arg is None: continue
+                ok, _ = plugin.set_monitored(arg, target)
+                if ok:
+                    db.update_file_monitored(f["id"], target)
+                    count += 1
+            elif action == "transcode_via_tdarr":
+                kwargs = {}
+                if cfg.get("library_id"):       kwargs["library_id"] = cfg["library_id"]
+                elif cfg.get("plugin_id"):      kwargs["plugin_id"]  = cfg["plugin_id"]
+                elif cfg.get("inline_profile"): kwargs["inline_profile"] = cfg["inline_profile"]
+                else: continue  # nothing to do
+                ok, _ = plugin.queue_transcode(f["path"], **kwargs)
+                if ok: count += 1
+            elif action == "search_subs_via_bazarr":
+                # Need media_type + bazarr id from sonarr/radarr linkage
+                media_type = "movie" if f.get("arr_kind") == "radarr" else "episode"
+                aid = f.get("arr_id")
+                if not aid: continue
+                ok, _ = plugin.search_subtitles(media_type, aid)
+                if ok: count += 1
+            elif action == "delete_sub_via_bazarr":
+                # f is the subtitle file
+                media_type = "movie" if f.get("arr_kind") == "radarr" else "episode"
+                ok, _ = plugin.delete_subtitle(f["path"], media_type, f.get("arr_id"))
+                if ok: count += 1
+        except Exception: pass
+
+    return count
+
+
+def _matches_threshold(sev_rank, threshold, cmp_op):
+    if cmp_op == "at_least": return sev_rank >= threshold
+    if cmp_op == "at_most":  return sev_rank <= threshold
+    if cmp_op == "equals":   return sev_rank == threshold
+    return False
+
+
 def _rule_matches(rule, sev_rank):
     threshold = SEVERITY_RANK.get(rule["when_severity"], 0)
-    cmp = rule["comparison"]
-    if cmp == "at_least": return sev_rank >= threshold
-    if cmp == "at_most":  return sev_rank <= threshold
-    if cmp == "equals":   return sev_rank == threshold
-    return False
+    return _matches_threshold(sev_rank, threshold, rule["comparison"])
