@@ -95,18 +95,33 @@ def categorise_file(path: Path) -> str:
     return "junk"
 
 
-def should_ignore(path: Path, patterns: list[str]) -> bool:
-    """Match against ignore patterns (filename or path glob)."""
+def should_ignore(path: Path, patterns: list) -> bool:
+    """Match against ignore patterns.
+
+    Patterns can be:
+      - exact filename: ".plexmatch" / "Thumbs.db"
+      - extension wildcard: "*.tmp" / "*.partial"
+      - prefix wildcard: "_UNPACK_*" / "sample_*"
+      - directory component: "@eaDir" / ".AppleDouble"
+
+    Glob patterns match against both the filename AND any directory in the path,
+    so "_UNPACK_*" will skip files in any directory whose name starts with _UNPACK_.
+    """
+    import fnmatch
     name = path.name
     for p in patterns or []:
         if not p: continue
-        # Exact name match (.plexmatch, .DS_Store)
+        # Exact name match
         if name == p: return True
-        # Component match (@eaDir as folder)
+        # Component match (folder anywhere in path) — exact name
         if p in path.parts: return True
-        # Suffix match
-        if p.startswith(".") and name.endswith(p) and name == p:
-            return True
+        # Glob match — try filename and every parent directory name
+        if any(ch in p for ch in "*?["):
+            if fnmatch.fnmatchcase(name, p) or fnmatch.fnmatchcase(name.lower(), p.lower()):
+                return True
+            for part in path.parts:
+                if fnmatch.fnmatchcase(part, p) or fnmatch.fnmatchcase(part.lower(), p.lower()):
+                    return True
     return False
 
 

@@ -150,8 +150,12 @@ def init():
                     when_severity   TEXT NOT NULL,
                     comparison      TEXT NOT NULL,
                     action          TEXT NOT NULL,
+                    action_config   TEXT,         -- JSON: extra parameters per action type
+                    file_category   TEXT,         -- restrict to media|subtitle|...|null=all
                     enabled         INTEGER DEFAULT 1,
                     last_run        TEXT,
+                    runs_count      INTEGER DEFAULT 0,
+                    last_action_count INTEGER DEFAULT 0,
                     FOREIGN KEY(integration_id) REFERENCES integrations(id) ON DELETE CASCADE
                 );
 
@@ -269,6 +273,9 @@ def list_files_filtered(severity=None, category=None, file_category=None,
     FROM files f
     """
     where, params = [], []
+    # Safety: ignored files should never be in the DB, but exclude them
+    # explicitly in case a user upgrades from an older version.
+    where.append("(f.category IS NULL OR f.category != 'ignored')")
     if severity:
         where.append("EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.severity=?)")
         params.append(severity)
@@ -298,9 +305,12 @@ def list_files_filtered(severity=None, category=None, file_category=None,
 
 
 def stats_summary():
+    # Exclude category='ignored' globally — they should never be present
+    # but be defensive
+    EXCLUDE_IGNORED = "(category IS NULL OR category != 'ignored')"
     with cursor() as c:
-        total = c.execute("SELECT COUNT(*) AS n FROM files").fetchone()["n"]
-        size_b = c.execute("SELECT COALESCE(SUM(size_bytes),0) AS s FROM files").fetchone()["s"]
+        total = c.execute(f"SELECT COUNT(*) AS n FROM files WHERE {EXCLUDE_IGNORED}").fetchone()["n"]
+        size_b = c.execute(f"SELECT COALESCE(SUM(size_bytes),0) AS s FROM files WHERE {EXCLUDE_IGNORED}").fetchone()["s"]
 
         sev_counts = {s: 0 for s in SEVERITY}
         rows = c.execute("""
@@ -315,18 +325,21 @@ def stats_summary():
                 WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
                 WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
                 WHEN 'info' THEN 1 ELSE 0 END) AS sev_rank
-                FROM files f LEFT JOIN evaluations e ON e.file_id=f.id GROUP BY f.id)
+                FROM files f LEFT JOIN evaluations e ON e.file_id=f.id
+                WHERE (f.category IS NULL OR f.category != 'ignored')
+                GROUP BY f.id)
             GROUP BY sev
         """).fetchall()
         for r in rows: sev_counts[r["sev"]] = r["n"]
 
         category_counts = {}
-        for r in c.execute("SELECT category, COUNT(*) AS n FROM files WHERE category IS NOT NULL GROUP BY category"):
+        for r in c.execute(f"SELECT category, COUNT(*) AS n FROM files WHERE category IS NOT NULL AND category != 'ignored' GROUP BY category"):
             category_counts[r["category"]] = r["n"]
 
         # Per-category severity (key feature: dashboard tabs show per-category)
         per_category = {}
         for cat in CATEGORIES:
+            if cat == "ignored": continue  # never appear in stats
             per_category[cat] = {
                 "total": 0,
                 "size_gb": 0,
@@ -352,7 +365,7 @@ def stats_summary():
               FROM files f LEFT JOIN evaluations e ON e.file_id=f.id
               GROUP BY f.id
             ) f
-            WHERE f.category IS NOT NULL
+            WHERE f.category IS NOT NULL AND f.category != 'ignored'
             GROUP BY f.category, sev
         """).fetchall()
         for r in rows:
@@ -540,14 +553,21 @@ def list_automation_rules(integration_id=None):
     if integration_id:
         sql += " WHERE integration_id=?"; params.append(integration_id)
     with cursor() as c:
-        return [dict(r) for r in c.execute(sql, params)]
+        rows = [dict(r) for r in c.execute(sql, params)]
+        for r in rows:
+            try: r["action_config_obj"] = json.loads(r.get("action_config") or "{}")
+            except Exception: r["action_config_obj"] = {}
+        return rows
 
-def add_automation_rule(integration_id, name, when_severity, comparison, action, enabled=1):
+def add_automation_rule(integration_id, name, when_severity, comparison, action,
+                        enabled=1, action_config=None, file_category=None):
     with cursor() as c:
         c.execute("""INSERT INTO automation_rules
-                     (integration_id, name, when_severity, comparison, action, enabled)
-                     VALUES (?,?,?,?,?,?)""",
-                  (integration_id, name, when_severity, comparison, action, enabled))
+                     (integration_id, name, when_severity, comparison, action,
+                      action_config, file_category, enabled)
+                     VALUES (?,?,?,?,?,?,?,?)""",
+                  (integration_id, name, when_severity, comparison, action,
+                   json.dumps(action_config or {}), file_category, enabled))
         return c.lastrowid
 
 def delete_automation_rule(rule_id):
@@ -756,3 +776,24 @@ def custom_rule_field_options():
             "enum":   ["eq","neq","in","is_null","not_null"],
         },
     }
+
+
+def files_for_severity_filter(min_rank=0, file_category=None):
+    """Return files with severity sev_rank ≥ min_rank, optionally filtered by category."""
+    sql = """
+        SELECT f.id, f.path, f.name, f.category, f.codec, f.bitrate, f.size_bytes,
+               f.arr_kind, f.arr_id, f.arr_file_id, f.monitored,
+               (SELECT MAX(CASE e.severity
+                   WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
+                   WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
+                   WHEN 'info' THEN 1 ELSE 0 END)
+                FROM evaluations e WHERE e.file_id=f.id) AS sev_rank
+        FROM files f
+    """
+    where = []
+    params = []
+    if file_category:
+        where.append("f.category=?"); params.append(file_category)
+    if where: sql += " WHERE " + " AND ".join(where)
+    with cursor() as c:
+        return [dict(r) for r in c.execute(sql, params)]

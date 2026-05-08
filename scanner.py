@@ -202,11 +202,21 @@ def run_full_scan(job_id: str, cfg: dict):
     # Pass 2: re-pair all subtitles now that all media files are indexed
     _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules)
 
-    # Prune missing files (config option)
+    # Prune missing files + files now matching ignore patterns
     if cfg.get("prune_missing", True):
         on_disk = {str(p) for p in paths}
+        ignore_patterns = cfg.get("ignore_patterns") or []
+        roots = [str(Path(p)) for p in cfg.get("library_paths", [])]
         for stored in db.all_file_paths():
-            if stored not in on_disk and any(stored.startswith(str(Path(p))) for p in cfg.get("library_paths", [])):
+            in_lib = any(stored.startswith(r) for r in roots)
+            if not in_lib: continue
+            stored_path = Path(stored)
+            # Missing on disk
+            if stored not in on_disk:
+                db.delete_file_by_path(stored)
+                continue
+            # Newly matches ignore patterns
+            if checks.should_ignore(stored_path, ignore_patterns):
                 db.delete_file_by_path(stored)
 
     db.update_scan(job_id, status="done", finished_at=datetime.now().isoformat(),

@@ -39,7 +39,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, make_response, request, send_from_directory
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -47,6 +47,8 @@ import db
 import checks
 import integrations
 import scanner
+import auth
+import updater
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
 db.init()
@@ -111,11 +113,168 @@ def reload_schedule():
 reload_schedule()
 
 
+# ─── Auth middleware ─────────────────────────────────────────────────────────
+
+# Routes that don't require auth:
+#   - /                           (login page redirects)
+#   - /api/auth/*                 (login, setup, status)
+#   - /api/integrations/webhook/* (third-party services need to POST without creds)
+#   - /api/update/check           (read-only, fine to expose)
+#   - static assets               (login.html etc.)
+PUBLIC_PREFIXES = (
+    "/api/auth/",
+    "/api/integrations/webhook/",
+)
+PUBLIC_PATHS = {"/", "/login.html", "/app.js", "/index.html", "/favicon.ico"}
+
+
+@app.before_request
+def _auth_gate():
+    p = request.path
+    # Always allow non-API GETs (frontend assets) and public paths
+    if p in PUBLIC_PATHS or any(p.startswith(pre) for pre in PUBLIC_PREFIXES):
+        return None
+    # Static files served from frontend/
+    if not p.startswith("/api/"):
+        return None
+    # If auth isn't configured yet, allow only the setup endpoint (handled above)
+    if not auth.is_configured():
+        return jsonify({
+            "error": "Auth not configured",
+            "code": "auth_setup_required"
+        }), 401
+    ok, _ = auth.is_request_authenticated(request)
+    if not ok:
+        return jsonify({
+            "error": "Authentication required",
+            "code": "unauthorized"
+        }), 401
+    return None
+
+
+# ─── Auth API ────────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/status")
+def auth_status():
+    ok, username = auth.is_request_authenticated(request)
+    return jsonify({
+        "configured": auth.is_configured(),
+        "authenticated": ok,
+        "username": username,
+    })
+
+
+@app.route("/api/auth/setup", methods=["POST"])
+def auth_setup():
+    """Initial admin setup. Allowed only when no user exists yet."""
+    if auth.is_configured():
+        return jsonify({"error": "Auth already configured"}), 400
+    d = request.json or {}
+    try:
+        result = auth.setup(d.get("username", "").strip(),
+                            d.get("password", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    # Auto-login the new admin
+    token = auth.create_session(result["username"])
+    resp = make_response(jsonify({"ok": True, "username": result["username"],
+                                  "api_token": result["api_token"]}))
+    resp.set_cookie("auditarr_session", token,
+                    httponly=True, samesite="Strict",
+                    max_age=auth.SESSION_TTL,
+                    secure=request.is_secure)
+    return resp
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    d = request.json or {}
+    u = d.get("username", "").strip()
+    p = d.get("password", "")
+    if not auth.verify_password(u, p):
+        return jsonify({"error": "Invalid username or password"}), 401
+    token = auth.create_session(u)
+    resp = make_response(jsonify({"ok": True, "username": u}))
+    resp.set_cookie("auditarr_session", token,
+                    httponly=True, samesite="Strict",
+                    max_age=auth.SESSION_TTL,
+                    secure=request.is_secure)
+    return resp
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    token = request.cookies.get("auditarr_session")
+    auth.destroy_session(token)
+    resp = make_response(jsonify({"ok": True}))
+    resp.set_cookie("auditarr_session", "", expires=0)
+    return resp
+
+
+@app.route("/api/auth/change-password", methods=["POST"])
+def auth_change_password():
+    d = request.json or {}
+    try:
+        ok = auth.change_password(d.get("old_password", ""),
+                                  d.get("new_password", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if not ok:
+        return jsonify({"error": "Old password is incorrect"}), 401
+    return jsonify({"ok": True, "message": "Password changed; all sessions invalidated"})
+
+
+@app.route("/api/auth/api-token", methods=["GET"])
+def auth_get_api_token():
+    return jsonify({"api_token": auth.get_api_token()})
+
+
+@app.route("/api/auth/api-token", methods=["POST"])
+def auth_regenerate_api_token():
+    new_token = auth.regenerate_api_token()
+    return jsonify({"api_token": new_token})
+
+
+# ─── Update checker ──────────────────────────────────────────────────────────
+
+@app.route("/api/update/check")
+def update_check():
+    return jsonify(updater.get_state())
+
+
+@app.route("/api/update/refresh", methods=["POST"])
+def update_refresh():
+    return jsonify(updater.force_check())
+
+
+@app.route("/api/update/mark-current", methods=["POST"])
+def update_mark_current():
+    """User confirms they've pulled — record current SHA."""
+    sha = (request.json or {}).get("sha", "").strip()
+    state = updater.get_state()
+    if not sha:
+        sha = state.get("latest_sha") or ""
+    if not sha:
+        return jsonify({"error": "No SHA available"}), 400
+    updater.mark_current(sha)
+    return jsonify({"ok": True, "current_sha": sha})
+
+
 # ─── Frontend ────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
+    if not auth.is_configured():
+        return send_from_directory("frontend", "login.html")
+    ok, _ = auth.is_request_authenticated(request)
+    if not ok:
+        return send_from_directory("frontend", "login.html")
     return send_from_directory("frontend", "index.html")
+
+
+@app.route("/login.html")
+def login_page():
+    return send_from_directory("frontend", "login.html")
 
 
 # ─── Config API ──────────────────────────────────────────────────────────────
@@ -459,6 +618,8 @@ def automation_add():
         integration_id=d["integration_id"], name=d["name"],
         when_severity=d["when_severity"], comparison=d["comparison"],
         action=d["action"], enabled=d.get("enabled", 1),
+        action_config=d.get("action_config"),
+        file_category=d.get("file_category"),
     )
     return jsonify({"id": rid})
 
@@ -469,13 +630,105 @@ def automation_delete(rule_id):
 @app.route("/api/automation/rules/<int:rule_id>", methods=["PUT"])
 def automation_update(rule_id):
     d = request.json or {}
-    db.update_automation_rule(rule_id, **{k:v for k,v in d.items() if k in ("name","when_severity","comparison","action","enabled")})
+    if "action_config" in d and isinstance(d["action_config"], (dict, list)):
+        d["action_config"] = json.dumps(d["action_config"])
+    db.update_automation_rule(rule_id, **{
+        k: v for k, v in d.items()
+        if k in ("name", "when_severity", "comparison", "action", "enabled",
+                 "action_config", "file_category")
+    })
     return jsonify({"ok": True})
 
 @app.route("/api/automation/run", methods=["POST"])
 def automation_run():
     n = integrations.run_automation_rules() or 0
     return jsonify({"actions_run": n})
+
+
+# ─── Bazarr actions ──────────────────────────────────────────────────────────
+
+@app.route("/api/bazarr/<int:server_id>/delete-sub", methods=["POST"])
+def bazarr_delete_sub(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "bazarr":
+        return jsonify({"error": "Not a Bazarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    d = request.json or {}
+    sub_path = d.get("path", "")
+    media_type = d.get("media_type", "episode")
+    bazarr_id = d.get("bazarr_id")
+    ok, msg = plugin.delete_subtitle(sub_path, media_type, bazarr_id)
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/bazarr/<int:server_id>/search-subs", methods=["POST"])
+def bazarr_search_subs(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "bazarr":
+        return jsonify({"error": "Not a Bazarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    d = request.json or {}
+    media_type = d.get("media_type", "episode")
+    bazarr_id = d.get("bazarr_id")
+    if not bazarr_id:
+        return jsonify({"error": "bazarr_id required"}), 400
+    ok, msg = plugin.search_subtitles(media_type, int(bazarr_id))
+    return jsonify({"ok": ok, "message": msg})
+
+
+# ─── Tdarr actions ───────────────────────────────────────────────────────────
+
+@app.route("/api/tdarr/<int:server_id>/libraries")
+def tdarr_libraries(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "tdarr":
+        return jsonify({"error": "Not a Tdarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    return jsonify(plugin.list_libraries())
+
+
+@app.route("/api/tdarr/<int:server_id>/plugins")
+def tdarr_plugins(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "tdarr":
+        return jsonify({"error": "Not a Tdarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    return jsonify(plugin.list_plugins())
+
+
+@app.route("/api/tdarr/<int:server_id>/jobs")
+def tdarr_jobs(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "tdarr":
+        return jsonify({"error": "Not a Tdarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    return jsonify(plugin.list_jobs())
+
+
+@app.route("/api/tdarr/<int:server_id>/queue", methods=["POST"])
+def tdarr_queue(server_id):
+    s = db.get_integration(server_id)
+    if not s or s.get("kind") != "tdarr":
+        return jsonify({"error": "Not a Tdarr integration"}), 404
+    plugin = integrations.make_plugin(s)
+    d = request.json or {}
+    file_id = d.get("file_id")
+    if file_id:
+        f = db.get_file_by_id(int(file_id))
+        if not f: return jsonify({"error": "File not found"}), 404
+        path = f["path"]
+    else:
+        path = d.get("path", "")
+    if not path:
+        return jsonify({"error": "Need file_id or path"}), 400
+    kwargs = {}
+    if d.get("library_id"):     kwargs["library_id"] = d["library_id"]
+    if d.get("plugin_id"):      kwargs["plugin_id"]  = d["plugin_id"]
+    if d.get("inline_profile"): kwargs["inline_profile"] = d["inline_profile"]
+    if not kwargs:
+        return jsonify({"error": "Provide library_id, plugin_id, or inline_profile"}), 400
+    ok, msg = plugin.queue_transcode(path, **kwargs)
+    return jsonify({"ok": ok, "message": msg, "path": path})
 
 
 # ─── Custom rules ────────────────────────────────────────────────────────────
@@ -598,6 +851,11 @@ def rules_apply():
 
 _poller = integrations.PollingWorker()
 _poller.start()
+
+# Update poller (GitHub commit checker)
+updater.initial_load()
+_update_poller = updater.UpdatePoller()
+_update_poller.start()
 
 
 if __name__ == "__main__":
