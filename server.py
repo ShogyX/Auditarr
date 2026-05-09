@@ -49,6 +49,7 @@ import integrations
 import scanner
 import auth
 import updater
+import deps
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
 db.init()
@@ -247,6 +248,38 @@ def update_refresh():
     return jsonify(updater.force_check())
 
 
+@app.route("/api/update/branches")
+def update_branches():
+    """Return supported branches with availability info."""
+    return jsonify({
+        "branches": updater.list_branches(),
+        "current": updater.get_state().get("branch"),
+        "allowed": list(updater.ALLOWED_BRANCHES),
+    })
+
+
+@app.route("/api/update/branch", methods=["POST"])
+def update_set_branch():
+    """Switch the tracked branch. Triggers an immediate re-check."""
+    branch = (request.json or {}).get("branch", "").strip()
+    if not branch:
+        return jsonify({"error": "branch required"}), 400
+    try:
+        state = updater.set_branch(branch)
+        return jsonify({"ok": True, "state": state})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/update/install", methods=["POST"])
+def update_install():
+    """Download tarball + apply update."""
+    target_sha = (request.json or {}).get("sha")
+    result = updater.install_update(target_sha=target_sha)
+    sc = 200 if result.get("ok") else 500
+    return jsonify(result), sc
+
+
 @app.route("/api/update/mark-current", methods=["POST"])
 def update_mark_current():
     """User confirms they've pulled — record current SHA."""
@@ -258,6 +291,24 @@ def update_mark_current():
         return jsonify({"error": "No SHA available"}), 400
     updater.mark_current(sha)
     return jsonify({"ok": True, "current_sha": sha})
+
+
+# ─── Dependency check ────────────────────────────────────────────────────────
+
+@app.route("/api/health")
+def health_check():
+    """Surface dependency status to the UI."""
+    return jsonify(deps.check_all())
+
+
+@app.route("/api/install-deps", methods=["POST"])
+def install_deps():
+    """Try to pip-install missing Python packages (uses sudo if needed)."""
+    report = deps.check_all()
+    if not report["python_missing"]:
+        return jsonify({"ok": True, "message": "No Python packages missing"})
+    ok, log = deps.install_python_packages(report["python_missing"], use_sudo=True)
+    return jsonify({"ok": ok, "log": log, "report": deps.check_all()})
 
 
 # ─── Backup / restore / maintenance ──────────────────────────────────────────
@@ -442,9 +493,10 @@ def _expand_file_row(f):
     for iss in f["issues"]:
         try: iss["affected"] = json.loads(iss.get("affected") or "[]")
         except Exception: iss["affected"] = []
-    rank = f.pop("sev_rank", 0) or 0
-    # Map back from rank to severity name
-    f["severity"] = ["ok","info","high_bitrate","possible_transcode","always_transcode","unplayable"][rank]
+    # Use headline_severity from SQL — works for both media and non-media scales.
+    headline = f.pop("headline_severity", None)
+    f["severity"] = headline or "ok"
+    f.pop("sev_rank", None)
     if f.get("arr_metadata"):
         try: f["arr_metadata"] = json.loads(f["arr_metadata"])
         except Exception: pass
@@ -1009,5 +1061,29 @@ _update_poller.start()
 
 
 if __name__ == "__main__":
+    import sys
+
+    # Optional CLI: --install-deps tries to install missing Python packages
+    if "--install-deps" in sys.argv:
+        report = deps.check_all()
+        if report["python_missing"]:
+            print("Installing missing Python packages …", file=sys.stderr)
+            ok, log = deps.install_python_packages(report["python_missing"], use_sudo=True)
+            print(log, file=sys.stderr)
+            if not ok:
+                print("Install failed. See log above.", file=sys.stderr)
+                sys.exit(1)
+        report2 = deps.check_all()
+        print(deps.format_report(report2), file=sys.stderr)
+        if not report2["ok"]:
+            sys.exit(1)
+        print("✓ All dependencies present.", file=sys.stderr)
+        sys.exit(0)
+
+    # Run dependency check at startup. Exit if Python packages are missing
+    # (we can't run without them); warn and continue if binaries are missing
+    # (scans will fail but the UI still loads).
+    deps.enforce_or_exit(allow_missing_binaries=True)
+
     print("Auditarr server running at http://localhost:7842")
     app.run(host="0.0.0.0", port=7842, debug=False, threaded=True)

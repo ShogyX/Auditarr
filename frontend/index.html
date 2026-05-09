@@ -34,6 +34,10 @@
     --sev-high-bitrate:       #8b5cf6;
     --sev-info:               #6e6e75;
     --sev-ok:                 #22c55e;
+    /* Non-media severities */
+    --sev-warning:            #eab308;   /* amber, like possible_transcode */
+    --sev-corrupt:            #ef4444;   /* red, like unplayable */
+    --sev-possible_malicious: #dc2626;   /* deep red — visually distinct from corrupt */
 
     --status-fail:      #ef4444;
     --status-transcode: #eab308;
@@ -855,9 +859,104 @@
   .sev-tile.high_bitrate       { border-left-color: var(--sev-high-bitrate); }
   .sev-tile.info               { border-left-color: var(--sev-info); }
   .sev-tile.ok                 { border-left-color: var(--sev-ok); }
+  .sev-tile.warning            { border-left-color: var(--sev-warning); }
+  .sev-tile.corrupt            { border-left-color: var(--sev-corrupt); }
+  .sev-tile.possible_malicious { border-left-color: var(--sev-possible_malicious); }
   .sev-tile-val { font-size: 22px; font-weight: 800; line-height: 1; letter-spacing: -0.5px; }
   .sev-tile-label { font-size: 10px; color: var(--muted); margin-top: 5px; letter-spacing: 0.3px; text-transform: uppercase; font-weight: 600; }
   .sev-tile.zero { opacity: 0.5; }
+  .sev-tile-meta {
+    margin-top: 6px;
+    display: flex; flex-direction: column; gap: 2px;
+    font-size: 9px; color: var(--muted);
+    font-family: var(--mono);
+  }
+  .sev-tile-unique {
+    color: var(--text2);
+    font-weight: 600;
+  }
+  .sev-tile-neighbor { opacity: 0.7; }
+
+  /* Non-media severity dots */
+  .sev-dot.warning            { background: var(--sev-warning); }
+  .sev-dot.corrupt            { background: var(--sev-corrupt); }
+  .sev-dot.possible_malicious { background: var(--sev-possible_malicious); }
+
+  /* Non-media chip dots */
+  .chip-dot.warning            { background: var(--sev-warning); }
+  .chip-dot.corrupt            { background: var(--sev-corrupt); }
+  .chip-dot.possible_malicious { background: var(--sev-possible_malicious); }
+
+  /* Cat side card pill colors for non-media */
+  .cat-side-sev-pill.warning            { background: rgba(234,179,8,0.15);  color: var(--sev-warning); }
+  .cat-side-sev-pill.corrupt            { background: rgba(239,68,68,0.15);  color: var(--sev-corrupt); }
+  .cat-side-sev-pill.possible_malicious { background: rgba(220,38,38,0.18);  color: var(--sev-possible_malicious); }
+
+  .cat-side-card.warning            { border-left-color: var(--sev-warning); }
+  .cat-side-card.corrupt            { border-left-color: var(--sev-corrupt); }
+  .cat-side-card.possible_malicious { border-left-color: var(--sev-possible_malicious); }
+
+  /* Active filter pills above the file list */
+  .active-filters-row {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 8px 14px 0;
+  }
+  .active-filter-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--surface3); color: var(--text);
+    padding: 4px 10px; border-radius: 12px;
+    font-size: 11px; cursor: pointer;
+    transition: background 0.12s;
+  }
+  .active-filter-pill:hover { background: var(--border2); }
+  .active-filter-pill .x { color: var(--muted); font-size: 14px; line-height: 1; }
+  .active-filter-pill strong { font-family: var(--mono); }
+
+  /* Dependency status card */
+  .dep-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 12px 14px;
+    font-size: 12.5px;
+  }
+  .dep-card.ok { border-left: 3px solid var(--sev-ok); }
+  .dep-card.warn { border-left: 3px solid var(--sev-warning); }
+  .dep-card.err { border-left: 3px solid var(--sev-unplayable); }
+  .dep-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+  }
+  .dep-row:last-child { border-bottom: none; }
+  .dep-row .name { flex: 1; font-weight: 500; }
+  .dep-row .status { font-family: var(--mono); font-size: 11px; }
+  .dep-row .status.missing { color: var(--sev-unplayable); }
+  .dep-row .status.present { color: var(--sev-ok); }
+  .dep-cmd {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--surface3); color: var(--text);
+    padding: 4px 8px; border-radius: 3px;
+    display: inline-block;
+    margin: 4px 0;
+    word-break: break-all;
+  }
+
+  /* Update branch picker */
+  .update-branch-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 10px;
+  }
+  .update-branch-row label { font-size: 11.5px; color: var(--muted); }
+  .branch-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 12px;
+    background: var(--surface3); color: var(--text2);
+    cursor: pointer;
+    font-size: 11px; font-family: var(--mono);
+    transition: all 0.12s;
+  }
+  .branch-pill.active { background: var(--text); color: var(--bg); }
+  .branch-pill:hover:not(.active) { color: var(--text); }
 
   /* Media-stat panels (clickable bars) */
   .stat-panel {
@@ -1273,17 +1372,9 @@
       <div id="files-wrap" style="display:none; height:100%; flex-direction:column">
         <div class="subnav" id="cat-subnav"></div>
 
-        <div class="filter-bar" id="filter-bar">
-          <button class="chip active" onclick="setSeverity('all')" data-sev="all">All</button>
-          <button class="chip" onclick="setSeverity('unplayable')" data-sev="unplayable"><span class="chip-dot unplayable"></span>Unplayable</button>
-          <button class="chip" onclick="setSeverity('always_transcode')" data-sev="always_transcode"><span class="chip-dot always_transcode"></span>Always Transcode</button>
-          <button class="chip" onclick="setSeverity('possible_transcode')" data-sev="possible_transcode"><span class="chip-dot possible_transcode"></span>Possible Transcode</button>
-          <button class="chip" onclick="setSeverity('high_bitrate')" data-sev="high_bitrate"><span class="chip-dot high_bitrate"></span>High Bitrate</button>
-          <button class="chip" onclick="setSeverity('info')" data-sev="info"><span class="chip-dot info"></span>Info</button>
-          <button class="chip" onclick="setSeverity('ok')" data-sev="ok"><span class="chip-dot ok"></span>OK</button>
-          <span class="filter-spacer"></span>
-          <span class="file-count" id="file-count">0 files</span>
-        </div>
+        <div class="filter-bar" id="filter-bar"></div>
+
+        <div class="active-filters-row" id="active-filters"></div>
 
         <div class="bulk-bar hidden" id="bulk-bar">
           <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)" />
@@ -1599,17 +1690,30 @@
         </div>
 
         <div class="settings-section">
-          <div class="settings-section-title">Updates
-            <span class="help">Auditarr checks GitHub every 6 hours</span>
+          <div class="settings-section-title">Dependencies
+            <span class="help">Auditarr checks these on first run</span>
           </div>
-          <div class="field-help" style="margin-bottom:10px">When a newer commit is found on the <code>main</code> branch you'll see a banner; pull the changes manually with <code>git pull</code> (or download a tarball) and restart Auditarr.</div>
+          <div id="deps-status-card" class="dep-card">Loading dependency status…</div>
+          <div style="margin-top: 8px; display: flex; gap: 6px;">
+            <button class="btn" onclick="checkDeps()">Re-check</button>
+            <button class="btn" onclick="installDeps()">Auto-install Python packages</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Updates
+            <span class="help">Polls GitHub every 6 hours</span>
+          </div>
+          <div class="field-help" style="margin-bottom:10px">Pick which branch to track. <code>main</code> is stable; <code>dev</code> is the bleeding edge.</div>
+          <div class="update-branch-row" id="branch-picker"></div>
           <div id="update-status-card"
                style="background: var(--surface2); border:1px solid var(--border); border-radius: var(--r); padding: 12px; font-size: 12.5px; line-height: 1.7;">
             Loading update status…
           </div>
-          <div style="margin-top: 8px; display: flex; gap: 6px;">
+          <div style="margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;">
             <button class="btn" onclick="forceUpdateCheck()">Check now</button>
-            <button class="btn" onclick="markCurrentVersion()">Mark current as latest</button>
+            <button class="btn btn-primary" id="btn-install-update" onclick="installUpdate()" disabled>Install update</button>
+            <button class="btn" onclick="markCurrentVersion()" title="If you updated manually">Mark current as latest</button>
           </div>
         </div>
 
