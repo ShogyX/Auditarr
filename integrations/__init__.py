@@ -117,14 +117,20 @@ SEVERITY_RANK = {
 def run_automation_rules():
     """
     For every enabled rule, find files matching the condition and apply the
-    rule's action. Supported actions:
+    rule's action. Each rule is wrapped in try/except so one broken rule never
+    crashes the whole post-scan pipeline.
 
-      monitor / unmonitor             — Sonarr/Radarr (existing)
-      transcode_via_tdarr             — Tdarr (queues file)
-      search_subs_via_bazarr          — Bazarr (re-search subs for a media)
-      delete_sub_via_bazarr           — Bazarr (deletes the subtitle file)
+    Supported actions:
+      monitor / unmonitor             — Sonarr/Radarr
+      transcode_via_tdarr             — Tdarr
+      search_subs_via_bazarr          — Bazarr
+      delete_sub_via_bazarr           — Bazarr
     """
-    rules = [r for r in db.list_automation_rules() if r["enabled"]]
+    try:
+        rules = [r for r in db.list_automation_rules() if r["enabled"]]
+    except Exception as e:
+        print(f"[automation] failed to list rules: {e}")
+        return 0
     if not rules: return 0
     actions_run = 0
 
@@ -133,21 +139,28 @@ def run_automation_rules():
         by_integration.setdefault(r["integration_id"], []).append(r)
 
     for int_id, ruleset in by_integration.items():
-        server = db.get_integration(int_id)
-        if not server or not server.get("enabled"): continue
-        kind = server["kind"]
-        plugin = make_plugin(server)
-        if not plugin: continue
+        try:
+            server = db.get_integration(int_id)
+            if not server or not server.get("enabled"): continue
+            kind = server["kind"]
+            plugin = make_plugin(server)
+            if not plugin: continue
+        except Exception as e:
+            print(f"[automation] integration {int_id} setup failed: {e}")
+            continue
 
         for r in ruleset:
-            count = _apply_one_rule(r, server, kind, plugin)
-            actions_run += count
-            db.update_automation_rule(
-                r["id"],
-                last_run=datetime.now().isoformat(),
-                runs_count=(r.get("runs_count") or 0) + 1,
-                last_action_count=count,
-            )
+            try:
+                count = _apply_one_rule(r, server, kind, plugin)
+                actions_run += count
+                db.update_automation_rule(
+                    r["id"],
+                    last_run=datetime.now().isoformat(),
+                    runs_count=(r.get("runs_count") or 0) + 1,
+                    last_action_count=count,
+                )
+            except Exception as e:
+                print(f"[automation] rule {r.get('id')} '{r.get('name')}' failed: {e}")
 
     return actions_run
 
@@ -157,6 +170,7 @@ def _apply_one_rule(rule, server, kind, plugin):
     action = rule["action"]
     cfg = rule.get("action_config_obj") or {}
     file_cat = rule.get("file_category")
+    sev_match = (rule.get("severity_match") or "highest").lower()
 
     # Find candidate files
     if action in ("monitor", "unmonitor"):
@@ -177,8 +191,21 @@ def _apply_one_rule(rule, server, kind, plugin):
 
     count = 0
     for f in files:
-        sev_rank = f.get("sev_rank") or 0
-        if not _matches_threshold(sev_rank, threshold, cmp_op): continue
+        # Decide which severity rank to compare against based on mode
+        sev_ranks_for_file = _file_severity_ranks(f["id"])
+        highest = max(sev_ranks_for_file) if sev_ranks_for_file else 0
+        lowest  = min(sev_ranks_for_file) if sev_ranks_for_file else 0
+
+        if sev_match == "any":
+            # Match if ANY of the file's severities triggers
+            ranks_to_check = sev_ranks_for_file or [0]
+        elif sev_match == "lowest":
+            ranks_to_check = [lowest]
+        else:  # highest (default)
+            ranks_to_check = [highest]
+
+        if not any(_matches_threshold(r, threshold, cmp_op) for r in ranks_to_check):
+            continue
         if file_cat and f.get("category") and f.get("category") != file_cat:
             continue
 
@@ -197,24 +224,28 @@ def _apply_one_rule(rule, server, kind, plugin):
                 if cfg.get("library_id"):       kwargs["library_id"] = cfg["library_id"]
                 elif cfg.get("plugin_id"):      kwargs["plugin_id"]  = cfg["plugin_id"]
                 elif cfg.get("inline_profile"): kwargs["inline_profile"] = cfg["inline_profile"]
-                else: continue  # nothing to do
+                else: continue
                 ok, _ = plugin.queue_transcode(f["path"], **kwargs)
                 if ok: count += 1
             elif action == "search_subs_via_bazarr":
-                # Need media_type + bazarr id from sonarr/radarr linkage
                 media_type = "movie" if f.get("arr_kind") == "radarr" else "episode"
                 aid = f.get("arr_id")
                 if not aid: continue
                 ok, _ = plugin.search_subtitles(media_type, aid)
                 if ok: count += 1
             elif action == "delete_sub_via_bazarr":
-                # f is the subtitle file
                 media_type = "movie" if f.get("arr_kind") == "radarr" else "episode"
                 ok, _ = plugin.delete_subtitle(f["path"], media_type, f.get("arr_id"))
                 if ok: count += 1
         except Exception: pass
 
     return count
+
+
+def _file_severity_ranks(file_id):
+    """Return a list of severity ranks for all of this file's evaluations."""
+    sevs = db.get_evaluations(file_id) or []
+    return [SEVERITY_RANK.get(e.get("severity"), 0) for e in sevs]
 
 
 def _matches_threshold(sev_rank, threshold, cmp_op):
