@@ -1,54 +1,42 @@
 # Changelog
 
-## v6 — 2026-05-08
+## v7 — 2026-05-09
 
-Stability and bug-fix release. Focused on database resilience across upgrades, fixing crashes, and reorganising the rules UI.
+Quality + automation release. Two big shifts: severity now has separate scales for media vs non-media files, and the updater can install new versions automatically without `git pull`.
 
 ### Fixed
 
-- **Couldn't add automation rules.** Migration system now ensures `action_config`, `file_category`, `severity_match`, `runs_count`, and `last_action_count` columns exist on every install; server endpoint validates required fields and returns useful errors.
-- **Databases broke over time.** New schema-versioning system with 5 idempotent migrations (v0–v4). v0 backfills any missing base columns on `files`, `evaluations`, `scans`, `integrations`, `integration_events`, and `custom_rules` so users coming from old builds get a complete schema. Migrations run inside `init()` and are safe to apply repeatedly.
-- **Re-eval Rules triggered a library scan.** Re-eval is now genuinely rules-only — no disk reads, no ffprobe, no subtitle revalidation. Full Scan asks for confirmation before walking the filesystem. UI button labels update on the correct buttons (`_kickoff` was updating the wrong element).
-- **Sonarr/Radarr events stopped being tracked.** Column-name mismatch (`raw` vs `payload`) caused `add_integration_event` to fail silently; corrected.
-- **App crashed once a scan completed.** The post-scan automation runner threw on missing columns. Hardened with try/except around every rule and around integration setup.
-- **OK files didn't appear when filtering by severity.** Clean files have no `evaluations` rows, so the old filter returned nothing. Rewritten so each severity filter matches files where that's the headline severity; `ok` matches files with no issues at all.
-- **Category sorting was inconsistent.** Files now sort by `COALESCE(sev_rank, 0) DESC`.
-- **Glob ignore patterns missed directory components.** `_UNPACK_*` now matches files in directories whose names match the pattern.
+- **Junk category showed 5000+ files but clicking it returned nothing.** Junk files were getting categorised but never received any evaluations, so the file browser's "headline severity" filter rejected them all. Fixed by ensuring every junk file gets at least one issue (`file_unknown_extension`), so the entire category is now browseable.
+- **Click-through filters from the dashboard returned no files.** Codec / audio codec / resolution clicks were dumping the value into the search box (which searches paths). They now use proper filter state and show as removable pills above the file list.
+- **Severity filter for non-media files.** The headline-severity SQL only knew the media scale; non-media files with `corrupt`/`warning`/`possible_malicious` were misordered or filtered out incorrectly. The SQL now ranks both scales correctly, and `_expand_file_row` reads the headline severity directly from the query rather than mapping ranks back to names.
+- **Stats showed phantom codec / audio / resolution entries.** Empty strings in those columns were counted as their own group; now filtered out.
 
 ### Added
 
-- **Backup / Restore.** `GET /api/db/backup` streams a consistent SQLite snapshot using the online backup API. `POST /api/db/restore` accepts an upload, validates the schema, then replaces the live DB. Handles WAL state so backups taken under load are valid and restores don't corrupt the live DB.
-- **DB maintenance UI.** Settings → Database shows path, size, file/eval/integration/rule counts, and schema version. Vacuum, Integrity check, Clean evaluations buttons.
-- **Auto-save settings.** All settings inputs save automatically with a 600 ms debounce. Status indicator shows "Saving…" / "Saved" / "Save failed".
-- **Help page.** New nav item with three tabs: README, Changelog, Links. README and changelog are rendered from the bundled markdown files using an inline renderer (headers, lists, tables, code, links).
-- **Custom Rules redesign.** Three tabs:
-  - **Built-in** — all 55 named rules visible and grouped by category. Toggle on/off, override severity, or drop entirely.
-  - **Custom** — user-created rules.
-  - **Disabled / Discarded** — dropped rules, with a Restore action.
-- **Severity match modes.** Automation rules can choose `highest` (default), `lowest`, or `any` when comparing a file's multiple severities against the rule threshold.
+- **Dependency check on startup.** New `deps.py` module verifies `flask`, `apscheduler`, `ffprobe`, and `ffmpeg` are present. If anything's missing, prints a clear report to stderr with exact install commands per distro (Debian, Fedora, Arch, Alpine, macOS, Windows) and the expected install path. Exposed via `GET /api/health`. Optional `--install-deps` CLI flag attempts pip-install for missing Python packages (with sudo if needed).
+- **Settings → Dependencies card.** UI surface for the same data; "Auto-install Python packages" button.
+- **Branch picker for updates.** Switch between `main` (stable) and `dev` (bleeding edge) directly in the UI. Selection persists in `.auditarr_version.json`.
+- **Seamless install of updates.** The Settings → Updates section now has an "Install update" button that downloads the tarball, extracts it, and copies files into the install directory atomically (using temp+rename per file). User data — `config.json`, `auth.json`, `media_audit.db*`, `.auditarr_version.json` — is never overwritten. Restart Auditarr after install completes.
+- **Split severity model.** Media files keep the original 6-level scale (`unplayable` / `always_transcode` / `possible_transcode` / `high_bitrate` / `info` / `ok`). Non-media files (subtitle, image, metadata, junk) use a new 5-level scale: `ok` / `info` / `warning` / `corrupt` / `possible_malicious`. The file browser's filter chips show only the severities relevant to the current category.
+- **Non-media rules.** New rules: `junk_executable` (executable extensions in a media library → `possible_malicious`), `junk_archive` (`.rar`/`.zip`/`.7z` leftovers → `warning`), `junk_large` (oversized junk → `warning`), `junk_empty` (0-byte junk → `corrupt`), `image_too_large` (>50 MB artwork → `warning`), `metadata_too_large` (>5 MB NFO → `warning`). Subtitle issues (orphan, invalid, unreadable) now use the non-media scale too.
+- **Severity tile metadata.** Each tile on the dashboard now shows the count of unique rules that fire at that severity, plus the next-more-severe and next-less-severe neighbour counts.
 
 ### Notes
 
-- Schema version tracked in `schema_meta`; `db.schema_version()` returns it; UI shows it under Settings → Database.
-- Backup files are valid SQLite databases; you can open them with any SQLite tool offline.
-- Restore performs a sanity check on the uploaded file (must contain core tables) before replacing the live DB.
+- The unified SQL ranking treats both scales as parallel: rank 5 = `unplayable` or `possible_malicious`; rank 4 = `always_transcode` or `corrupt`; rank 3 = `possible_transcode`; rank 2 = `high_bitrate` or `warning`; rank 1 = `info`; rank 0 = `ok`. Severity names are unique across both scales so filters and headline-severity lookups never collide.
+- `BUILTIN_RULES` registry now tracks 60+ rules total. Each can be toggled, severity-overridden, or dropped from Custom Rules → Built-in tab.
+- The updater never overwrites the protected files even if a future commit changes their tracked-version. Local schema migrations apply on the next start.
 
 ---
 
+## v6
+
+Stability and bug-fix release. Schema migration system, backups, auto-save settings, help page, custom rules redesign, severity match modes, dozens of bug fixes.
+
 ## v5
 
-- Single-user auth with PBKDF2 hashing, session cookies, and an API token.
-- GitHub commit poller with notify-only update banner.
-- Full Bazarr integration: subtitle sync, webhook, delete-subtitle and search-subtitles actions.
-- Full Tdarr integration: library/plugin sync, three transcode-queue modes, longest-prefix-match remote path mappings.
-- Extended automation: `transcode_via_tdarr`, `search_subs_via_bazarr`, `delete_sub_via_bazarr` actions; file-category restrictions.
-- Dashboard redesign: Media-centric layout with clickable everything; non-media categories on the side.
+Authentication, GitHub commit poller (notify-only), full Bazarr/Tdarr integrations, dashboard redesign.
 
 ## v4 and earlier
 
-- 6-level severity scale (`unplayable` → `ok`).
-- Custom rule engine with visual builder and raw JSON editor.
-- Plex + Jellyfin device matrix (28 devices in Both mode).
-- File categorisation with ignore patterns; ignored files never enter the database.
-- Full Sonarr/Radarr integration with monitoring control.
-- Three scan modes: Full Scan, Re-eval Rules, Targeted.
+6-level severity scale, custom rule engine, Plex+Jellyfin device matrix (28 devices), Sonarr/Radarr full integration, three scan modes.

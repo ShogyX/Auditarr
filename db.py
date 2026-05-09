@@ -21,14 +21,33 @@ _init_lock = threading.Lock()
 _initialized = False
 
 # ─── Severity scale ───────────────────────────────────────────────────────────
-SEVERITY = ["ok", "info", "high_bitrate", "possible_transcode", "always_transcode", "unplayable"]
-SEVERITY_RANK = {s: i for i, s in enumerate(SEVERITY)}
+# Media-file severity (the original 6-level scale)
+MEDIA_SEVERITY = ["ok", "info", "high_bitrate", "possible_transcode", "always_transcode", "unplayable"]
+
+# Non-media severity (subtitle, image, metadata, junk)
+NON_MEDIA_SEVERITY = ["ok", "info", "warning", "corrupt", "possible_malicious"]
+
+# Union — DB column accepts any of these
+SEVERITY = list(dict.fromkeys(MEDIA_SEVERITY + NON_MEDIA_SEVERITY))
+SEVERITY_RANK = {s: i for i, s in enumerate(MEDIA_SEVERITY)}  # media-only ranks for legacy auto rules
+SEVERITY_RANK_NON_MEDIA = {s: i for i, s in enumerate(NON_MEDIA_SEVERITY)}
+
+
+def severity_class_for_category(cat: str) -> str:
+    """Return 'media' or 'non_media' for a file category."""
+    return "media" if cat == "media" else "non_media"
+
+
+def severity_scale_for_category(cat: str) -> list:
+    return MEDIA_SEVERITY if cat == "media" else NON_MEDIA_SEVERITY
+
+
+CATEGORIES = ["media", "subtitle", "image", "metadata", "junk", "ignored"]
 
 DEFAULT_IGNORE_PATTERNS = [
     ".plexmatch", ".DS_Store", "Thumbs.db", "desktop.ini",
     ".nomedia", "@eaDir", ".AppleDouble", ".gitkeep",
 ]
-CATEGORIES = ["media", "subtitle", "image", "metadata", "junk", "ignored"]
 
 
 def _connect():
@@ -538,10 +557,27 @@ def list_files_filtered(severity=None, category=None, file_category=None,
                 'detail', e.detail, 'affected', e.affected))
             FROM evaluations e WHERE e.file_id=f.id) AS issues_json,
            (SELECT MAX(CASE e.severity
-              WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
-              WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
-              WHEN 'info' THEN 1 ELSE 0 END)
-            FROM evaluations e WHERE e.file_id=f.id) AS sev_rank
+              WHEN 'unplayable' THEN 5
+              WHEN 'possible_malicious' THEN 5
+              WHEN 'always_transcode' THEN 4
+              WHEN 'corrupt' THEN 4
+              WHEN 'possible_transcode' THEN 3
+              WHEN 'high_bitrate' THEN 2
+              WHEN 'warning' THEN 2
+              WHEN 'info' THEN 1
+              ELSE 0 END)
+            FROM evaluations e WHERE e.file_id=f.id) AS sev_rank,
+           (SELECT e.severity FROM evaluations e WHERE e.file_id=f.id
+            ORDER BY CASE e.severity
+              WHEN 'unplayable' THEN 5
+              WHEN 'possible_malicious' THEN 5
+              WHEN 'always_transcode' THEN 4
+              WHEN 'corrupt' THEN 4
+              WHEN 'possible_transcode' THEN 3
+              WHEN 'high_bitrate' THEN 2
+              WHEN 'warning' THEN 2
+              WHEN 'info' THEN 1
+              ELSE 0 END DESC LIMIT 1) AS headline_severity
     FROM files f
     """
     where, params = [], []
@@ -550,26 +586,38 @@ def list_files_filtered(severity=None, category=None, file_category=None,
     where.append("(f.category IS NULL OR f.category != 'ignored')")
     if severity:
         if severity == "ok":
-            # Clean files have NO evaluations; treat any file whose worst
-            # severity rank is 0 (or no rows at all) as 'ok'.
+            # Clean files have NO non-ok evaluations
             where.append("""NOT EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id
                                        AND e.severity != 'ok')""")
         else:
-            # Best-severity match: file has an evaluation at this exact severity
-            # AND no evaluations more severe than it
-            sev_rank_map = {"info":1,"high_bitrate":2,"possible_transcode":3,
-                            "always_transcode":4,"unplayable":5}
-            target_rank = sev_rank_map.get(severity, 0)
-            where.append("""EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.severity=?)""")
+            # Match files where this is the headline (worst) severity. The
+            # rank tables for media and non_media are different, but the
+            # severity NAME is unique across both scales, so we can rank by
+            # name directly.
+            sev_rank_all = {
+                # Media scale
+                "info": 1, "high_bitrate": 2, "possible_transcode": 3,
+                "always_transcode": 4, "unplayable": 5,
+                # Non-media scale (separate axis but ranked similarly)
+                "warning": 2, "corrupt": 4, "possible_malicious": 5,
+            }
+            target_rank = sev_rank_all.get(severity, 0)
+            where.append("EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.severity=?)")
             params.append(severity)
-            # And no MORE severe issue exists (so this is the headline severity)
             if target_rank < 5:
+                # CASE expression matches both scales
                 where.append("""NOT EXISTS(
                     SELECT 1 FROM evaluations e2 WHERE e2.file_id=f.id
                     AND CASE e2.severity
-                          WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
-                          WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
-                          WHEN 'info' THEN 1 ELSE 0 END > ?
+                          WHEN 'unplayable' THEN 5
+                          WHEN 'possible_malicious' THEN 5
+                          WHEN 'always_transcode' THEN 4
+                          WHEN 'corrupt' THEN 4
+                          WHEN 'possible_transcode' THEN 3
+                          WHEN 'high_bitrate' THEN 2
+                          WHEN 'warning' THEN 2
+                          WHEN 'info' THEN 1
+                          ELSE 0 END > ?
                 )""")
                 params.append(target_rank)
     if category:
@@ -598,73 +646,84 @@ def list_files_filtered(severity=None, category=None, file_category=None,
 
 
 def stats_summary():
-    # Exclude category='ignored' globally — they should never be present
-    # but be defensive
     EXCLUDE_IGNORED = "(category IS NULL OR category != 'ignored')"
+    # Unified rank-to-severity-name mapping (for global rollup)
+    RANK_CASE = """
+        CASE e.severity
+          WHEN 'unplayable' THEN 5
+          WHEN 'possible_malicious' THEN 5
+          WHEN 'always_transcode' THEN 4
+          WHEN 'corrupt' THEN 4
+          WHEN 'possible_transcode' THEN 3
+          WHEN 'high_bitrate' THEN 2
+          WHEN 'warning' THEN 2
+          WHEN 'info' THEN 1
+          ELSE 0
+        END
+    """
     with cursor() as c:
         total = c.execute(f"SELECT COUNT(*) AS n FROM files WHERE {EXCLUDE_IGNORED}").fetchone()["n"]
         size_b = c.execute(f"SELECT COALESCE(SUM(size_bytes),0) AS s FROM files WHERE {EXCLUDE_IGNORED}").fetchone()["s"]
 
+        # Global severity counts — pick the headline (highest-rank) severity
+        # per file and group by name. This works across both scales.
         sev_counts = {s: 0 for s in SEVERITY}
-        rows = c.execute("""
-            SELECT CASE
-                WHEN sev_rank=5 THEN 'unplayable'
-                WHEN sev_rank=4 THEN 'always_transcode'
-                WHEN sev_rank=3 THEN 'possible_transcode'
-                WHEN sev_rank=2 THEN 'high_bitrate'
-                WHEN sev_rank=1 THEN 'info'
-                ELSE 'ok' END AS sev, COUNT(*) AS n
-            FROM (SELECT MAX(CASE e.severity
-                WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
-                WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
-                WHEN 'info' THEN 1 ELSE 0 END) AS sev_rank
-                FROM files f LEFT JOIN evaluations e ON e.file_id=f.id
-                WHERE (f.category IS NULL OR f.category != 'ignored')
-                GROUP BY f.id)
-            GROUP BY sev
+        rows = c.execute(f"""
+            SELECT headline, COUNT(*) AS n FROM (
+              SELECT f.id,
+                (SELECT e.severity FROM evaluations e WHERE e.file_id=f.id
+                 ORDER BY {RANK_CASE} DESC LIMIT 1) AS headline
+              FROM files f
+              WHERE (f.category IS NULL OR f.category != 'ignored')
+            )
+            GROUP BY headline
         """).fetchall()
-        for r in rows: sev_counts[r["sev"]] = r["n"]
+        for r in rows:
+            sev = r["headline"] or "ok"
+            sev_counts[sev] = sev_counts.get(sev, 0) + r["n"]
 
         category_counts = {}
-        for r in c.execute(f"SELECT category, COUNT(*) AS n FROM files WHERE category IS NOT NULL AND category != 'ignored' GROUP BY category"):
+        for r in c.execute("SELECT category, COUNT(*) AS n FROM files WHERE category IS NOT NULL AND category != 'ignored' GROUP BY category"):
             category_counts[r["category"]] = r["n"]
 
-        # Per-category severity (key feature: dashboard tabs show per-category)
+        # Per-category severity — uses headline-severity per file
         per_category = {}
         for cat in CATEGORIES:
-            if cat == "ignored": continue  # never appear in stats
+            if cat == "ignored": continue
             per_category[cat] = {
-                "total": 0,
-                "size_gb": 0,
-                "severity": {s: 0 for s in SEVERITY},
+                "total": 0, "size_gb": 0,
+                "severity_class": severity_class_for_category(cat),
+                "severity": {s: 0 for s in severity_scale_for_category(cat)},
             }
-        rows = c.execute("""
-            SELECT f.category,
-                   CASE
-                     WHEN sev_rank=5 THEN 'unplayable'
-                     WHEN sev_rank=4 THEN 'always_transcode'
-                     WHEN sev_rank=3 THEN 'possible_transcode'
-                     WHEN sev_rank=2 THEN 'high_bitrate'
-                     WHEN sev_rank=1 THEN 'info'
-                     ELSE 'ok' END AS sev,
-                   COUNT(*) AS n,
-                   SUM(size_bytes) AS sz
-            FROM (
-              SELECT f.id, f.category, f.size_bytes,
-                MAX(CASE e.severity
-                  WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
-                  WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
-                  WHEN 'info' THEN 1 ELSE 0 END) AS sev_rank
-              FROM files f LEFT JOIN evaluations e ON e.file_id=f.id
-              GROUP BY f.id
-            ) f
+
+        rows = c.execute(f"""
+            SELECT f.category, COALESCE(t.headline, 'ok') AS sev,
+                   COUNT(*) AS n, SUM(f.size_bytes) AS sz
+            FROM files f
+            LEFT JOIN (
+              SELECT e.file_id,
+                (SELECT e2.severity FROM evaluations e2 WHERE e2.file_id=e.file_id
+                 ORDER BY CASE e2.severity
+                   WHEN 'unplayable' THEN 5 WHEN 'possible_malicious' THEN 5
+                   WHEN 'always_transcode' THEN 4 WHEN 'corrupt' THEN 4
+                   WHEN 'possible_transcode' THEN 3
+                   WHEN 'high_bitrate' THEN 2 WHEN 'warning' THEN 2
+                   WHEN 'info' THEN 1 ELSE 0 END DESC LIMIT 1) AS headline
+              FROM evaluations e GROUP BY e.file_id
+            ) t ON t.file_id = f.id
             WHERE f.category IS NOT NULL AND f.category != 'ignored'
             GROUP BY f.category, sev
         """).fetchall()
         for r in rows:
             cat = r["category"]
             if cat not in per_category: continue
-            per_category[cat]["severity"][r["sev"]] = r["n"]
+            sev = r["sev"]
+            # Only count if this severity is in the cat's scale
+            if sev in per_category[cat]["severity"]:
+                per_category[cat]["severity"][sev] += r["n"]
+            else:
+                # Severity from wrong scale — shouldn't happen but bucket as info
+                per_category[cat]["severity"]["info"] = per_category[cat]["severity"].get("info", 0) + r["n"]
             per_category[cat]["total"] += r["n"]
             per_category[cat]["size_gb"] += (r["sz"] or 0) / (1024**3)
 
@@ -675,9 +734,19 @@ def stats_summary():
         for r in c.execute("SELECT category, COUNT(DISTINCT file_id) AS n FROM evaluations GROUP BY category"):
             issue_cat_counts[r["category"]] = r["n"]
 
-        codec_counts = {r["codec"]: r["n"] for r in c.execute("SELECT codec, COUNT(*) AS n FROM files WHERE codec IS NOT NULL GROUP BY codec")}
-        audio_counts = {r["audio_codec"]: r["n"] for r in c.execute("SELECT audio_codec, COUNT(*) AS n FROM files WHERE audio_codec IS NOT NULL GROUP BY audio_codec")}
-        res_counts = {r["resolution"]: r["n"] for r in c.execute("SELECT resolution, COUNT(*) AS n FROM files WHERE resolution IS NOT NULL GROUP BY resolution")}
+        codec_counts = {r["codec"]: r["n"] for r in c.execute("SELECT codec, COUNT(*) AS n FROM files WHERE codec IS NOT NULL AND codec != '' GROUP BY codec")}
+        audio_counts = {r["audio_codec"]: r["n"] for r in c.execute("SELECT audio_codec, COUNT(*) AS n FROM files WHERE audio_codec IS NOT NULL AND audio_codec != '' GROUP BY audio_codec")}
+        res_counts = {r["resolution"]: r["n"] for r in c.execute("SELECT resolution, COUNT(*) AS n FROM files WHERE resolution IS NOT NULL AND resolution != '' GROUP BY resolution")}
+
+        # Unique rule_keys triggered per severity (used by dashboard tiles)
+        unique_rules_by_severity = {}
+        for r in c.execute("""
+            SELECT severity, COUNT(DISTINCT rule_key) AS n
+            FROM evaluations
+            WHERE rule_key IS NOT NULL
+            GROUP BY severity
+        """):
+            unique_rules_by_severity[r["severity"]] = r["n"]
 
         def cn(sql, *p): return c.execute(sql, p).fetchone()["n"]
         named = {
@@ -692,7 +761,9 @@ def stats_summary():
         "severity": sev_counts, "file_categories": category_counts,
         "per_category": per_category,
         "issue_categories": issue_cat_counts, "codecs": codec_counts,
-        "audio_codecs": audio_counts, "resolutions": res_counts, **named,
+        "audio_codecs": audio_counts, "resolutions": res_counts,
+        "unique_rules_by_severity": unique_rules_by_severity,
+        **named,
     }
 
 

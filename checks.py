@@ -10,6 +10,7 @@ Severity scale (worst → best):
   ok                 — Clean
 """
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -313,6 +314,17 @@ def validate_subtitle_file(path: Path) -> dict:
 # Issue helper
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _human_size(n: int) -> str:
+    """Format bytes as a short human string (e.g., '12.4 MB')."""
+    if n is None: return "?"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
 def _issue(rule_key, severity, category, message, detail, affected):
     return {
         "rule_key": rule_key, "severity": severity, "category": category,
@@ -444,25 +456,82 @@ def evaluate(file_record, *, bitrate_threshold=80_000_000, paired_media=None):
     cat = file_record.get("category") or "junk"
     size = file_record.get("size_bytes") or 0
     status = file_record.get("scan_status") or "ok"
+    name = file_record.get("name") or os.path.basename(file_record.get("path", ""))
+    ext = (file_record.get("extension") or "").lower()
 
-    # ── Junk: separate category — single info issue ──────────────────────────
+    # ── Junk: extensible non-media rules ─────────────────────────────────────
     if cat == "junk":
+        # Always emit at least one info-level issue so EVERY junk file is
+        # discoverable in the file browser. (The user complained 5000 junk
+        # files were counted but invisible — this guarantees they all appear.)
         issues.append(_issue(
             "file_unknown_extension", "info", "non_media",
-            f"Unknown file type ({file_record.get('extension') or 'no extension'})",
-            "This file's extension is not in the configured allowlist of media, subtitle, image or metadata extensions. It will not be played by Plex but may be safe to keep (artwork, packaging, etc.) or to remove.",
+            f"Unknown file type ({ext or 'no extension'})",
+            "This file's extension is not in the configured allowlist of media, subtitle, image or metadata extensions.",
             [],
         ))
+        if size == 0:
+            issues.append(_issue(
+                "junk_empty", "corrupt", "non_media",
+                "Empty file (0 bytes)",
+                "The file has no data — likely a failed download or interrupted move.",
+                [],
+            ))
+        # Possible-malicious: executables that snuck into a media folder
+        SUSPICIOUS_EXTS = {".exe", ".bat", ".cmd", ".ps1", ".sh", ".msi", ".scr",
+                            ".vbs", ".js", ".jar", ".com", ".dll"}
+        if ext in SUSPICIOUS_EXTS:
+            issues.append(_issue(
+                "junk_executable", "possible_malicious", "non_media",
+                f"Executable file in library ({ext})",
+                "This file's extension suggests it can execute code. It should not be in a media library — investigate before opening.",
+                [],
+            ))
+        # Archives are usually leftovers from extractions
+        ARCHIVE_EXTS = {".rar", ".zip", ".7z", ".tar", ".gz", ".bz2",
+                         ".r00", ".r01", ".r02", ".r03", ".r04", ".r05",
+                         ".part01.rar", ".part02.rar"}
+        if ext in ARCHIVE_EXTS:
+            issues.append(_issue(
+                "junk_archive", "warning", "non_media",
+                f"Archive file in library ({ext})",
+                "Archives left in a media library are usually leftovers from incomplete extractions. Plex won't index this.",
+                [],
+            ))
+        # Very large junk files are suspicious — possibly a misnamed media file
+        if size > 100 * 1024 * 1024:
+            issues.append(_issue(
+                "junk_large", "warning", "non_media",
+                f"Large file with unrecognised extension ({_human_size(size)})",
+                "A non-media file of this size is unusual — could be a misnamed media file, a forgotten archive, or unwanted bulk data.",
+                [],
+            ))
         return issues
 
-    # ── Image / metadata (NFO/JPG etc.) — no issues unless empty ────────────
+    # ── Image / metadata files ──────────────────────────────────────────────
     if cat in ("image", "metadata"):
         if size == 0:
             issues.append(_issue(
-                "file_empty", "unplayable", "integrity",
+                "file_empty", "corrupt", "non_media",
                 "Empty file (0 bytes)",
                 "The file has no data — likely a failed download or interrupted move.",
-                _all_devices("fail"),
+                [],
+            ))
+            return issues
+        # Oversized images or metadata are unusual
+        if cat == "image" and size > 50 * 1024 * 1024:
+            issues.append(_issue(
+                "image_too_large", "warning", "non_media",
+                f"Oversized image ({_human_size(size)})",
+                "Plex/Jellyfin artwork rarely needs to exceed 50 MB. May indicate a mislabelled file.",
+                [],
+            ))
+        if cat == "metadata" and size > 5 * 1024 * 1024:
+            issues.append(_issue(
+                "metadata_too_large", "warning", "non_media",
+                f"Oversized metadata file ({_human_size(size)})",
+                "Metadata files (NFO, XML) are typically under a few hundred KB.",
+                [],
             ))
         return issues
 
@@ -545,6 +614,14 @@ BUILTIN_RULES = {
     "file_unknown_extension": {"name": "Unknown file type",          "category": "non_media",  "severity_default": "info",               "description": "File's extension isn't in any configured list."},
     "no_video_stream":        {"name": "No video stream",            "category": "container",  "severity_default": "unplayable",         "description": "Media file with no detectable video stream."},
 
+    # Non-media file rules
+    "junk_empty":             {"name": "Junk file is empty",         "category": "non_media",  "severity_default": "corrupt",            "description": "Junk file with 0 bytes."},
+    "junk_executable":        {"name": "Executable in library",      "category": "non_media",  "severity_default": "possible_malicious", "description": "Executable file extension found in a media library — possible threat."},
+    "junk_archive":           {"name": "Archive in library",         "category": "non_media",  "severity_default": "warning",            "description": "Archive (.rar/.zip/.7z/etc.) — usually leftover from extraction."},
+    "junk_large":             {"name": "Large unrecognised file",    "category": "non_media",  "severity_default": "warning",            "description": "Large junk file — could be a misnamed media file."},
+    "image_too_large":        {"name": "Oversized image",            "category": "non_media",  "severity_default": "warning",            "description": "Artwork over 50 MB."},
+    "metadata_too_large":     {"name": "Oversized metadata",         "category": "non_media",  "severity_default": "warning",            "description": "Metadata file over 5 MB — unusual."},
+
     # Dolby Vision
     "dovi_p5": {"name": "Dolby Vision Profile 5", "category": "hdr", "severity_default": "unplayable",   "description": "DoVi profile 5 only plays on Plex's specific DV-aware clients (and many Jellyfin clients fall back to base layer)."},
     "dovi_p7": {"name": "Dolby Vision Profile 7", "category": "hdr", "severity_default": "info",         "description": "Dual-layer DV. Most clients drop the EL and play HDR10 base."},
@@ -601,9 +678,10 @@ BUILTIN_RULES = {
     # Subtitles
     "sub_image_hdmv_pgs_subtitle": {"name": "PGS image subs",            "category": "subtitles", "severity_default": "possible_transcode", "description": "PGS subtitles must be picture-rendered; some clients can't burn-in."},
     "sub_text_ass":           {"name": "ASS/SSA subtitles",              "category": "subtitles", "severity_default": "info",             "description": "Styled subs; many clients downgrade to plain SRT."},
-    "subtitle_unreadable":    {"name": "Subtitle file unreadable",       "category": "subtitles", "severity_default": "info",             "description": "Common encodings tried — none could read it."},
-    "subtitle_orphan":        {"name": "Subtitle without paired media",  "category": "subtitles", "severity_default": "info",             "description": "External subtitle file with no matching media in the same folder."},
-    "subtitle_no_lang":       {"name": "Subtitle without language tag",  "category": "subtitles", "severity_default": "info",             "description": "Filename has no recognized 2/3-letter language code."},
+    "subtitle_unreadable":    {"name": "Subtitle file unreadable",       "category": "non_media", "severity_default": "warning",          "description": "Common encodings tried — none could read it."},
+    "subtitle_orphan":        {"name": "Subtitle without paired media",  "category": "non_media", "severity_default": "warning",          "description": "External subtitle file with no matching media in the same folder."},
+    "subtitle_no_lang":       {"name": "Subtitle without language tag",  "category": "non_media", "severity_default": "info",             "description": "Filename has no recognized 2/3-letter language code."},
+    "subtitle_invalid":       {"name": "Subtitle file invalid",          "category": "non_media", "severity_default": "corrupt",          "description": "Subtitle failed validation — probably corrupted."},
 
     # Other
     "framerate_high":         {"name": "Framerate above 60 fps",         "category": "video", "severity_default": "possible_transcode",   "description": "Some HDMI 2.0 chains can't sustain HFR."},
@@ -646,9 +724,9 @@ def _evaluate_subtitle(file_record, paired_media):
     if not skip_disk:
         val = validate_subtitle_file(path)
         if val.get("issue"):
-            sev = "unplayable" if "Empty" in val["issue"] or "Cannot" in val["issue"] else "info"
+            sev = "corrupt" if "Empty" in val["issue"] or "Cannot" in val["issue"] else "warning"
             issues.append(_issue(
-                "subtitle_invalid", sev, "subtitles",
+                "subtitle_invalid", sev, "non_media",
                 f"Subtitle file invalid: {val['issue']}",
                 f"External subtitle file failed validation. Plex will likely skip it or fail to display. Reason: {val['issue']}",
                 [],
@@ -656,7 +734,7 @@ def _evaluate_subtitle(file_record, paired_media):
             return issues
         if not val.get("readable"):
             issues.append(_issue(
-                "subtitle_unreadable", "info", "subtitles",
+                "subtitle_unreadable", "warning", "non_media",
                 "Subtitle file unreadable",
                 "Could not read the subtitle file with any common encoding. Plex may fail to load it.",
                 [],
@@ -667,7 +745,7 @@ def _evaluate_subtitle(file_record, paired_media):
     # No paired media file in same folder?
     if not paired_media:
         issues.append(_issue(
-            "subtitle_orphan", "info", "subtitles",
+            "subtitle_orphan", "warning", "non_media",
             "Orphan subtitle (no matching media file)",
             f"No media file in the same folder matches the subtitle's base name '{val['base_name']}'. "
             "Plex external subtitles are paired by filename — without a matching media file, this subtitle will never be loaded.",
@@ -675,7 +753,7 @@ def _evaluate_subtitle(file_record, paired_media):
         ))
     elif val.get("lang") is None:
         issues.append(_issue(
-            "subtitle_no_lang", "info", "subtitles",
+            "subtitle_no_lang", "info", "non_media",
             "No language tag in filename",
             "Plex matches external subtitles to media using a 2- or 3-letter language tag in the filename "
             "(e.g. movie.en.srt). Without a tag, Plex labels this 'Unknown' and may fail to auto-select it.",
