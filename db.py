@@ -54,8 +54,18 @@ def init():
     global _initialized
     with _init_lock:
         if _initialized: return
-        with cursor() as c:
-            c.executescript("""
+        _create_schema()
+        _run_migrations()
+        _ensure_indexes()
+        _initialized = True
+
+
+def _create_schema():
+    """Create all tables if they don't exist. Indexes are created AFTER
+    migrations so they don't fail when columns don't exist on old DBs.
+    """
+    with cursor() as c:
+        c.executescript("""
                 CREATE TABLE IF NOT EXISTS files (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     path            TEXT NOT NULL UNIQUE,
@@ -84,11 +94,6 @@ def init():
                     last_evaluated  TEXT,
                     scan_status     TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_files_path     ON files(path);
-                CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
-                CREATE INDEX IF NOT EXISTS idx_files_codec    ON files(codec);
-                CREATE INDEX IF NOT EXISTS idx_files_dovi     ON files(dovi_profile);
-                CREATE INDEX IF NOT EXISTS idx_files_arr      ON files(arr_kind, arr_id);
 
                 CREATE TABLE IF NOT EXISTS evaluations (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,9 +107,6 @@ def init():
                     evaluated_at  TEXT,
                     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
                 );
-                CREATE INDEX IF NOT EXISTS idx_eval_file     ON evaluations(file_id);
-                CREATE INDEX IF NOT EXISTS idx_eval_severity ON evaluations(severity);
-                CREATE INDEX IF NOT EXISTS idx_eval_category ON evaluations(category);
 
                 CREATE TABLE IF NOT EXISTS scans (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,9 +175,279 @@ def init():
                     created_at      TEXT,
                     updated_at      TEXT
                 );
-                CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
+
+                -- Schema version tracker
+                CREATE TABLE IF NOT EXISTS schema_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT
+                );
             """)
-        _initialized = True
+
+
+def _ensure_indexes():
+    """Create all indexes. Runs after migrations so all referenced columns exist."""
+    with cursor() as c:
+        c.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_files_path     ON files(path);
+            CREATE INDEX IF NOT EXISTS idx_files_category ON files(category);
+            CREATE INDEX IF NOT EXISTS idx_files_codec    ON files(codec);
+            CREATE INDEX IF NOT EXISTS idx_files_dovi     ON files(dovi_profile);
+            CREATE INDEX IF NOT EXISTS idx_files_arr      ON files(arr_kind, arr_id);
+            CREATE INDEX IF NOT EXISTS idx_eval_file      ON evaluations(file_id);
+            CREATE INDEX IF NOT EXISTS idx_eval_severity  ON evaluations(severity);
+            CREATE INDEX IF NOT EXISTS idx_eval_category  ON evaluations(category);
+            CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
+        """)
+
+
+# ─── Migrations ──────────────────────────────────────────────────────────────
+# Each migration is a (version, fn) tuple. Migrations run in order. Each
+# migration must be idempotent: it should check whether its work is already
+# done before doing it. This is important because users on old DBs may have
+# partial schemas where some columns already exist.
+#
+# To add a migration: append a new (N, fn) tuple. Don't reorder, don't
+# renumber. Migrations only apply once, tracked in schema_meta.
+
+def _column_exists(c, table, column) -> bool:
+    rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == column for r in rows)
+
+
+def _ensure_column(c, table, column, type_decl):
+    if not _column_exists(c, table, column):
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_decl}")
+
+
+def _migrate_v0_base_columns(c):
+    """v0: ensure all 'base' columns from v4 exist on the core tables.
+
+    Pre-migration users may have an older schema. We add any missing column.
+    """
+    file_cols = {
+        "name": "TEXT", "extension": "TEXT", "size_bytes": "INTEGER",
+        "mtime": "REAL", "category": "TEXT", "hash_sha256": "TEXT",
+        "codec": "TEXT", "audio_codec": "TEXT", "resolution": "TEXT",
+        "container": "TEXT", "dovi_profile": "TEXT", "duration_sec": "REAL",
+        "bitrate": "INTEGER", "probe_json": "TEXT", "paired_media_id": "INTEGER",
+        "arr_kind": "TEXT", "arr_id": "INTEGER", "arr_file_id": "INTEGER",
+        "arr_metadata": "TEXT", "monitored": "INTEGER",
+        "first_scanned": "TEXT", "last_scanned": "TEXT",
+        "last_evaluated": "TEXT", "scan_status": "TEXT",
+    }
+    for col, typ in file_cols.items():
+        _ensure_column(c, "files", col, typ)
+
+    eval_cols = {
+        "severity": "TEXT", "category": "TEXT", "rule_key": "TEXT",
+        "message": "TEXT", "detail": "TEXT", "affected": "TEXT",
+        "created_at": "TEXT",
+    }
+    for col, typ in eval_cols.items():
+        _ensure_column(c, "evaluations", col, typ)
+
+    scan_cols = {
+        "status": "TEXT", "kind": "TEXT", "started_at": "TEXT",
+        "finished_at": "TEXT", "processed": "INTEGER DEFAULT 0",
+        "total": "INTEGER DEFAULT 0", "error": "TEXT",
+    }
+    for col, typ in scan_cols.items():
+        _ensure_column(c, "scans", col, typ)
+
+    integ_cols = {
+        "kind": "TEXT", "name": "TEXT", "base_url": "TEXT", "api_key": "TEXT",
+        "options": "TEXT", "enabled": "INTEGER DEFAULT 1",
+        "poll_interval": "INTEGER DEFAULT 900", "last_sync": "TEXT",
+        "last_error": "TEXT", "created_at": "TEXT",
+    }
+    for col, typ in integ_cols.items():
+        _ensure_column(c, "integrations", col, typ)
+
+    ie_cols = {
+        "kind": "TEXT", "event_type": "TEXT", "file_paths": "TEXT",
+        "payload": "TEXT", "received_at": "TEXT",
+    }
+    for col, typ in ie_cols.items():
+        _ensure_column(c, "integration_events", col, typ)
+
+    cust_cols = {
+        "name": "TEXT", "description": "TEXT", "severity": "TEXT",
+        "category": "TEXT", "spec_json": "TEXT", "affected_devices": "TEXT",
+        "message": "TEXT", "detail": "TEXT", "enabled": "INTEGER DEFAULT 1",
+        "created_at": "TEXT", "updated_at": "TEXT",
+    }
+    for col, typ in cust_cols.items():
+        _ensure_column(c, "custom_rules", col, typ)
+
+
+def _migrate_v1_extend_automation_rules(c):
+    """v1: ensure new columns on automation_rules exist (action_config, file_category, runs_count, last_action_count)."""
+    _ensure_column(c, "automation_rules", "action_config", "TEXT")
+    _ensure_column(c, "automation_rules", "file_category", "TEXT")
+    _ensure_column(c, "automation_rules", "runs_count", "INTEGER DEFAULT 0")
+    _ensure_column(c, "automation_rules", "last_action_count", "INTEGER DEFAULT 0")
+
+
+def _migrate_v2_severity_match_mode(c):
+    """v2: how to compare severity when a file has multiple issues."""
+    _ensure_column(c, "automation_rules", "severity_match", "TEXT DEFAULT 'highest'")
+    # Backfill existing rules with 'highest' so behavior is unchanged
+    c.execute("UPDATE automation_rules SET severity_match='highest' WHERE severity_match IS NULL")
+
+
+def _migrate_v3_purge_ignored(c):
+    """v3: belt-and-braces — purge any 'ignored' rows that snuck in on old DBs."""
+    c.execute("DELETE FROM evaluations WHERE file_id IN (SELECT id FROM files WHERE category='ignored')")
+    c.execute("DELETE FROM files WHERE category='ignored'")
+
+
+def _migrate_v4_dropped_custom_rules(c):
+    """v4: track custom rules a user has explicitly dropped (separate from 'disabled')."""
+    _ensure_column(c, "custom_rules", "dropped", "INTEGER DEFAULT 0")
+    _ensure_column(c, "custom_rules", "rule_kind", "TEXT DEFAULT 'custom'")  # 'custom' or 'builtin'
+
+
+_MIGRATIONS = [
+    (0, _migrate_v0_base_columns),
+    (1, _migrate_v1_extend_automation_rules),
+    (2, _migrate_v2_severity_match_mode),
+    (3, _migrate_v3_purge_ignored),
+    (4, _migrate_v4_dropped_custom_rules),
+]
+
+
+def _run_migrations():
+    with cursor() as c:
+        row = c.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        # current=-1 means "never migrated", so v0 will run on the first init.
+        # On a freshly created DB, all migrations apply (and are idempotent).
+        current = int(row["value"]) if row else -1
+        for version, fn in _MIGRATIONS:
+            if version > current:
+                try:
+                    fn(c)
+                    c.execute("INSERT OR REPLACE INTO schema_meta(key,value) VALUES('version', ?)",
+                              (str(version),))
+                    print(f"[db] migration {version} applied: {fn.__name__}")
+                except Exception as e:
+                    print(f"[db] migration {version} FAILED: {e}")
+                    raise
+
+
+def schema_version() -> int:
+    with cursor() as c:
+        row = c.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+        return int(row["value"]) if row else -1
+
+
+# ─── Backup & restore ────────────────────────────────────────────────────────
+
+def backup_to(dest_path: str):
+    """Create a consistent backup using SQLite's online backup API.
+
+    Safe to call while other connections are reading/writing.
+    """
+    import sqlite3
+    src = _connect()
+    dst = sqlite3.connect(dest_path)
+    try:
+        with dst:
+            src.backup(dst)
+    finally:
+        dst.close()
+
+
+def restore_from(src_path: str):
+    """Replace the live DB with the contents of the file at src_path.
+
+    Uses SQLite's backup API to copy from source into the live DB, which
+    handles WAL state correctly (vs raw file copy which can leave the live
+    DB in an inconsistent state).
+    """
+    import sqlite3, os
+    global _initialized, _local
+    # Verify the candidate file is a valid SQLite DB and has the expected tables
+    test = sqlite3.connect(src_path)
+    try:
+        rows = test.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        names = {r[0] for r in rows}
+        required = {"files", "evaluations", "scans", "integrations",
+                    "automation_rules", "custom_rules"}
+        missing = required - names
+        if missing:
+            raise ValueError(f"Backup is missing required tables: {sorted(missing)}")
+    finally:
+        test.close()
+
+    with _init_lock:
+        # Close any cached connection on this thread, force a checkpoint, drop
+        # the WAL files, then use the backup API to copy contents.
+        try:
+            if hasattr(_local, "conn"):
+                try: _local.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception: pass
+                try: _local.conn.close()
+                except Exception: pass
+                del _local.conn
+        except Exception: pass
+
+        # Wipe stale journal files; safer than copying over them
+        for ext in ("-wal", "-shm", "-journal"):
+            leftover = str(DB_PATH) + ext
+            if os.path.exists(leftover):
+                try: os.remove(leftover)
+                except Exception: pass
+
+        # Use sqlite3.backup API to populate the live file from the backup.
+        # This works even if the file already exists and is more robust than
+        # raw shutil.copyfile against partial pages.
+        src_conn = sqlite3.connect(src_path)
+        # Open the live file fresh — no WAL yet because we wiped it
+        live_conn = sqlite3.connect(str(DB_PATH))
+        try:
+            with live_conn:
+                src_conn.backup(live_conn)
+        finally:
+            src_conn.close()
+            live_conn.close()
+
+        _initialized = False
+    init()
+
+
+def vacuum():
+    """Reclaim space and rebuild the file. Safe to call any time."""
+    with cursor() as c:
+        c.execute("VACUUM")
+
+
+def integrity_check() -> tuple[bool, str]:
+    with cursor() as c:
+        rows = c.execute("PRAGMA integrity_check").fetchall()
+        msg = "; ".join(r[0] for r in rows)
+        return msg.lower() == "ok", msg
+
+
+def db_stats() -> dict:
+    """Surface counts + file size for the Settings UI."""
+    import os
+    with cursor() as c:
+        n_files = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        n_evals = c.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
+        n_rules = c.execute("SELECT COUNT(*) FROM custom_rules").fetchone()[0]
+        n_int   = c.execute("SELECT COUNT(*) FROM integrations").fetchone()[0]
+        n_auto  = c.execute("SELECT COUNT(*) FROM automation_rules").fetchone()[0]
+    try: size = os.path.getsize(DB_PATH)
+    except Exception: size = 0
+    return {
+        "path": str(DB_PATH),
+        "size_bytes": size,
+        "files": n_files,
+        "evaluations": n_evals,
+        "custom_rules": n_rules,
+        "integrations": n_int,
+        "automation_rules": n_auto,
+    }
 
 
 # ─── Files ────────────────────────────────────────────────────────────────────
@@ -277,8 +549,29 @@ def list_files_filtered(severity=None, category=None, file_category=None,
     # explicitly in case a user upgrades from an older version.
     where.append("(f.category IS NULL OR f.category != 'ignored')")
     if severity:
-        where.append("EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.severity=?)")
-        params.append(severity)
+        if severity == "ok":
+            # Clean files have NO evaluations; treat any file whose worst
+            # severity rank is 0 (or no rows at all) as 'ok'.
+            where.append("""NOT EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id
+                                       AND e.severity != 'ok')""")
+        else:
+            # Best-severity match: file has an evaluation at this exact severity
+            # AND no evaluations more severe than it
+            sev_rank_map = {"info":1,"high_bitrate":2,"possible_transcode":3,
+                            "always_transcode":4,"unplayable":5}
+            target_rank = sev_rank_map.get(severity, 0)
+            where.append("""EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.severity=?)""")
+            params.append(severity)
+            # And no MORE severe issue exists (so this is the headline severity)
+            if target_rank < 5:
+                where.append("""NOT EXISTS(
+                    SELECT 1 FROM evaluations e2 WHERE e2.file_id=f.id
+                    AND CASE e2.severity
+                          WHEN 'unplayable' THEN 5 WHEN 'always_transcode' THEN 4
+                          WHEN 'possible_transcode' THEN 3 WHEN 'high_bitrate' THEN 2
+                          WHEN 'info' THEN 1 ELSE 0 END > ?
+                )""")
+                params.append(target_rank)
     if category:
         where.append("EXISTS(SELECT 1 FROM evaluations e WHERE e.file_id=f.id AND e.category=?)")
         params.append(category)
@@ -297,7 +590,7 @@ def list_files_filtered(severity=None, category=None, file_category=None,
         like = f"%{q.lower()}%"
         params.extend([like, like])
     if where: sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY sev_rank DESC, f.path ASC LIMIT ? OFFSET ?"
+    sql += " ORDER BY COALESCE(sev_rank, 0) DESC, f.path ASC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
 
     with cursor() as c:
@@ -560,14 +853,16 @@ def list_automation_rules(integration_id=None):
         return rows
 
 def add_automation_rule(integration_id, name, when_severity, comparison, action,
-                        enabled=1, action_config=None, file_category=None):
+                        enabled=1, action_config=None, file_category=None,
+                        severity_match="highest"):
     with cursor() as c:
         c.execute("""INSERT INTO automation_rules
                      (integration_id, name, when_severity, comparison, action,
-                      action_config, file_category, enabled)
-                     VALUES (?,?,?,?,?,?,?,?)""",
+                      action_config, file_category, enabled, severity_match)
+                     VALUES (?,?,?,?,?,?,?,?,?)""",
                   (integration_id, name, when_severity, comparison, action,
-                   json.dumps(action_config or {}), file_category, enabled))
+                   json.dumps(action_config or {}), file_category, enabled,
+                   severity_match))
         return c.lastrowid
 
 def delete_automation_rule(rule_id):
@@ -598,18 +893,104 @@ def files_for_automation(kind):
 
 # ─── Custom rules ─────────────────────────────────────────────────────────────
 
-def list_custom_rules(only_enabled=False):
-    sql = "SELECT * FROM custom_rules"
-    if only_enabled: sql += " WHERE enabled=1"
+def list_custom_rules(only_enabled=False, include_dropped=False, rule_kind="custom"):
+    sql = "SELECT * FROM custom_rules WHERE 1=1"
+    params = []
+    if rule_kind:
+        sql += " AND COALESCE(rule_kind, 'custom') = ?"
+        params.append(rule_kind)
+    if only_enabled: sql += " AND enabled=1"
+    if not include_dropped: sql += " AND COALESCE(dropped, 0) = 0"
     sql += " ORDER BY id"
     with cursor() as c:
-        rows = [dict(r) for r in c.execute(sql)]
+        rows = [dict(r) for r in c.execute(sql, params)]
         for r in rows:
             try: r["spec"] = json.loads(r["spec_json"]) if r["spec_json"] else {}
             except Exception: r["spec"] = {}
             try: r["affected_devices_list"] = json.loads(r["affected_devices"]) if r["affected_devices"] else []
             except Exception: r["affected_devices_list"] = []
         return rows
+
+
+def list_dropped_rules():
+    """Return rules a user has dropped (kind=custom or builtin), for the
+    'Disabled / Discarded' tab."""
+    with cursor() as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT * FROM custom_rules WHERE COALESCE(dropped, 0) = 1 ORDER BY id")]
+        for r in rows:
+            try: r["spec"] = json.loads(r["spec_json"]) if r["spec_json"] else {}
+            except Exception: r["spec"] = {}
+        return rows
+
+
+def disabled_rule_keys():
+    """Return list of rule_keys that should be filtered out of evaluations."""
+    with cursor() as c:
+        # A built-in rule is "active" if it's NOT in the table OR it's there with
+        # enabled=1 and dropped=0. A built-in rule is "disabled" if there's a
+        # row marking enabled=0 OR dropped=1.
+        rows = c.execute("""
+            SELECT spec_json FROM custom_rules
+            WHERE COALESCE(rule_kind,'custom') = 'builtin'
+              AND (enabled = 0 OR COALESCE(dropped, 0) = 1)
+        """).fetchall()
+        keys = []
+        for r in rows:
+            try:
+                spec = json.loads(r["spec_json"]) if r["spec_json"] else {}
+                if spec.get("rule_key"): keys.append(spec["rule_key"])
+            except Exception: pass
+        return keys
+
+
+def upsert_builtin_rule_state(rule_key: str, enabled: bool, dropped: bool = False,
+                              severity_override: str = None):
+    """Track a built-in rule's user-side state (disabled / dropped / severity override)."""
+    now = datetime.now().isoformat()
+    with cursor() as c:
+        existing = c.execute(
+            "SELECT id FROM custom_rules WHERE COALESCE(rule_kind,'custom')='builtin' "
+            "AND spec_json LIKE ?",
+            (f'%"{rule_key}"%',)
+        ).fetchone()
+        spec = json.dumps({"rule_key": rule_key, "is_builtin": True})
+        if existing:
+            updates = {"enabled": 1 if enabled else 0,
+                       "dropped": 1 if dropped else 0,
+                       "updated_at": now}
+            if severity_override:
+                updates["severity"] = severity_override
+            sets = ", ".join(f"{k}=?" for k in updates)
+            c.execute(f"UPDATE custom_rules SET {sets} WHERE id=?",
+                      (*updates.values(), existing["id"]))
+        else:
+            c.execute("""INSERT INTO custom_rules
+                         (name, description, severity, category, spec_json, affected_devices,
+                          message, detail, enabled, dropped, rule_kind, created_at, updated_at)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (rule_key, f"Built-in rule: {rule_key}",
+                       severity_override or "info", "builtin",
+                       spec, "[]", rule_key, "", 1 if enabled else 0,
+                       1 if dropped else 0, "builtin", now, now))
+
+
+def get_builtin_rule_state(rule_key: str) -> dict:
+    """Return {enabled, dropped, severity_override} for a built-in rule, or
+    a default if no row exists yet."""
+    with cursor() as c:
+        row = c.execute(
+            "SELECT * FROM custom_rules WHERE COALESCE(rule_kind,'custom')='builtin' "
+            "AND spec_json LIKE ?",
+            (f'%"{rule_key}"%',)
+        ).fetchone()
+        if not row:
+            return {"enabled": True, "dropped": False, "severity_override": None}
+        return {
+            "enabled": bool(row["enabled"]),
+            "dropped": bool(row["dropped"]),
+            "severity_override": row["severity"] if row["severity"] != "info" else None,
+        }
 
 
 def get_custom_rule(rule_id):

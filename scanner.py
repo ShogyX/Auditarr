@@ -123,7 +123,7 @@ def _set_progress(job_id, prog):
     db.update_scan(job_id, processed=prog.processed, total=prog.total)
 
 
-def _scan_one_and_eval(path: Path, cfg: dict, prog: _Progress, job_id: str, bitrate_threshold: int, custom_rules: list = None):
+def _scan_one_and_eval(path: Path, cfg: dict, prog: _Progress, job_id: str, bitrate_threshold: int, custom_rules: list = None, disabled_rule_keys: set = None):
     """Worker — scan a single file, store + evaluate."""
     try:
         record = classify_file(path, cfg)
@@ -154,6 +154,7 @@ def _scan_one_and_eval(path: Path, cfg: dict, prog: _Progress, job_id: str, bitr
             "dovi_profile": record.get("dovi_profile"),
             "bitrate": record.get("bitrate"),
             "duration_sec": record.get("duration_sec"),
+            "_disabled_rule_keys": disabled_rule_keys or set(),
         }
         issues = checks.evaluate(eval_record,
                                  bitrate_threshold=bitrate_threshold,
@@ -191,16 +192,17 @@ def run_full_scan(job_id: str, cfg: dict):
     bitrate_threshold = (cfg.get("bitrate_threshold_mbps", 80)) * 1_000_000
     workers = max(1, cfg.get("workers", 4))
     custom_rules = db.list_custom_rules(only_enabled=True)
+    disabled_keys = set(db.disabled_rule_keys())
 
     # Pass 1: scan every file (subtitles will need a second pass for pairing)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_scan_one_and_eval, p, cfg, prog, job_id, bitrate_threshold, custom_rules) for p in paths]
+        futures = [ex.submit(_scan_one_and_eval, p, cfg, prog, job_id, bitrate_threshold, custom_rules, disabled_keys) for p in paths]
         for f in as_completed(futures):
             try: f.result()
             except Exception: pass
 
     # Pass 2: re-pair all subtitles now that all media files are indexed
-    _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules)
+    _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules, disabled_keys)
 
     # Prune missing files + files now matching ignore patterns
     if cfg.get("prune_missing", True):
@@ -236,8 +238,9 @@ def run_targeted_scan(job_id: str, cfg: dict, paths: list[str]):
     bitrate_threshold = (cfg.get("bitrate_threshold_mbps", 80)) * 1_000_000
     workers = max(1, min(cfg.get("workers", 4), len(paths) or 1))
     custom_rules = db.list_custom_rules(only_enabled=True)
+    disabled_keys = set(db.disabled_rule_keys())
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_scan_one_and_eval, Path(p), cfg, prog, job_id, bitrate_threshold, custom_rules) for p in paths]
+        futures = [ex.submit(_scan_one_and_eval, Path(p), cfg, prog, job_id, bitrate_threshold, custom_rules, disabled_keys) for p in paths]
         for f in as_completed(futures):
             try: f.result()
             except Exception: pass
@@ -259,6 +262,7 @@ def run_reeval(job_id: str, cfg: dict):
 
     bitrate_threshold = (cfg.get("bitrate_threshold_mbps", 80)) * 1_000_000
     custom_rules = db.list_custom_rules(only_enabled=True)
+    disabled_keys = set(db.disabled_rule_keys())
 
     files = list(db.all_files_for_eval())
     prog = _Progress()
@@ -274,22 +278,23 @@ def run_reeval(job_id: str, cfg: dict):
             "probe":       f.get("probe"),
             "path":        f["path"],
             "name":        Path(f["path"]).name,
+            "_disabled_rule_keys": disabled_keys,
+            # Re-eval is rules-only — no fresh disk reads
+            "skip_subtitle_disk_check": True,
         }
-        # Pair subtitles using current paired_media_id (already set on scan)
+        # Use the existing pairing; don't re-walk the filesystem
         paired = None
-        if record["category"] == "subtitle":
-            if f.get("paired_media_id"):
-                paired = db.get_file_by_id(f["paired_media_id"])
-            else:
-                paired = pair_subtitle_to_media(record)
-                if paired:
-                    db.update_file_paired(f["id"], paired["id"])
+        if record["category"] == "subtitle" and f.get("paired_media_id"):
+            paired = db.get_file_by_id(f["paired_media_id"])
 
-        issues = checks.evaluate(record, bitrate_threshold=bitrate_threshold, paired_media=paired)
-        for rule in custom_rules:
-            iss = checks.evaluate_custom_rule(record, rule)
-            if iss: issues.append(iss)
-        db.replace_evaluations(f["id"], issues)
+        try:
+            issues = checks.evaluate(record, bitrate_threshold=bitrate_threshold, paired_media=paired)
+            for rule in custom_rules:
+                iss = checks.evaluate_custom_rule(record, rule)
+                if iss: issues.append(iss)
+            db.replace_evaluations(f["id"], issues)
+        except Exception as e:
+            print(f"[reeval] file {f['id']} failed: {e}")
         prog.bump()
         if prog.processed % 100 == 0:
             _set_progress(job_id, prog)
@@ -298,12 +303,13 @@ def run_reeval(job_id: str, cfg: dict):
                    processed=prog.processed, total=prog.total)
 
     try: integrations.run_automation_rules()
-    except Exception: pass
+    except Exception as e: print(f"[reeval] automation failed: {e}")
 
 
-def _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules=None):
+def _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules=None, disabled_keys=None):
     """Re-pair all subtitles + re-evaluate them now that media is fully indexed."""
     custom_rules = custom_rules or []
+    disabled_keys = disabled_keys or set()
     for f in db.all_files_for_eval():
         if f.get("category") != "subtitle":
             continue
@@ -314,6 +320,7 @@ def _repair_subtitle_pairs(cfg, bitrate_threshold, custom_rules=None):
             "scan_status": f.get("scan_status"),
             "probe":       f.get("probe"),
             "path":        f["path"],
+            "_disabled_rule_keys": disabled_keys,
         }
         paired = pair_subtitle_to_media(record)
         db.update_file_paired(f["id"], paired["id"] if paired else None)

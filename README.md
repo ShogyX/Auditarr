@@ -16,26 +16,26 @@ Requires `ffprobe` (from `ffmpeg`) on PATH. Tested on Python 3.10+.
 
 On first launch, the browser will redirect you to `/login.html` to set up an admin account. Auditarr generates an API token at the same time — copy it and store it somewhere safe (it's also visible later in Settings → Account).
 
-## What's new in v5
+## What's new in v6
 
-- **Authentication** — single-user login with PBKDF2-hashed password and an API token for headless/script use. Sessions are HttpOnly cookies; the API token can be sent as `Authorization: Bearer <token>` or `X-API-Key: <token>`.
-- **Self-update notifier** — Auditarr polls GitHub every 6 hours for new commits on `main`. When found, a banner offers a link to view the diff; pull manually with `git pull` (or download a tarball) and click *Mark current as latest* to dismiss.
-- **Bazarr integration** — full sync of subtitle inventory, webhook listener for `Subtitle Downloaded` / `Subtitle Removed` events, and outbound actions to delete a subtitle file or trigger a re-search for a media item.
-- **Tdarr integration** — full integration with libraries, plugins, queue inspection, and three modes for queueing transcodes:
-  1. *Library mode* — pick an existing Tdarr library (uses its configured flow)
-  2. *Plugin mode* — pick a community Flow / plugin by name
-  3. *Inline profile* — define codec / container / CRF / hardware-accel right in Auditarr; the spec is sent to Tdarr's GenericTranscode flow
-- **Remote path mappings** — for Tdarr running in a different container, configure `local → remote` path translations on the integration; longest-prefix-match wins. Files queued for transcode are translated automatically.
-- **Extended automation rules** — actions now include `monitor` / `unmonitor` (Sonarr/Radarr), `transcode_via_tdarr`, `search_subs_via_bazarr`, and `delete_sub_via_bazarr`. Rules can also be restricted to a specific file category.
-- **Dashboard redesign** — Media stats are the default and central panel. Subtitles / Images / Metadata / Junk show as compact side cards with mini severity pills. Every stat (severity tile, codec bar, audio bar, resolution bar, highlight tile, side card, severity pill) is clickable and filters the file browser to the matching subset.
+Stability and bug-fix release.
 
-## What was already there (v4 carryover)
+- **Robust schema migrations.** A new versioning system means upgrading from any older Auditarr build no longer corrupts your database. Run the new build and it will detect missing columns/tables, add them, and continue. All migrations are idempotent.
+- **Backup and restore.** Settings → Database has a "Download backup" button that produces a consistent SQLite snapshot, and a "Restore from backup" button that uploads a backup file and replaces the live database. Restore is sanity-checked before applying.
+- **Auto-save settings.** No more "Save Configuration" button — every change to settings (paths, ignore patterns, ranges, toggles, compatibility mode) saves automatically with a small status indicator.
+- **Help & About page.** A new nav item shows the bundled README, a CHANGELOG, and links to GitHub/issues/related projects. Rendered with a tiny inline markdown renderer.
+- **Custom Rules redesign.** Three tabs: Built-in (55 named rules grouped by category, all toggleable, severity-overridable, or droppable), Custom, and Disabled/Discarded.
+- **Severity match modes.** Automation rules can decide how to compare a file with multiple severities against the rule threshold: highest (default), lowest, or any.
 
-- 6-level severity scale: `Unplayable`, `Always Transcode`, `Possible Transcode`, `High Bitrate`, `Info`, `OK`. A file's headline severity is the worst across all its issues.
-- Custom rule engine with both visual builder and raw-JSON editor; 16 fields and 11 operators.
-- Plex + Jellyfin device matrix (28 devices total when *Both* mode is active).
-- File categorisation: `media`, `subtitle`, `image`, `metadata`, `junk` — with `ignored` files never stored in the DB.
-- Three scan modes: *Full Scan*, *Re-eval Rules* (no ffprobe), *Targeted* (single file or webhook-driven).
+### Bugs fixed
+
+- Could not add automation rules (missing columns on existing DBs).
+- App crashed at the end of a scan (post-scan automation runner threw on missing columns).
+- "Re-eval Rules" was triggering a library scan (subtitle revalidation read disk).
+- Sonarr/Radarr webhook events stopped being recorded (column-name mismatch).
+- OK-severity filter returned no files (clean files have zero evaluations, not a `severity='ok'` row).
+- Category sorting put files with no evaluations in the wrong order.
+- `_UNPACK_*` ignore pattern missed files inside `_UNPACK_*` directories.
 
 ## Authentication
 
@@ -62,50 +62,53 @@ Update workflow:
 ```bash
 cd /path/to/auditarr
 git pull
-# (or download a release tarball)
 python3 server.py
 ```
 
-Then click *Mark current as latest* (or *I've updated* in the banner) so Auditarr stops nagging.
+The app will run any new schema migrations automatically. Then click *Mark current as latest* (or *I've updated* in the banner) so Auditarr stops nagging.
 
-## Bazarr integration
+## Database management (new)
 
-| Feature | What it does |
+Settings → Database shows:
+
+- Live DB path and size on disk.
+- Counts of files, evaluations, integrations, automation rules, custom rules.
+- Current schema version.
+
+Buttons:
+
+- **⬇ Download backup** — streams a consistent SQLite snapshot.
+- **⬆ Restore from backup** — uploads a backup file and replaces the live DB.
+- **⚬ Vacuum** — reclaims space and rebuilds the file.
+- **⚡ Integrity check** — runs `PRAGMA integrity_check`.
+- **⌫ Clean evaluations** — drops every issue row (files stay; run *Re-eval Rules* to repopulate).
+
+## Auto-save settings
+
+Every input on the Settings page saves automatically. The indicator next to the *Force save* button shows the last save state ("Saving…", "Saved", "Save failed"). The Force save button is a fallback if you've changed something and want to flush immediately.
+
+## Built-in vs custom rules
+
+There are now three kinds of rules in Auditarr:
+
+1. **Built-in** rules — implemented in code; 55 named rules covering DV, HEVC/AV1/H.264 variants, audio codecs, container quirks, HDR, subtitles, framerate, resolution, and bitrate. Each has a default severity but you can:
+   - Toggle it off (still listed in the Built-in tab, just doesn't run).
+   - Override its severity.
+   - Drop it (moves to the Disabled/Discarded tab and stops running).
+2. **Custom** rules — user-created via the visual builder or raw JSON editor. 16 fields, 11 operators.
+3. **Dropped** rules — built-in or custom rules a user has explicitly removed; can be restored from the Disabled/Discarded tab.
+
+After changing rules, click **⚡ Re-eval Rules** in the sidebar — it's instant and doesn't read any media files.
+
+## Severity match modes (automation)
+
+When an automation rule fires depends on which severity from a multi-issue file you compare:
+
+| Mode | Meaning |
 | --- | --- |
-| Test | Pings `/api/system/status` |
-| Sync | Walks `/api/series` and `/api/movies`, links subtitle inventory to files in Auditarr's DB |
-| Webhook | Receives Bazarr's *Subtitle Downloaded* / *Subtitle Removed* notifications and triggers a targeted re-scan |
-| Delete subtitle | UI button in file detail; calls Bazarr's `PATCH /api/{episodes,movies}/subtitles` with `action=delete` |
-| Search subtitles | UI button in file detail; calls the same endpoint with `action=search` |
-| Automation | Rules can `search_subs_via_bazarr` or `delete_sub_via_bazarr` based on file severity |
-
-## Tdarr integration
-
-| Feature | What it does |
-| --- | --- |
-| Test | Pings `/api/v2/status` (with cruddb fallback for older Tdarr) |
-| Sync | Pulls library list and Flow / plugin list (via `cruddb` collection scan) |
-| List libraries | UI populates dropdown for "Library mode" automation rules |
-| List plugins | UI populates dropdown for "Plugin mode" automation rules |
-| Queue transcode | Three modes: library, plugin/flow, or inline profile (codec / container / CRF / HWA) |
-| Path mappings | `[{local: '/host/media', remote: '/data'}]` longest-prefix-match translation |
-| Webhook | Receives Tdarr completion events when wired with the community webhook flow |
-| Automation | Rules can `transcode_via_tdarr` with a profile spec when files exceed a severity threshold |
-
-### Inline profile fields
-
-```json
-{
-  "codec":          "hevc | h264 | av1",
-  "container":      "mkv | mp4",
-  "audio_codec":    "copy | aac | ac3 | eac3",
-  "audio_bitrate":  "128k",
-  "video_bitrate":  "5M",
-  "crf":            22,
-  "hardware_accel": "qsv | nvenc | vaapi | null",
-  "resolution_max": "1080p | 720p | null"
-}
-```
+| **Highest** (default) | "The worst issue's severity is at least X." Old behaviour. |
+| **Lowest** | "Even the least-severe issue meets X." Useful for narrow rules that should fire only when literally everything matches. |
+| **Any** | "At least one issue matches." Good when you want a rule to fire on any file with even a single qualifying issue. |
 
 ## Severity scale
 
@@ -117,12 +120,6 @@ Then click *Mark current as latest* (or *I've updated* in the banner) so Auditar
 | **High Bitrate** | Above your configured threshold (default 80 Mbps) |
 | **Info** | Worth noting but generally fine |
 | **OK** | Direct-plays on most clients |
-
-## Dashboard
-
-The dashboard now has Media as the central panel with a hero summary (score + status + quick stats), a clickable severity-tile grid, and four clickable bar panels (video codecs, audio codecs, resolutions, issue categories). The side panel shows non-media categories (Subtitles / Images / Metadata / Junk) as compact cards each with their own severity pills. **Every number on the dashboard is clickable** and jumps to the file browser with the matching filter pre-applied.
-
-Ignored files (matching any of your `ignore_patterns`) are never stored in the database, so they don't appear in any category, count, or breakdown.
 
 ## Compatibility modes
 
@@ -136,7 +133,7 @@ Jellyfin overrides reflect real-world differences from Plex — e.g. Jellyfin Me
 
 ## File categories
 
-- **Media** — `.mkv`, `.mp4`, `.avi`, `.mov`, `.ts`, `.m2ts`, `.webm`, etc.
+- **Media** — `.mkv`, `.mp4`, `.avi`, `.mov`, `.ts`, `.m2ts`, `.webm`
 - **Subtitle** — `.srt`, `.ass`, `.ssa`, `.sub`, `.vtt`, `.idx`, `.sup`, `.smi`
 - **Image** — `.jpg`, `.png`, `.webp`
 - **Metadata** — `.nfo`, `.xml`, `.txt`, `.sfv`
@@ -144,154 +141,94 @@ Jellyfin overrides reflect real-world differences from Plex — e.g. Jellyfin Me
 
 Files matching any pattern in `ignore_patterns` are skipped entirely.
 
-### Ignore patterns now support globs
+### Ignore patterns (globs)
 
 | Pattern | Matches |
 | --- | --- |
 | `.plexmatch` | Exact filename |
-| `Thumbs.db` | Exact filename |
 | `*.tmp` | Any file ending in `.tmp` |
-| `*.partial` | Any file ending in `.partial` |
 | `_UNPACK_*` | Any file in a directory starting with `_UNPACK_` |
-| `@eaDir` | Any file inside an `@eaDir` folder (component match) |
+| `@eaDir` | Any file inside an `@eaDir` folder |
 
-Newly-added patterns are applied during the next *Full Scan* — files that newly match are removed from the database (in addition to files that no longer exist on disk).
+Newly-added patterns are applied during the next *Full Scan* — files that newly match are removed from the database.
 
 ## Three scan modes
 
 | Mode | Speed | Use when |
 | --- | --- | --- |
 | **Run Full Scan** | minutes/hours | First scan, or library has changed substantially |
-| **⚡ Re-eval Rules** | seconds | Rules updated, threshold changed — applies new logic to stored ffprobe data without re-reading files |
+| **⚡ Re-eval Rules** | seconds | Rules updated, threshold changed — applies new logic to stored ffprobe data; **does not read any files from disk** |
 | **Targeted Scan** | per-file | Re-probe specific files; webhook handler uses this automatically |
+
+## Integrations
+
+| Plugin | Test | Sync | Webhook | Automation |
+| --- | --- | --- | --- | --- |
+| **Sonarr** | ✓ | ✓ | ✓ | ✓ |
+| **Radarr** | ✓ | ✓ | ✓ | ✓ |
+| **Bazarr** | ✓ | ✓ (subtitle inventory) | ✓ | ✓ (search/delete subs) |
+| **Tdarr** | ✓ | ✓ (libraries + plugins) | ✓ | ✓ (queue transcode) |
+| **Plex** | ✓ | — | — | — |
+| **Jellyfin** | ✓ | — | — | — |
 
 ## Project structure
 
 ```
 auditarr/
-├── server.py                  Flask routes + scheduler + auth middleware
-├── auth.py                    PBKDF2 single-user auth + API token + sessions
-├── updater.py                 GitHub commit poller
-├── db.py                      SQLite schema + custom rule SQL evaluator
-├── checks.py                  Built-in rules + Plex/Jellyfin device map + glob ignore
-├── scanner.py                 Scan orchestration with custom rule application
+├── server.py              Flask app, scheduler, auth middleware, all REST endpoints
+├── auth.py                PBKDF2 single-user auth + API token + sessions
+├── updater.py             GitHub commit poller
+├── db.py                  SQLite schema, migrations, queries, backup/restore
+├── checks.py              Built-in rule engine + Plex/Jellyfin device map + glob ignore + BUILTIN_RULES registry
+├── scanner.py             Scan orchestration with custom/built-in rule application
 ├── integrations/
-│   ├── __init__.py            Registry, polling worker, automation runner
-│   ├── base.py                Integration ABC
-│   ├── sonarr_radarr.py       Full Sonarr + Radarr (existing)
-│   ├── bazarr.py              Full Bazarr (sync, webhook, delete/search subs)
-│   ├── tdarr.py               Full Tdarr (libraries, plugins, queue, path mapping)
-│   └── scaffolds.py           Plex / Jellyfin stubs
+│   ├── __init__.py        Registry, polling worker, automation runner with severity_match
+│   ├── base.py            Integration base class
+│   ├── sonarr_radarr.py   Full Sonarr + Radarr
+│   ├── bazarr.py          Full Bazarr
+│   ├── tdarr.py           Full Tdarr with path-mapping
+│   └── scaffolds.py       Plex / Jellyfin stubs
 ├── frontend/
-│   ├── index.html             Main UI shell
-│   ├── login.html             First-run setup + login page
-│   └── app.js                 Frontend logic
-├── config.json                User config (auto-created)
-├── auth.json                  Single-user credentials (mode 0600, auto-created)
-├── .auditarr_version.json     Tracked SHA for the update checker
-└── media_audit.db             SQLite store (auto-created)
+│   ├── index.html         Main UI with new dashboard, rules tabs, help, DB management
+│   ├── login.html         First-run setup + login page
+│   └── app.js             Frontend logic
+├── README.md              This file
+├── CHANGELOG.md           Version history
+├── config.json            User config (auto-created)
+├── auth.json              Single-user credentials (mode 0600, auto-created)
+├── .auditarr_version.json Tracked SHA for the update checker
+└── media_audit.db         SQLite store (auto-created)
 ```
 
-## REST API
-
-All endpoints under `/api/*` require authentication (cookie session or API token) **except**:
-
-- `GET /api/auth/status`
-- `POST /api/auth/setup` (only callable when not yet configured)
-- `POST /api/auth/login`
-- `POST /api/integrations/webhook/<id>` (third-party services)
+## REST API (selected new endpoints)
 
 ```
-─── Auth ───
-GET    /api/auth/status
-POST   /api/auth/setup                  (first-run only)
-POST   /api/auth/login
-POST   /api/auth/logout
-POST   /api/auth/change-password
-GET    /api/auth/api-token
-POST   /api/auth/api-token              (regenerate)
+─── Database ───
+GET    /api/db/stats                    schema version, sizes, counts
+GET    /api/db/backup                   download SQLite snapshot
+POST   /api/db/restore                  multipart upload to replace live DB
+POST   /api/db/vacuum
+GET    /api/db/integrity
+POST   /api/db/clean                    drop all evaluations
 
-─── Updates ───
-GET    /api/update/check
-POST   /api/update/refresh
-POST   /api/update/mark-current
+─── Built-in rules ───
+GET    /api/rules/builtin
+PUT    /api/rules/builtin/<rule_key>    {"enabled":bool, "dropped":bool, "severity_override":str|null}
+GET    /api/rules/dropped
 
-─── Config ───
-GET    /api/config
-POST   /api/config
+─── Help ───
+GET    /api/help/readme
+GET    /api/help/changelog
 
-─── Scan ───
-POST   /api/scan/start
-POST   /api/scan/reeval
-POST   /api/scan/targeted
-GET    /api/scan/<job_id>/status
-
-─── Files ───
-GET    /api/files?file_category=&severity=&q=&codec=
-GET    /api/files/<id>                  (compat-mode-filtered device matrix)
-POST   /api/files/<id>/{rescan,delete,rename,move,monitor,virustotal}
-
-─── Stats / reference ───
-GET    /api/stats                       (per-category breakdown, no 'ignored')
-GET    /api/devices
-GET    /api/severities
-
-─── Integrations ───
-GET    /api/integrations/plugins
-GET    /api/integrations
-POST   /api/integrations
-PUT    /api/integrations/<id>
-DELETE /api/integrations/<id>
-POST   /api/integrations/<id>/test
-POST   /api/integrations/<id>/sync
-POST   /api/integrations/webhook/<id>   (PUBLIC — for Sonarr/Radarr/Bazarr)
-GET    /api/integrations/events
-
-─── Bazarr actions ───
-POST   /api/bazarr/<id>/delete-sub
-POST   /api/bazarr/<id>/search-subs
-
-─── Tdarr actions ───
-GET    /api/tdarr/<id>/libraries
-GET    /api/tdarr/<id>/plugins
-GET    /api/tdarr/<id>/jobs
-POST   /api/tdarr/<id>/queue            (file_id|path + library_id|plugin_id|inline_profile)
-
-─── Automation ───
-GET    /api/automation/rules
-POST   /api/automation/rules            (action_config + file_category supported)
-PUT    /api/automation/rules/<id>
-DELETE /api/automation/rules/<id>
-POST   /api/automation/run
-
-─── Custom rules ───
-GET    /api/rules/schema
-GET    /api/rules
-GET    /api/rules/<id>
-POST   /api/rules
-PUT    /api/rules/<id>
-DELETE /api/rules/<id>
-POST   /api/rules/test
-GET    /api/rules/<id>/preview
-POST   /api/rules/apply
+─── Automation (new fields accepted) ───
+POST   /api/automation/rules            now accepts severity_match: "highest"|"lowest"|"any"
+PUT    /api/automation/rules/<id>       same
 ```
 
-### Example: trigger a Tdarr transcode via API
+All routes carried over from previous versions; auth requirements unchanged.
 
-```bash
-curl -X POST http://localhost:7842/api/tdarr/2/queue \
-  -H "X-API-Key: $AUDITARR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/host/media/Movies/Big.Movie.2024.mkv",
-    "inline_profile": {
-      "codec": "hevc",
-      "container": "mkv",
-      "crf": 22,
-      "audio_codec": "copy",
-      "hardware_accel": "qsv"
-    }
-  }'
-```
+## Upgrade notes
 
-The path is run through your Tdarr integration's `path_mappings` before being sent to Tdarr.
+If you're upgrading from v4 or v5, just run the new `server.py`. On first launch, migrations will detect the schema you have, add the missing columns, purge any stray `category='ignored'` rows, and bump the schema version to 4. Your data — files, evaluations, integrations, automation rules, custom rules — is preserved.
+
+If anything looks off, **back up first** (Settings → Database → Download backup), then if needed restore by re-uploading the backup file (this also re-runs migrations). The integrity check button confirms the SQLite file is clean.

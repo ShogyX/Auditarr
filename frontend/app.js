@@ -145,9 +145,10 @@ function showView(name) {
     dashboard: 'Dashboard',
     files: 'Files',
     integrations: 'Integrations',
-    rules: 'Custom Rules',
+    rules: 'Rules',
     automation: 'Automation',
     config: 'Settings',
+    help: 'Help',
   };
   document.getElementById('top-title').textContent = titles[name] || name;
   document.getElementById('top-sub').textContent = '';
@@ -155,25 +156,38 @@ function showView(name) {
 
   if (name === 'integrations') { loadPluginsAndIntegrations(); loadIntegrationEvents(); }
   if (name === 'automation') { loadAutomationRules(); }
-  if (name === 'rules') { loadCustomRules(); }
-  if (name === 'config') { loadAuthInfo(); loadUpdateStatus(); }
+  if (name === 'rules') { loadAllRules(); }
+  if (name === 'config') { loadAuthInfo(); loadUpdateStatus(); loadDbStats(); }
+  if (name === 'help') { loadHelpDocs(); }
 }
 
 // ──────────────────────────────────────────────────────────────
 // Scans
 // ──────────────────────────────────────────────────────────────
-async function startScan() { await _kickoff('/api/scan/start',  '⏳ Scanning'); }
-async function startReeval() { await _kickoff('/api/scan/reeval', '⚡ Re-evaluating'); }
+async function startScan() {
+  if (!confirm("Run a Full Scan?\n\nThis walks every file in your library_paths and runs ffprobe on each media file. This can take minutes to hours depending on library size.\n\nUse 'Re-eval Rules' instead if you only changed rules/thresholds.")) return;
+  await _kickoff('/api/scan/start', 'btn-scan', '⏳ Scanning');
+}
 
-async function _kickoff(url, label) {
-  const btn = document.getElementById('btn-scan');
-  const btn2 = document.getElementById('btn-reeval');
-  btn.disabled = btn2.disabled = true;
-  btn.innerHTML = label;
+async function startReeval() {
+  // Re-eval is fast — uses cached probe data, never re-reads media files
+  await _kickoff('/api/scan/reeval', 'btn-reeval', '⚡ Re-evaluating');
+}
+
+async function _kickoff(url, btnId, label) {
+  const btn = document.getElementById(btnId);
+  document.getElementById('btn-scan').disabled = true;
+  document.getElementById('btn-reeval').disabled = true;
+  if (btn) btn.innerHTML = label;
   document.getElementById('progress-wrap').style.display = 'block';
   try {
     const r = await fetch(url, { method: 'POST' });
     const d = await r.json();
+    if (d.error) {
+      toast(d.error, 'err');
+      resetScanBtn();
+      return;
+    }
     activeJobId = d.job_id;
     pollInterval = setInterval(pollJob, 700);
   } catch (e) {
@@ -197,7 +211,14 @@ async function pollJob() {
       activeJobId = null;
       resetScanBtn();
       await Promise.all([loadStats(), loadFiles()]);
-      toast(wasReeval ? 'Re-evaluation complete (no rescan)' : `Scan complete — ${s.total} files`, 'ok');
+      toast(wasReeval
+        ? `Re-evaluated ${s.total} files (no disk read, no ffprobe)`
+        : `Scan complete — ${s.total} files`, 'ok');
+    } else if (s.status === 'failed' || s.status === 'error') {
+      clearInterval(pollInterval); pollInterval = null;
+      activeJobId = null;
+      resetScanBtn();
+      toast(`Scan failed: ${s.error || 'unknown error'}`, 'err');
     }
   } catch (e) {}
 }
@@ -933,31 +954,133 @@ async function vtCheck(id) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Custom Rules
+// Rules — built-in, custom, dropped, all in one tabbed view
 // ──────────────────────────────────────────────────────────────
-async function loadCustomRules() {
+let _rulesTab = 'builtin';
+let _builtinRulesCache = [];
+let _droppedRulesCache = [];
+
+async function loadAllRules() {
   if (!rulesSchema) await loadRulesSchema();
   try {
-    const r = await fetch('/api/rules');
-    customRulesCache = await r.json();
+    const [bc, cc, dc] = await Promise.all([
+      fetch('/api/rules/builtin').then(r => r.json()),
+      fetch('/api/rules').then(r => r.json()),
+      fetch('/api/rules/dropped').then(r => r.json()),
+    ]);
+    _builtinRulesCache = bc;
+    customRulesCache = cc;
+    _droppedRulesCache = dc;
+    document.getElementById('rules-tab-builtin-count').textContent = bc.filter(r => !r.dropped).length;
+    document.getElementById('rules-tab-custom-count').textContent = cc.length;
+    document.getElementById('rules-tab-dropped-count').textContent = dc.length;
+    renderBuiltinRules();
     renderCustomRules();
-  } catch (e) {}
+    renderDroppedRules();
+  } catch (e) {
+    toast('Failed to load rules', 'err');
+  }
+}
+
+function setRulesTab(tab) {
+  _rulesTab = tab;
+  document.querySelectorAll('.rules-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.tab === tab));
+  for (const t of ['builtin','custom','dropped']) {
+    const el = document.getElementById('rules-pane-' + t);
+    if (el) el.style.display = (t === tab) ? 'block' : 'none';
+  }
+}
+
+function renderBuiltinRules() {
+  const el = document.getElementById('builtin-rules-list');
+  if (!el) return;
+  const visible = _builtinRulesCache.filter(r => !r.dropped);
+  if (!visible.length) {
+    el.innerHTML = '<div class="small">No built-in rules registered (something is very wrong).</div>';
+    return;
+  }
+  // Group by category
+  const groups = {};
+  for (const r of visible) {
+    const cat = r.category || 'other';
+    (groups[cat] = groups[cat] || []).push(r);
+  }
+  const order = ['video','audio','hdr','container','subtitles','performance','non_media','other'];
+  let html = '';
+  for (const cat of order) {
+    if (!groups[cat]) continue;
+    html += `<div class="rule-section-head">${escHtml(cat)}</div>`;
+    html += groups[cat].map(r => {
+      const sev = r.severity_override || r.severity_default;
+      return `
+        <div class="custom-rule-card ${sev}">
+          <div>
+            <div class="custom-rule-name">
+              ${escHtml(r.name)}
+              <span class="builtin-pill">built-in</span>
+              <span class="sev-badge ${sev}" style="margin-left:6px">${escHtml(SEVERITY_LABELS[sev] || sev)}</span>
+              ${r.severity_override ? `<span class="small" style="margin-left:6px;color:var(--muted)">(was ${escHtml(SEVERITY_LABELS[r.severity_default])})</span>` : ''}
+            </div>
+            <div class="custom-rule-desc">${escHtml(r.description)}</div>
+            <div class="custom-rule-cond">${escHtml(r.rule_key)}</div>
+          </div>
+          <div class="toggle ${r.enabled ? 'on' : ''}" onclick="toggleBuiltinRule('${escHtml(r.rule_key)}', ${r.enabled ? 0 : 1})" title="Enable / disable"></div>
+          <div style="display:flex;gap:4px">
+            <button class="icon-btn" onclick="overrideBuiltinSeverity('${escHtml(r.rule_key)}')" title="Override severity">⊕</button>
+            <button class="icon-btn danger" onclick="dropBuiltinRule('${escHtml(r.rule_key)}')" title="Drop (move to Disabled tab)">⊘</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+  el.innerHTML = html;
+}
+
+async function toggleBuiltinRule(ruleKey, enabled) {
+  try {
+    await fetch(`/api/rules/builtin/${ruleKey}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled: !!enabled })
+    });
+    toast(`${enabled ? 'Enabled' : 'Disabled'} ${ruleKey} (run Re-eval to apply)`, 'ok');
+    loadAllRules();
+  } catch { toast('Failed', 'err'); }
+}
+
+async function dropBuiltinRule(ruleKey) {
+  if (!confirm(`Drop "${ruleKey}"? It will move to the Disabled / Discarded tab and stop being evaluated. You can restore it from there later.`)) return;
+  try {
+    await fetch(`/api/rules/builtin/${ruleKey}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled: false, dropped: true })
+    });
+    toast(`Dropped ${ruleKey}`, 'ok');
+    loadAllRules();
+  } catch { toast('Failed', 'err'); }
+}
+
+async function overrideBuiltinSeverity(ruleKey) {
+  const sev = prompt(`Override severity for "${ruleKey}".\nValid: ok, info, high_bitrate, possible_transcode, always_transcode, unplayable.\nLeave blank to clear override.`);
+  if (sev === null) return;
+  try {
+    await fetch(`/api/rules/builtin/${ruleKey}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ severity_override: sev || null })
+    });
+    toast(`Severity for ${ruleKey}: ${sev || '(default restored)'}`, 'ok');
+    loadAllRules();
+  } catch { toast('Failed', 'err'); }
 }
 
 function renderCustomRules() {
   const el = document.getElementById('custom-rules-list');
+  if (!el) return;
   if (!customRulesCache.length) {
     el.innerHTML = '<div class="small">No custom rules yet. Click + New Custom Rule to add one.</div>';
     return;
   }
   el.innerHTML = customRulesCache.map(r => {
     const sev = r.severity || 'info';
-    const conds = (r.spec?.conditions || []).map(c => {
-      const opLabels = { eq:'=', neq:'≠', gt:'>', gte:'≥', lt:'<', lte:'≤',
-                         contains:'contains', starts_with:'starts with', ends_with:'ends with',
-                         in:'in', is_null:'is null', not_null:'is not null' };
-      return `${c.field} ${opLabels[c.op]||c.op}${c.value!==undefined?' '+JSON.stringify(c.value):''}`;
-    }).join(`  ${r.spec?.match || 'all'}===any`?' OR ':' AND ');
     const matchOp = (r.spec?.match || 'all').toLowerCase() === 'any' ? ' OR ' : ' AND ';
     const condStr = (r.spec?.conditions || []).map(c => {
       const opLabels = { eq:'=', neq:'≠', gt:'>', gte:'≥', lt:'<', lte:'≤',
@@ -965,13 +1088,13 @@ function renderCustomRules() {
                          in:'in', is_null:'∅', not_null:'¬∅' };
       return `${c.field} ${opLabels[c.op]||c.op}${c.value!==undefined?' '+JSON.stringify(c.value):''}`;
     }).join(matchOp);
-
     return `
       <div class="custom-rule-card ${sev}">
         <div>
           <div class="custom-rule-name">
             ${escHtml(r.name)}
-            <span class="sev-badge ${sev}" style="margin-left:8px">${escHtml(SEVERITY_LABELS[sev] || sev)}</span>
+            <span class="custom-pill">custom</span>
+            <span class="sev-badge ${sev}" style="margin-left:6px">${escHtml(SEVERITY_LABELS[sev] || sev)}</span>
           </div>
           ${r.description ? `<div class="custom-rule-desc">${escHtml(r.description)}</div>` : ''}
           <div class="custom-rule-cond">${escHtml(condStr || '(no conditions)')}</div>
@@ -980,11 +1103,74 @@ function renderCustomRules() {
         <div style="display:flex;gap:4px">
           <button class="icon-btn" onclick="previewRule(${r.id})" title="Preview matches">👁</button>
           <button class="icon-btn" onclick="editRule(${r.id})" title="Edit">✎</button>
-          <button class="icon-btn danger" onclick="deleteCustomRule(${r.id})" title="Delete">✕</button>
+          <button class="icon-btn danger" onclick="dropCustomRule(${r.id})" title="Drop">⊘</button>
         </div>
       </div>
     `;
   }).join('');
+}
+
+function renderDroppedRules() {
+  const el = document.getElementById('dropped-rules-list');
+  if (!el) return;
+  if (!_droppedRulesCache.length) {
+    el.innerHTML = '<div class="small">No dropped rules.</div>';
+    return;
+  }
+  el.innerHTML = _droppedRulesCache.map(r => {
+    const isBuiltin = (r.rule_kind === 'builtin');
+    const ruleKey = isBuiltin ? (r.spec?.rule_key || r.message || r.name) : null;
+    const sev = r.severity || 'info';
+    return `
+      <div class="custom-rule-card ${sev}">
+        <div>
+          <div class="custom-rule-name">
+            ${escHtml(r.name)}
+            <span class="${isBuiltin ? 'builtin-pill' : 'custom-pill'}">${isBuiltin ? 'built-in' : 'custom'}</span>
+            <span class="dropped-pill">dropped</span>
+          </div>
+          ${r.description ? `<div class="custom-rule-desc">${escHtml(r.description)}</div>` : ''}
+        </div>
+        <div></div>
+        <div style="display:flex;gap:4px">
+          <button class="icon-btn" onclick="${isBuiltin ? `restoreBuiltinRule('${escHtml(ruleKey)}')` : `restoreCustomRule(${r.id})`}" title="Restore">↩</button>
+          ${isBuiltin ? '' : `<button class="icon-btn danger" onclick="permanentDeleteCustomRule(${r.id})" title="Delete permanently">✕</button>`}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function dropCustomRule(id) {
+  if (!confirm('Drop this rule? It moves to Disabled/Discarded; restore from there.')) return;
+  await fetch(`/api/rules/${id}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: 0, dropped: 1 })
+  });
+  toast('Rule dropped', 'ok');
+  loadAllRules();
+}
+async function restoreCustomRule(id) {
+  await fetch(`/api/rules/${id}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: 1, dropped: 0 })
+  });
+  toast('Rule restored', 'ok');
+  loadAllRules();
+}
+async function permanentDeleteCustomRule(id) {
+  if (!confirm('Delete this rule permanently? This cannot be undone.')) return;
+  await fetch(`/api/rules/${id}`, { method: 'DELETE' });
+  toast('Rule deleted', 'ok');
+  loadAllRules();
+}
+async function restoreBuiltinRule(ruleKey) {
+  await fetch(`/api/rules/builtin/${ruleKey}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ enabled: 1, dropped: 0 })
+  });
+  toast(`Restored ${ruleKey}`, 'ok');
+  loadAllRules();
 }
 
 async function toggleCustomRule(id, enabled) {
@@ -992,14 +1178,14 @@ async function toggleCustomRule(id, enabled) {
     method:'PUT', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ enabled })
   });
-  loadCustomRules();
+  loadAllRules();
 }
 
 async function deleteCustomRule(id) {
   if (!confirm('Delete this rule? Existing matches will be removed on next re-eval.')) return;
   await fetch(`/api/rules/${id}`, { method:'DELETE' });
   toast('Rule deleted', 'ok');
-  loadCustomRules();
+  loadAllRules();
 }
 
 async function previewRule(id) {
@@ -1230,7 +1416,7 @@ async function saveRule() {
       toast('Rule created', 'ok');
     }
     closeModal('modal-rule-edit');
-    loadCustomRules();
+    loadAllRules();
   } catch (e) { toast('Save failed', 'err'); }
 }
 
@@ -1424,14 +1610,23 @@ async function loadAutomationRules() {
       const intName = intg ? intg.name : `(deleted #${r.integration_id})`;
       const sevLabel = SEVERITY_LABELS[r.when_severity] || r.when_severity;
       const cmpLabel = { at_least: 'at least', at_most: 'at most', equals: 'equals' }[r.comparison] || r.comparison;
-      const actionLabel = r.action === 'monitor' ? 'monitor' : 'unmonitor';
+      const actionLabels = {
+        monitor:'monitor (*arr)', unmonitor:'unmonitor (*arr)',
+        transcode_via_tdarr:'queue transcode (Tdarr)',
+        search_subs_via_bazarr:'search subs (Bazarr)',
+        delete_sub_via_bazarr:'delete sub (Bazarr)',
+      };
+      const actionLabel = actionLabels[r.action] || r.action;
       const lastRun = r.last_run ? new Date(r.last_run).toLocaleString() : 'never';
+      const sevMatch = r.severity_match || 'highest';
+      const fileCat = r.file_category ? ` · category: <strong>${escHtml(r.file_category)}</strong>` : '';
+      const runs = r.runs_count ? ` · ${r.runs_count} run(s); last applied to ${r.last_action_count || 0} file(s)` : '';
       return `
         <div class="rule-card">
           <div>
             <div class="rule-name">${escHtml(r.name)}</div>
-            <div class="rule-desc">→ ${escHtml(intName)} · when severity ${cmpLabel} <strong>${escHtml(sevLabel)}</strong> → <strong>${actionLabel}</strong></div>
-            <div class="small" style="margin-top: 4px">Last run: ${escHtml(lastRun)}</div>
+            <div class="rule-desc">→ ${escHtml(intName)} · when ${escHtml(sevMatch)} severity ${cmpLabel} <strong>${escHtml(sevLabel)}</strong> → <strong>${escHtml(actionLabel)}</strong>${fileCat}</div>
+            <div class="small" style="margin-top: 4px">Last run: ${escHtml(lastRun)}${runs}</div>
           </div>
           <div class="toggle ${r.enabled ? 'on' : ''}" onclick="toggleRule(${r.id}, ${r.enabled ? 0 : 1})"></div>
           <button class="icon-btn danger" onclick="deleteRule(${r.id})" title="Delete">✕</button>
@@ -1474,8 +1669,12 @@ async function showAddRuleDialog() {
   document.getElementById('rule-name').value = '';
   document.getElementById('rule-cmp').value = 'at_least';
   document.getElementById('rule-sev').value = 'unplayable';
-  document.getElementById('rule-file-cat').value = '';
-  document.getElementById('rule-bazarr-media-type').value = '';
+  const fileCatEl = document.getElementById('rule-file-cat');
+  if (fileCatEl) fileCatEl.value = '';
+  const bazarrMtEl = document.getElementById('rule-bazarr-media-type');
+  if (bazarrMtEl) bazarrMtEl.value = '';
+  const sevMatchEl = document.getElementById('rule-sev-match');
+  if (sevMatchEl) sevMatchEl.value = 'highest';
   onRuleIntegrationChange();  // populates action select
   openModal('modal-add-rule');
 }
@@ -1558,6 +1757,7 @@ async function saveAddRule() {
     comparison: document.getElementById('rule-cmp').value,
     action: action,
     file_category: fileCat || null,
+    severity_match: document.getElementById('rule-sev-match')?.value || 'highest',
     action_config: {},
   };
   if (!data.name) { toast('Name required', 'err'); return; }
@@ -1658,6 +1858,8 @@ function renderConfig() {
   renderTags('subtitle-ext-tags', cfg.subtitle_extensions || [], 'subtitle_extensions');
   renderTags('image-ext-tags',    cfg.image_extensions || [],    'image_extensions');
   renderTags('metadata-ext-tags', cfg.metadata_extensions || [], 'metadata_extensions');
+
+  _wireAutosave();
 }
 
 function renderTags(containerId, items, key) {
@@ -1674,6 +1876,7 @@ function renderTags(containerId, items, key) {
 function removeTag(key, val) {
   cfg[key] = (cfg[key] || []).filter(x => x !== val);
   renderConfig();
+  _autosaveConfig();
 }
 
 function addPath() {
@@ -1682,6 +1885,7 @@ function addPath() {
   cfg.library_paths = [...(cfg.library_paths||[]), v];
   document.getElementById('new-path').value = '';
   renderConfig();
+  _autosaveConfig();
 }
 function addIgnore() {
   const v = document.getElementById('new-ignore').value.trim();
@@ -1689,6 +1893,7 @@ function addIgnore() {
   cfg.ignore_patterns = [...(cfg.ignore_patterns||[]), v];
   document.getElementById('new-ignore').value = '';
   renderConfig();
+  _autosaveConfig();
 }
 function addExt(key, inputId) {
   let v = document.getElementById(inputId).value.trim();
@@ -1698,39 +1903,95 @@ function addExt(key, inputId) {
   cfg[key] = [...(cfg[key]||[]), v];
   document.getElementById(inputId).value = '';
   renderConfig();
+  _autosaveConfig();
 }
 
 function togglePrune() {
   cfg.prune_missing = !cfg.prune_missing;
   document.getElementById('prune-toggle').classList.toggle('on', cfg.prune_missing);
+  _autosaveConfig();
 }
 
 function toggleSchedule() {
   cfg.schedule_enabled = !cfg.schedule_enabled;
   document.getElementById('schedule-toggle').classList.toggle('on', cfg.schedule_enabled);
   document.getElementById('schedule-time-wrap').style.display = cfg.schedule_enabled ? 'block' : 'none';
+  _autosaveConfig();
 }
 
 async function setCompatMode(mode) {
   cfg.compatibility_mode = mode;
   document.querySelectorAll('.seg-row button').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-  // Persist immediately so file detail reflects right away
+  _setSaveStatus("Saving…", "pending");
   try {
-    await fetch('/api/config', {
+    const r = await fetch('/api/config', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(cfg)
     });
-    toast(`Compatibility: ${mode}`, 'ok');
-  } catch { toast('Save failed', 'err'); }
+    if (r.ok) _setSaveStatus(`Saved (mode: ${mode})`, "ok");
+    else _setSaveStatus("Save failed", "err");
+  } catch { _setSaveStatus("Save failed", "err"); }
 }
 
-async function saveConfig() {
+// Auto-save: collect values from inputs, push to /api/config debounced.
+let _saveStatusTimer = null;
+function _setSaveStatus(text, kind = "ok") {
+  const el = document.getElementById('autosave-status');
+  if (!el) return;
+  el.textContent = text;
+  el.dataset.kind = kind;
+  if (_saveStatusTimer) clearTimeout(_saveStatusTimer);
+  if (text && kind === "ok") {
+    _saveStatusTimer = setTimeout(() => {
+      if (el.textContent === text) el.textContent = "";
+    }, 2500);
+  }
+}
+
+const _autosaveConfig = debounce(async () => {
+  // Snapshot UI values into cfg before sending
   cfg.workers = parseInt(document.getElementById('workers-range').value);
   cfg.sample_offset_seconds = parseInt(document.getElementById('offset-range').value);
   cfg.bitrate_threshold_mbps = parseInt(document.getElementById('bitrate-range').value);
   cfg.virustotal_api_key = document.getElementById('vt-key').value;
   cfg.schedule_time = document.getElementById('schedule-time').value;
 
+  _setSaveStatus("Saving…", "pending");
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    });
+    if (r.ok) _setSaveStatus("Saved", "ok");
+    else _setSaveStatus("Save failed", "err");
+  } catch (e) {
+    _setSaveStatus("Save failed", "err");
+  }
+}, 600);
+
+// Hook auto-save to all settings inputs after the page renders config
+function _wireAutosave() {
+  const ids = [
+    'workers-range', 'offset-range', 'bitrate-range',
+    'vt-key', 'schedule-time'
+  ];
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.autosaveBound) continue;
+    el.addEventListener('input', _autosaveConfig);
+    el.addEventListener('change', _autosaveConfig);
+    el.dataset.autosaveBound = '1';
+  }
+}
+
+// Manual save (kept as a fallback button + Ctrl+S handler)
+async function saveConfig() {
+  await _autosaveConfig.flush?.();   // if available
+  cfg.workers = parseInt(document.getElementById('workers-range').value);
+  cfg.sample_offset_seconds = parseInt(document.getElementById('offset-range').value);
+  cfg.bitrate_threshold_mbps = parseInt(document.getElementById('bitrate-range').value);
+  cfg.virustotal_api_key = document.getElementById('vt-key').value;
+  cfg.schedule_time = document.getElementById('schedule-time').value;
   try {
     const r = await fetch('/api/config', {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -1963,4 +2224,183 @@ async function tdarrQueue(fileId, serverId, opts) {
     const d = await r.json();
     toast(d.message || (d.ok ? 'Queued' : 'Failed'), d.ok ? 'ok' : 'err');
   } catch { toast('Failed', 'err'); }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Help: README + Changelog (tiny markdown renderer)
+// ──────────────────────────────────────────────────────────────
+async function loadHelpDocs() {
+  try {
+    const [r1, r2] = await Promise.all([
+      fetch('/api/help/readme').then(r => r.json()),
+      fetch('/api/help/changelog').then(r => r.json()),
+    ]);
+    document.getElementById('readme-body').innerHTML = renderMarkdown(r1.content || '');
+    document.getElementById('changelog-body').innerHTML = renderMarkdown(r2.content || '');
+  } catch (e) {
+    document.getElementById('readme-body').textContent = 'Failed to load.';
+  }
+}
+function setHelpTab(tab) {
+  document.querySelectorAll('.help-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.help-pane').forEach(p => p.classList.remove('active'));
+  const el = document.getElementById('help-pane-' + tab);
+  if (el) el.classList.add('active');
+}
+
+function renderMarkdown(src) {
+  // Tiny safe-ish markdown → HTML. Escapes input first, then transforms.
+  let s = src;
+  // 1. Escape HTML
+  s = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // 2. Code fences ``` ```
+  s = s.replace(/```([a-z]*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code}</code></pre>`);
+
+  // 3. Inline code `…`
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // 4. Headers
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // 5. Bold / italic
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\b_([^_]+)_\b/g, '<em>$1</em>');
+
+  // 6. Links [text](url)
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+
+  // 7. Tables (very simple — leading/trailing pipe rows)
+  s = s.replace(/((^\|.*\|\s*\n)+)/gm, (block) => {
+    const rows = block.trim().split('\n').map(r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()));
+    if (rows.length < 2) return block;
+    const isSep = (row) => row.every(c => /^:?-+:?$/.test(c));
+    let header = null, body = [];
+    if (rows[1] && isSep(rows[1])) { header = rows[0]; body = rows.slice(2); }
+    else { body = rows; }
+    let html = '<table>';
+    if (header) html += '<thead><tr>' + header.map(c => `<th>${c}</th>`).join('') + '</tr></thead>';
+    html += '<tbody>' + body.map(row =>
+      '<tr>' + row.map(c => `<td>${c}</td>`).join('') + '</tr>').join('') + '</tbody>';
+    return html + '</table>\n';
+  });
+
+  // 8. Lists — group consecutive `-` lines
+  s = s.replace(/((^- .+(?:\n|$))+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^- /, ''));
+    return '<ul>' + items.map(i => `<li>${i}</li>`).join('') + '</ul>\n';
+  });
+  s = s.replace(/((^\d+\. .+(?:\n|$))+)/gm, (block) => {
+    const items = block.trim().split('\n').map(l => l.replace(/^\d+\. /, ''));
+    return '<ol>' + items.map(i => `<li>${i}</li>`).join('') + '</ol>\n';
+  });
+
+  // 9. Paragraphs from bare text
+  s = s.split(/\n\n+/).map(p => {
+    if (/^\s*<(h\d|ul|ol|pre|table|p|div|blockquote)/.test(p)) return p;
+    return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+  }).join('\n');
+
+  return s;
+}
+
+// ──────────────────────────────────────────────────────────────
+// Database management: stats, backup, restore, vacuum, integrity, clean
+// ──────────────────────────────────────────────────────────────
+async function loadDbStats() {
+  try {
+    const r = await fetch('/api/db/stats');
+    const s = await r.json();
+    const sizeMb = (s.size_bytes / 1024 / 1024).toFixed(2);
+    const html = `
+      <div>📁  <strong>${escHtml(s.path)}</strong></div>
+      <div>📦  ${sizeMb} MB</div>
+      <div>📑  ${s.files} files · ${s.evaluations} evaluations</div>
+      <div>⚙  ${s.integrations} integrations · ${s.automation_rules} automation rules · ${s.custom_rules} custom rules</div>
+      <div>🔢  schema v${s.schema_version}</div>
+    `;
+    document.getElementById('db-stats-card').innerHTML = html;
+  } catch (e) {
+    document.getElementById('db-stats-card').textContent = 'Failed to load DB stats';
+  }
+}
+
+async function downloadBackup() {
+  try {
+    const r = await fetch('/api/db/backup');
+    if (!r.ok) { toast('Backup failed', 'err'); return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const ts = new Date().toISOString().replace(/[T:]/g,'-').slice(0,19);
+    a.download = `auditarr-backup-${ts}.db`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast('Backup downloaded', 'ok');
+  } catch (e) { toast('Backup failed', 'err'); }
+}
+
+async function restoreBackup(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (!confirm(`Restore from "${file.name}"?\n\nThis REPLACES the current Auditarr database. Make sure you have a fresh backup of the live database first.`)) {
+    input.value = '';
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/db/restore', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`Restored. Schema version: ${d.schema_version}. Reloading…`, 'ok');
+      setTimeout(() => window.location.reload(), 1500);
+    } else {
+      toast(d.error || 'Restore failed', 'err');
+    }
+  } catch (e) {
+    toast('Restore failed', 'err');
+  }
+  input.value = '';
+}
+
+async function vacuumDb() {
+  toast('Vacuuming…', 'ok');
+  try {
+    const r = await fetch('/api/db/vacuum', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      const saved = (d.saved_bytes / 1024 / 1024).toFixed(2);
+      toast(`Vacuum complete. Saved ${saved} MB`, 'ok');
+      loadDbStats();
+    } else { toast(d.error || 'Vacuum failed', 'err'); }
+  } catch { toast('Vacuum failed', 'err'); }
+}
+
+async function checkIntegrity() {
+  try {
+    const r = await fetch('/api/db/integrity');
+    const d = await r.json();
+    toast(d.ok ? 'Integrity: OK ✓' : `Integrity: FAILED — ${d.message}`, d.ok ? 'ok' : 'err');
+  } catch { toast('Integrity check failed', 'err'); }
+}
+
+async function cleanEvaluations() {
+  if (!confirm('Delete ALL stored evaluations? Files stay; you will need to run Re-eval Rules to re-populate them.')) return;
+  try {
+    const r = await fetch('/api/db/clean', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`Cleared ${d.deleted_evaluations} evaluations. Run Re-eval Rules.`, 'ok');
+      loadStats();
+      loadFiles();
+      loadDbStats();
+    }
+  } catch { toast('Clean failed', 'err'); }
 }

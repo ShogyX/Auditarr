@@ -260,6 +260,103 @@ def update_mark_current():
     return jsonify({"ok": True, "current_sha": sha})
 
 
+# ─── Backup / restore / maintenance ──────────────────────────────────────────
+
+import tempfile
+from flask import send_file
+
+@app.route("/api/db/stats")
+def db_stats():
+    return jsonify({
+        **db.db_stats(),
+        "schema_version": db.schema_version(),
+    })
+
+@app.route("/api/db/backup", methods=["GET"])
+def db_backup():
+    """Stream a fresh consistent backup of the live DB to the client."""
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    try:
+        db.backup_to(tmp.name)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return send_file(
+            tmp.name, as_attachment=True,
+            download_name=f"auditarr-backup-{ts}.db",
+            mimetype="application/x-sqlite3",
+        )
+    except Exception as e:
+        try: os.unlink(tmp.name)
+        except Exception: pass
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/db/restore", methods=["POST"])
+def db_restore():
+    """Replace the live DB with an uploaded backup file."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file uploaded"}), 400
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    f.save(tmp.name)
+    tmp.close()
+    try:
+        db.restore_from(tmp.name)
+        return jsonify({"ok": True, "schema_version": db.schema_version()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+    finally:
+        try: os.unlink(tmp.name)
+        except Exception: pass
+
+
+@app.route("/api/db/vacuum", methods=["POST"])
+def db_vacuum_endpoint():
+    try:
+        before = db.db_stats()["size_bytes"]
+        db.vacuum()
+        after = db.db_stats()["size_bytes"]
+        saved = before - after
+        return jsonify({"ok": True, "before": before, "after": after,
+                        "saved_bytes": saved})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/db/integrity", methods=["GET"])
+def db_integrity_endpoint():
+    ok, msg = db.integrity_check()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/db/clean", methods=["POST"])
+def db_clean():
+    """Drop all evaluations and force a re-eval. Files stay; rules stay."""
+    n = 0
+    with db.cursor() as c:
+        c.execute("DELETE FROM evaluations")
+        n = c.rowcount
+    return jsonify({"ok": True, "deleted_evaluations": n})
+
+
+# ─── Help & docs ─────────────────────────────────────────────────────────────
+
+@app.route("/api/help/readme")
+def help_readme():
+    p = Path(__file__).parent / "README.md"
+    if not p.exists():
+        return jsonify({"content": "# Auditarr\n\nREADME not bundled with this build.\n"})
+    return jsonify({"content": p.read_text()})
+
+
+@app.route("/api/help/changelog")
+def help_changelog():
+    p = Path(__file__).parent / "CHANGELOG.md"
+    if not p.exists():
+        return jsonify({"content": "# Changelog\n\n(No changelog file present.)"})
+    return jsonify({"content": p.read_text()})
+
+
 # ─── Frontend ────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -614,14 +711,23 @@ def automation_list():
 @app.route("/api/automation/rules", methods=["POST"])
 def automation_add():
     d = request.json or {}
-    rid = db.add_automation_rule(
-        integration_id=d["integration_id"], name=d["name"],
-        when_severity=d["when_severity"], comparison=d["comparison"],
-        action=d["action"], enabled=d.get("enabled", 1),
-        action_config=d.get("action_config"),
-        file_category=d.get("file_category"),
-    )
-    return jsonify({"id": rid})
+    # Validate required fields up-front so the JS surfaces a useful error
+    required = ("integration_id", "name", "when_severity", "comparison", "action")
+    missing = [f for f in required if f not in d or d[f] in (None, "")]
+    if missing:
+        return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
+    try:
+        rid = db.add_automation_rule(
+            integration_id=int(d["integration_id"]), name=d["name"],
+            when_severity=d["when_severity"], comparison=d["comparison"],
+            action=d["action"], enabled=d.get("enabled", 1),
+            action_config=d.get("action_config"),
+            file_category=d.get("file_category") or None,
+            severity_match=d.get("severity_match", "highest"),
+        )
+        return jsonify({"id": rid, "ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/automation/rules/<int:rule_id>", methods=["DELETE"])
 def automation_delete(rule_id):
@@ -635,7 +741,7 @@ def automation_update(rule_id):
     db.update_automation_rule(rule_id, **{
         k: v for k, v in d.items()
         if k in ("name", "when_severity", "comparison", "action", "enabled",
-                 "action_config", "file_category")
+                 "action_config", "file_category", "severity_match")
     })
     return jsonify({"ok": True})
 
@@ -744,6 +850,50 @@ def rules_list():
     return jsonify(db.list_custom_rules())
 
 
+@app.route("/api/rules/builtin")
+def rules_builtin_list():
+    """Return all built-in rules merged with their user-side state."""
+    out = []
+    for key, meta in checks.BUILTIN_RULES.items():
+        state = db.get_builtin_rule_state(key)
+        out.append({
+            "rule_key": key,
+            "name": meta["name"],
+            "description": meta.get("description", ""),
+            "category": meta.get("category", "other"),
+            "severity_default": meta.get("severity_default", "info"),
+            "severity_override": state.get("severity_override"),
+            "enabled": state.get("enabled", True),
+            "dropped": state.get("dropped", False),
+        })
+    return jsonify(out)
+
+
+@app.route("/api/rules/builtin/<rule_key>", methods=["PUT"])
+def rules_builtin_set(rule_key):
+    """Toggle / drop / override a built-in rule."""
+    if rule_key not in checks.BUILTIN_RULES:
+        return jsonify({"error": "Unknown built-in rule"}), 404
+    d = request.json or {}
+    state = db.get_builtin_rule_state(rule_key)
+    enabled = d.get("enabled", state["enabled"])
+    dropped = d.get("dropped", state["dropped"])
+    sev = d.get("severity_override", state.get("severity_override"))
+    if sev and sev not in db.SEVERITY:
+        return jsonify({"error": f"Invalid severity"}), 400
+    db.upsert_builtin_rule_state(rule_key, enabled=bool(enabled),
+                                 dropped=bool(dropped),
+                                 severity_override=sev)
+    return jsonify({"ok": True, "rule_key": rule_key,
+                    "enabled": bool(enabled), "dropped": bool(dropped)})
+
+
+@app.route("/api/rules/dropped")
+def rules_dropped_list():
+    """Return both custom and built-in rules a user has dropped."""
+    return jsonify(db.list_dropped_rules())
+
+
 @app.route("/api/rules/<int:rule_id>")
 def rules_get(rule_id):
     r = db.get_custom_rule(rule_id)
@@ -774,7 +924,7 @@ def rules_update(rule_id):
     if "severity" in d and d["severity"] not in db.SEVERITY:
         return jsonify({"error": f"Invalid severity"}), 400
     keys = ("name","description","severity","category","spec","affected_devices_list",
-            "message","detail","enabled")
+            "message","detail","enabled","dropped")
     payload = {}
     for k in keys:
         if k in d: payload[k] = d[k]
