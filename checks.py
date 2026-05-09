@@ -519,11 +519,102 @@ def evaluate(file_record, *, bitrate_threshold=80_000_000, paired_media=None):
     issues += _check_resolution_fps(vs)
     issues += _check_bitrate(fmt, bitrate_threshold)
 
+    # Filter out disabled built-in rules
+    disabled = file_record.get("_disabled_rule_keys") or set()
+    if disabled:
+        issues = [i for i in issues if i.get("rule_key") not in disabled]
+
     # Enrich each issue's `affected` list with Jellyfin-equivalent entries
     for iss in issues:
         _enrich_with_jellyfin(iss)
 
     return issues
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Built-in rule registry — used by the Custom Rules UI to enumerate / toggle
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Each entry: rule_key → {name, description, severity_default, category}
+# These are evaluated by the `_check_*` functions in this module. Disabling
+# one means evaluate() filters its issues out before storing them.
+
+BUILTIN_RULES = {
+    "file_empty":             {"name": "Empty file",                 "category": "container",  "severity_default": "unplayable",         "description": "Reports a file with size 0."},
+    "file_probe_failed":      {"name": "ffprobe failed",             "category": "container",  "severity_default": "unplayable",         "description": "ffprobe could not parse the file."},
+    "file_unknown_extension": {"name": "Unknown file type",          "category": "non_media",  "severity_default": "info",               "description": "File's extension isn't in any configured list."},
+    "no_video_stream":        {"name": "No video stream",            "category": "container",  "severity_default": "unplayable",         "description": "Media file with no detectable video stream."},
+
+    # Dolby Vision
+    "dovi_p5": {"name": "Dolby Vision Profile 5", "category": "hdr", "severity_default": "unplayable",   "description": "DoVi profile 5 only plays on Plex's specific DV-aware clients (and many Jellyfin clients fall back to base layer)."},
+    "dovi_p7": {"name": "Dolby Vision Profile 7", "category": "hdr", "severity_default": "info",         "description": "Dual-layer DV. Most clients drop the EL and play HDR10 base."},
+    "dovi_p8": {"name": "Dolby Vision Profile 8", "category": "hdr", "severity_default": "info",         "description": "Single-layer DV with HDR10 fallback. Wide compatibility."},
+    "dovi_p4": {"name": "Dolby Vision Profile 4", "category": "hdr", "severity_default": "possible_transcode", "description": "Older DV profile, limited support."},
+    "dovi_unusual": {"name": "Unusual Dolby Vision profile", "category": "hdr", "severity_default": "possible_transcode", "description": "DV profile other than 4/5/7/8."},
+
+    # Video codecs
+    "video_h264_10bit":       {"name": "H.264 10-bit (Hi10P)",         "category": "video", "severity_default": "always_transcode",     "description": "H.264 Hi10P. Direct-plays on mpv-based Jellyfin and Infuse only."},
+    "video_h264_444":         {"name": "H.264 4:4:4 chroma",            "category": "video", "severity_default": "always_transcode",     "description": "Almost no consumer device decodes H.264 4:4:4."},
+    "video_h264_422":         {"name": "H.264 4:2:2 chroma",            "category": "video", "severity_default": "possible_transcode",   "description": "H.264 4:2:2 isn't supported on many TVs."},
+    "video_h264_high_level":  {"name": "H.264 Level > 5.1",             "category": "video", "severity_default": "possible_transcode",   "description": "Some hardware decoders cap at level 5.1."},
+    "video_hevc_12bit":       {"name": "HEVC 12-bit",                   "category": "video", "severity_default": "always_transcode",     "description": "HEVC Main12. Few devices direct-play."},
+    "video_hevc_10bit":       {"name": "HEVC 10-bit (Main10)",          "category": "video", "severity_default": "possible_transcode",   "description": "HEVC Main10. Modern TVs handle it; older mobile/web may not."},
+    "video_hevc_444":         {"name": "HEVC 4:4:4 chroma",             "category": "video", "severity_default": "always_transcode",     "description": "HEVC 4:4:4 is nearly always transcoded."},
+    "video_av1_10bit":        {"name": "AV1 10-bit",                    "category": "video", "severity_default": "always_transcode",     "description": "AV1 10-bit is bleeding edge."},
+    "video_av1":              {"name": "AV1 (8-bit)",                   "category": "video", "severity_default": "possible_transcode",   "description": "AV1 has growing support but older clients still transcode."},
+    "video_vp9":              {"name": "VP9",                           "category": "video", "severity_default": "possible_transcode",   "description": "VP9 plays on web/mpv but not most native TV apps."},
+    "video_mpeg2":            {"name": "MPEG-2 video",                  "category": "video", "severity_default": "possible_transcode",   "description": "DVD-era codec; many clients transcode."},
+    "video_vc1":              {"name": "VC-1 video",                    "category": "video", "severity_default": "possible_transcode",   "description": "Used in Blu-ray; limited HW decode."},
+    "video_mpeg4_part2":      {"name": "MPEG-4 Part 2",                 "category": "video", "severity_default": "possible_transcode",   "description": "Old DivX/Xvid era."},
+    "video_chroma_444":       {"name": "4:4:4 chroma (generic)",        "category": "video", "severity_default": "possible_transcode",   "description": "Most devices direct-play 4:2:0 only."},
+
+    # HDR / color
+    "hdr10":                  {"name": "HDR10",                          "category": "hdr",   "severity_default": "info",                 "description": "Standard HDR; broad support."},
+    "hdr10_plus":             {"name": "HDR10+",                         "category": "hdr",   "severity_default": "info",                 "description": "Dynamic HDR. Modern Samsung/Panasonic and Apple TV 4K support it."},
+    "hdr_hlg":                {"name": "HLG",                            "category": "hdr",   "severity_default": "info",                 "description": "Broadcast HDR; usually transcoded by streaming clients."},
+    "hdr10_no_mastering":     {"name": "HDR10 missing mastering metadata","category": "hdr",  "severity_default": "info",                 "description": "Static HDR without mastering display info — players will pick conservative tone-mapping."},
+    "color_bt2020_no_hdr":    {"name": "BT.2020 color space without HDR","category": "hdr",   "severity_default": "info",                 "description": "Wide color gamut without HDR signaling — may render flat on SDR clients."},
+    "color_no_metadata":      {"name": "No color metadata",              "category": "hdr",   "severity_default": "info",                 "description": "No primaries/transfer info — players will guess."},
+
+    # Container
+    "container_avi":          {"name": "AVI container",                  "category": "container", "severity_default": "always_transcode", "description": "AVI is poorly supported in modern players."},
+    "container_avi_vfr":      {"name": "AVI with variable framerate",    "category": "container", "severity_default": "unplayable",       "description": "AVI doesn't store proper VFR; A/V sync drifts."},
+    "container_ext_mismatch": {"name": "Extension/container mismatch",   "category": "container", "severity_default": "info",             "description": "File extension doesn't match the container ffprobe found."},
+    "container_multi_video":  {"name": "Multiple video streams",         "category": "container", "severity_default": "possible_transcode","description": "More than one video stream — players pick one (usually correctly)."},
+    "container_no_duration":  {"name": "Container reports no duration",  "category": "container", "severity_default": "info",             "description": "Players may struggle to seek."},
+    "container_ogv":          {"name": "Ogg Theora video",               "category": "container", "severity_default": "always_transcode", "description": "OGV/Theora — niche, transcoded everywhere."},
+    "container_realmedia":    {"name": "RealMedia container",            "category": "container", "severity_default": "unplayable",       "description": "RM/RMVB — almost no modern player supports it."},
+
+    # Audio
+    "audio_none":             {"name": "No audio stream",                "category": "audio", "severity_default": "info",                 "description": "Media file with no audio — fine for silent films and vlogs but worth flagging."},
+    "audio_truehd":           {"name": "Dolby TrueHD",                   "category": "audio", "severity_default": "always_transcode",     "description": "TrueHD only direct-plays on receivers; software clients transcode."},
+    "audio_dts_hd_ma":        {"name": "DTS-HD MA",                      "category": "audio", "severity_default": "always_transcode",     "description": "DTS-HD MA usually transcodes to AC3 or AAC."},
+    "audio_dtsx":             {"name": "DTS:X",                          "category": "audio", "severity_default": "always_transcode",     "description": "DTS:X object audio — rare direct-play."},
+    "audio_dts_core":         {"name": "DTS core",                       "category": "audio", "severity_default": "possible_transcode",   "description": "Plain DTS — many web clients transcode."},
+    "audio_eac3":             {"name": "E-AC3 (Dolby Digital Plus)",     "category": "audio", "severity_default": "info",                 "description": "Modern Dolby — broadly supported but some older devices transcode."},
+    "audio_pcm":              {"name": "Uncompressed PCM",               "category": "audio", "severity_default": "always_transcode",     "description": "Huge bitrate, almost always transcoded."},
+    "audio_opus":              {"name": "Opus audio",                    "category": "audio", "severity_default": "possible_transcode",   "description": "Opus has good but inconsistent client support."},
+    "audio_vorbis":           {"name": "Ogg Vorbis audio",               "category": "audio", "severity_default": "always_transcode",     "description": "Ogg Vorbis usually transcoded."},
+    "audio_wma":              {"name": "WMA audio",                      "category": "audio", "severity_default": "always_transcode",     "description": "Windows Media Audio — niche."},
+    "audio_too_many_channels":{"name": "More than 8 audio channels",     "category": "audio", "severity_default": "possible_transcode",   "description": "Most decoders cap at 7.1 (8 channels)."},
+
+    # Subtitles
+    "sub_image_hdmv_pgs_subtitle": {"name": "PGS image subs",            "category": "subtitles", "severity_default": "possible_transcode", "description": "PGS subtitles must be picture-rendered; some clients can't burn-in."},
+    "sub_text_ass":           {"name": "ASS/SSA subtitles",              "category": "subtitles", "severity_default": "info",             "description": "Styled subs; many clients downgrade to plain SRT."},
+    "subtitle_unreadable":    {"name": "Subtitle file unreadable",       "category": "subtitles", "severity_default": "info",             "description": "Common encodings tried — none could read it."},
+    "subtitle_orphan":        {"name": "Subtitle without paired media",  "category": "subtitles", "severity_default": "info",             "description": "External subtitle file with no matching media in the same folder."},
+    "subtitle_no_lang":       {"name": "Subtitle without language tag",  "category": "subtitles", "severity_default": "info",             "description": "Filename has no recognized 2/3-letter language code."},
+
+    # Other
+    "framerate_high":         {"name": "Framerate above 60 fps",         "category": "video", "severity_default": "possible_transcode",   "description": "Some HDMI 2.0 chains can't sustain HFR."},
+    "resolution_8k":          {"name": "8K resolution",                  "category": "video", "severity_default": "possible_transcode",   "description": "8K media; most clients can't direct-play."},
+    "bitrate_high":           {"name": "Bitrate above threshold",        "category": "performance", "severity_default": "high_bitrate",   "description": "Per-file bitrate exceeds the configured threshold (default 80 Mbps)."},
+}
+
+
+def builtin_rule_meta(rule_key):
+    """Return dict for a built-in rule, or None if not registered."""
+    return BUILTIN_RULES.get(rule_key)
 
 
 def _enrich_with_jellyfin(issue):
@@ -547,25 +638,31 @@ def _evaluate_subtitle(file_record, paired_media):
     issues = []
     path = Path(file_record["path"])
 
-    val = validate_subtitle_file(path)
+    # In re-eval mode, skip disk validation (we ran it on the original scan).
+    # Only the orphan check still runs because it depends on the in-DB pairing,
+    # not the subtitle's contents.
+    skip_disk = file_record.get("skip_subtitle_disk_check")
 
-    if val.get("issue"):
-        sev = "unplayable" if "Empty" in val["issue"] or "Cannot" in val["issue"] else "info"
-        issues.append(_issue(
-            "subtitle_invalid", sev, "subtitles",
-            f"Subtitle file invalid: {val['issue']}",
-            f"External subtitle file failed validation. Plex will likely skip it or fail to display. Reason: {val['issue']}",
-            [],
-        ))
-        return issues
-
-    if not val.get("readable"):
-        issues.append(_issue(
-            "subtitle_unreadable", "info", "subtitles",
-            "Subtitle file unreadable",
-            "Could not read the subtitle file with any common encoding. Plex may fail to load it.",
-            [],
-        ))
+    if not skip_disk:
+        val = validate_subtitle_file(path)
+        if val.get("issue"):
+            sev = "unplayable" if "Empty" in val["issue"] or "Cannot" in val["issue"] else "info"
+            issues.append(_issue(
+                "subtitle_invalid", sev, "subtitles",
+                f"Subtitle file invalid: {val['issue']}",
+                f"External subtitle file failed validation. Plex will likely skip it or fail to display. Reason: {val['issue']}",
+                [],
+            ))
+            return issues
+        if not val.get("readable"):
+            issues.append(_issue(
+                "subtitle_unreadable", "info", "subtitles",
+                "Subtitle file unreadable",
+                "Could not read the subtitle file with any common encoding. Plex may fail to load it.",
+                [],
+            ))
+    else:
+        val = {"base_name": path.stem.split('.')[0]}
 
     # No paired media file in same folder?
     if not paired_media:
