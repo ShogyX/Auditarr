@@ -30,7 +30,10 @@ let ruleEditorMode = 'visual'; // visual | json
 let editorConditions = [{ field: 'codec', op: 'eq', value: '' }];
 let editorMatch = 'all';
 
-// Severity configuration (matches checks.py)
+// Severity configuration (matches checks.py / db.py)
+const MEDIA_SEVERITIES = ['ok','info','high_bitrate','possible_transcode','always_transcode','unplayable'];
+const NON_MEDIA_SEVERITIES = ['ok','info','warning','corrupt','possible_malicious'];
+
 const SEVERITY_LABELS = {
   unplayable: 'Unplayable',
   always_transcode: 'Always Transcode',
@@ -38,8 +41,23 @@ const SEVERITY_LABELS = {
   high_bitrate: 'High Bitrate',
   info: 'Info',
   ok: 'OK',
+  // Non-media
+  warning: 'Warning',
+  corrupt: 'Corrupt',
+  possible_malicious: 'Possible Malicious',
 };
-const SEV_RANK = { ok:0, info:1, high_bitrate:2, possible_transcode:3, always_transcode:4, unplayable:5 };
+// Unified ranking — used for sort order across both scales
+const SEV_RANK = {
+  ok: 0, info: 1,
+  warning: 2, high_bitrate: 2,
+  possible_transcode: 3,
+  corrupt: 4, always_transcode: 4,
+  possible_malicious: 5, unplayable: 5,
+};
+
+function severityScaleFor(category) {
+  return (category === 'media') ? MEDIA_SEVERITIES : NON_MEDIA_SEVERITIES;
+}
 
 const CATEGORY_LABELS = { media: 'Media', subtitle: 'Subtitles', image: 'Images', metadata: 'Metadata', junk: 'Junk' };
 const CATEGORY_ICONS = { media: '🎬', subtitle: '💬', image: '🖼', metadata: '📄', junk: '❓' };
@@ -157,7 +175,13 @@ function showView(name) {
   if (name === 'integrations') { loadPluginsAndIntegrations(); loadIntegrationEvents(); }
   if (name === 'automation') { loadAutomationRules(); }
   if (name === 'rules') { loadAllRules(); }
-  if (name === 'config') { loadAuthInfo(); loadUpdateStatus(); loadDbStats(); }
+  if (name === 'config') {
+    loadAuthInfo();
+    loadUpdateStatus();
+    loadBranches();
+    loadDbStats();
+    checkDeps();
+  }
   if (name === 'help') { loadHelpDocs(); }
 }
 
@@ -311,17 +335,32 @@ function renderHero(s) {
 }
 
 function renderSeverityTiles(s) {
+  // Show the MEDIA severity scale with unique-rule counts inside each tile,
+  // plus a small "↑ more severe" / "↓ less severe" badge.
   const pc = (s.per_category && s.per_category.media) || { severity: {} };
   const sev = pc.severity || {};
   const order = ['unplayable','always_transcode','possible_transcode','high_bitrate','info','ok'];
-  const html = order.map(svKey => {
+
+  // Index of unique rules per severity (best effort — populated by /api/stats/rules
+  // when available; falls back to "—" if not).
+  const uniqueByseverity = (s.unique_rules_by_severity) || {};
+
+  const html = order.map((svKey, idx) => {
     const n = sev[svKey] || 0;
     const cls = n === 0 ? `sev-tile ${svKey} zero` : `sev-tile ${svKey}`;
     const label = SEVERITY_LABELS[svKey] || svKey;
+    const unique = uniqueByseverity[svKey] || 0;
+    const more = (idx > 0) ? `${order[idx-1]}: ${sev[order[idx-1]] || 0}` : null;
+    const less = (idx < order.length - 1) ? `${order[idx+1]}: ${sev[order[idx+1]] || 0}` : null;
     return `
       <div class="${cls}" onclick="goToFiles({file_category:'media',severity:'${svKey}'})">
         <div class="sev-tile-val">${n}</div>
         <div class="sev-tile-label">${escHtml(label)}</div>
+        <div class="sev-tile-meta">
+          ${unique ? `<span class="sev-tile-unique">${unique} rule${unique===1?'':'s'}</span>` : ''}
+          ${more ? `<span class="sev-tile-neighbor">↑ ${escHtml(more)}</span>` : ''}
+          ${less ? `<span class="sev-tile-neighbor">↓ ${escHtml(less)}</span>` : ''}
+        </div>
       </div>`;
   }).join('');
   document.getElementById('sev-tiles').innerHTML = html;
@@ -330,19 +369,22 @@ function renderSeverityTiles(s) {
 function renderClickableBars(id, data, filterKey) {
   const el = document.getElementById(id);
   if (!el) return;
-  const entries = Object.entries(data || {}).sort((a,b) => b[1]-a[1]).slice(0, 8);
+  const entries = Object.entries(data || {})
+    .filter(([k, v]) => k && v > 0)
+    .sort((a,b) => b[1]-a[1])
+    .slice(0, 8);
   if (!entries.length) {
     el.innerHTML = '<div class="small" style="padding:6px 8px">No data</div>';
     return;
   }
   const max = entries[0][1];
   el.innerHTML = entries.map(([k,v]) => {
-    // For category filter, we go to that category in the file browser instead
+    // For issue category filter, we don't have a column-based filter; skip it
     const click = filterKey === 'category'
-      ? `goToFiles({category:'${escHtml(k)}'})`
-      : `goToFiles({file_category:'media',${filterKey}:'${escHtml(k)}'})`;
+      ? `goToFiles({})`  // just open the files view
+      : `goToFiles({file_category:'media',${filterKey}:${JSON.stringify(k)}})`;
     return `
-      <div class="cbar-row" onclick="${click}" title="Click to filter">
+      <div class="cbar-row" onclick="${click}" title="Click to filter by ${escHtml(filterKey)}=${escHtml(k)}">
         <div class="cbar-label">${escHtml(k)}</div>
         <div class="cbar-track"><div class="cbar-fill" style="width:${(v/max)*100}%"></div></div>
         <div class="cbar-count">${v}</div>
@@ -357,15 +399,15 @@ function renderSideCategories(s) {
     .map(cat => {
       const pc = s.per_category[cat] || { severity: {}, total: 0 };
       const sev = pc.severity || {};
-      // Highest severity drives the card colour
-      const SEV_ORDER = ['unplayable','always_transcode','possible_transcode','high_bitrate','info','ok'];
-      const worst = SEV_ORDER.find(s => (sev[s] || 0) > 0) || 'ok';
+      // Use the right severity scale for this category
+      const SEV_ORDER = severityScaleFor(cat).slice().reverse();  // most severe first
+      const worst = SEV_ORDER.find(svKey => (sev[svKey] || 0) > 0) || 'ok';
       // Severity pills (only non-zero counts)
       const pills = SEV_ORDER
         .filter(svKey => (sev[svKey] || 0) > 0)
         .map(svKey => `<span class="cat-side-sev-pill ${svKey}"
-                            title="${escHtml(SEVERITY_LABELS[svKey])} — click to filter"
-                            onclick="event.stopPropagation();goToFiles({file_category:'${cat}',severity:'${svKey}'})">${sev[svKey]} ${SEVERITY_LABELS[svKey]}</span>`)
+                            title="${escHtml(SEVERITY_LABELS[svKey] || svKey)} — click to filter"
+                            onclick="event.stopPropagation();goToFiles({file_category:'${cat}',severity:'${svKey}'})">${sev[svKey]} ${escHtml(SEVERITY_LABELS[svKey] || svKey)}</span>`)
         .join('');
       return `
         <div class="cat-side-card ${worst}" onclick="goToFiles({file_category:'${cat}'})">
@@ -384,25 +426,39 @@ function renderSideCategories(s) {
 // ──────────────────────────────────────────────────────────────
 // Click-to-filter helper — single entry point for ALL dashboard clicks
 // ──────────────────────────────────────────────────────────────
+// State for the file browser filters
+let currentCodec = '';
+let currentAudioCodec = '';
+let currentResolution = '';
+
 function goToFiles({ file_category, category, severity, codec, audio_codec, resolution, search } = {}) {
   showView('files');
   if (file_category) currentFileCategory = file_category;
   if (severity) currentSeverity = severity;
   else currentSeverity = 'all';
 
+  // Reset metadata filters before applying the new one
+  currentCodec = codec || '';
+  currentAudioCodec = audio_codec || '';
+  currentResolution = resolution || '';
+
   // Severity filter chip
   document.querySelectorAll('#filter-bar .chip').forEach(c =>
     c.classList.toggle('active', c.dataset.sev === currentSeverity));
 
-  // Search/criteria — populate the search box for visibility
+  // Search box: only used for free-text. NOT used for codec/audio/resolution
+  // since those are now metadata filters.
   let q = '';
   if (search) q = search;
-  else if (codec) q = codec;
-  else if (audio_codec) q = audio_codec;
-  else if (resolution) q = resolution;
-  else if (category && !file_category) q = category;
+  else if (category && !file_category) q = '';   // category filters via file_category, not search
   document.getElementById('search-input').value = q;
   currentSearch = q.toLowerCase();
+
+  // If the user clicked a category bar with no other filter, switch to that
+  // file_category instead of free-text searching.
+  if (category && !file_category) {
+    // category here refers to issue category, not file category — leave as-is
+  }
 
   applyFilter();
 }
@@ -437,7 +493,7 @@ function renderCategorySubnav() {
   const order = ['media','subtitle','image','metadata','junk'];
   const available = order.filter(c => counts[c] > 0);
 
-  // Auto-pick first available if current is empty (FIX FOR EMPTY CATEGORIES BUG)
+  // Auto-pick first available if current is empty
   if (!currentFileCategory || !counts[currentFileCategory]) {
     currentFileCategory = available[0] || 'media';
   }
@@ -450,11 +506,34 @@ function renderCategorySubnav() {
   `).join('');
   document.getElementById('cat-subnav').innerHTML = html ||
     '<button class="subnav-btn active">No files</button>';
+
+  renderFilterBar();
+}
+
+function renderFilterBar() {
+  // Show severity chips for the CURRENT file_category's scale.
+  // Media gets the 6-level scale; everyone else gets the non-media 5-level scale.
+  const scale = severityScaleFor(currentFileCategory).slice().reverse();
+  const filterBar = document.getElementById('filter-bar');
+  if (!filterBar) return;
+  let html = `<button class="chip ${currentSeverity === 'all' ? 'active' : ''}"
+                       onclick="setSeverity('all')" data-sev="all">All</button>`;
+  for (const sv of scale) {
+    const active = currentSeverity === sv ? 'active' : '';
+    html += `<button class="chip ${active}" onclick="setSeverity('${sv}')" data-sev="${sv}">
+              <span class="chip-dot ${sv}"></span>${escHtml(SEVERITY_LABELS[sv] || sv)}
+            </button>`;
+  }
+  html += `<span class="filter-spacer"></span>
+           <span class="file-count" id="file-count">0 files</span>`;
+  filterBar.innerHTML = html;
 }
 
 function setFileCategory(cat) {
   currentFileCategory = cat;
   selectedIds.clear();
+  // Reset severity to 'all' when switching category — old severity may not exist in new scale
+  currentSeverity = 'all';
   renderCategorySubnav();
   applyFilter();
 }
@@ -476,6 +555,15 @@ function applyFilter() {
   if (currentSeverity !== 'all') {
     res = res.filter(f => f.severity === currentSeverity);
   }
+  if (currentCodec) {
+    res = res.filter(f => (f.codec || '').toLowerCase() === currentCodec.toLowerCase());
+  }
+  if (currentAudioCodec) {
+    res = res.filter(f => (f.audio_codec || '').toLowerCase() === currentAudioCodec.toLowerCase());
+  }
+  if (currentResolution) {
+    res = res.filter(f => (f.resolution || '').toLowerCase() === currentResolution.toLowerCase());
+  }
   if (currentSearch) {
     res = res.filter(f =>
       (f.path||'').toLowerCase().includes(currentSearch) ||
@@ -492,7 +580,27 @@ function applyFilter() {
   const truncated = res.length > MAX_VISIBLE_FILES;
   const cap = truncated ? `${MAX_VISIBLE_FILES} of ${res.length}` : `${res.length}`;
   document.getElementById('file-count').textContent = `${cap} files`;
+
+  // Show active filter pills above the list so the user can see/clear them
+  _renderActiveFilters();
+
   renderFiles();
+}
+
+function _renderActiveFilters() {
+  const el = document.getElementById('active-filters');
+  if (!el) return;
+  const pills = [];
+  if (currentCodec) pills.push(['codec', currentCodec, () => { currentCodec = ''; applyFilter(); }]);
+  if (currentAudioCodec) pills.push(['audio', currentAudioCodec, () => { currentAudioCodec = ''; applyFilter(); }]);
+  if (currentResolution) pills.push(['resolution', currentResolution, () => { currentResolution = ''; applyFilter(); }]);
+  if (!pills.length) { el.innerHTML = ''; return; }
+  el.innerHTML = pills.map(([k, v, _], i) =>
+    `<span class="active-filter-pill" data-i="${i}">${escHtml(k)}: <strong>${escHtml(v)}</strong> <span class="x">×</span></span>`
+  ).join('');
+  el.querySelectorAll('.active-filter-pill').forEach((p, i) => {
+    p.addEventListener('click', () => pills[i][2]());
+  });
 }
 
 function renderFiles() {
@@ -2098,6 +2206,38 @@ async function loadUpdateStatus() {
   } catch (e) {}
 }
 
+async function loadBranches() {
+  try {
+    const r = await fetch('/api/update/branches');
+    const d = await r.json();
+    const el = document.getElementById('branch-picker');
+    if (!el) return;
+    el.innerHTML = `<label>Track branch:</label>` +
+      (d.allowed || []).map(b => {
+        const active = b === d.current ? 'active' : '';
+        return `<span class="branch-pill ${active}" data-branch="${escHtml(b)}" onclick="setBranch('${escHtml(b)}')">${escHtml(b)}</span>`;
+      }).join('');
+  } catch (e) {}
+}
+
+async function setBranch(branch) {
+  if (!confirm(`Switch to '${branch}' branch?\n\nNext update check will look at this branch's HEAD.`)) return;
+  try {
+    const r = await fetch('/api/update/branch', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ branch })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`Tracking '${branch}'`, 'ok');
+      loadBranches();
+      loadUpdateStatus();
+    } else {
+      toast(d.error || 'Failed', 'err');
+    }
+  } catch { toast('Failed', 'err'); }
+}
+
 function renderUpdateBanner(s) {
   const banner = document.getElementById('update-banner');
   if (!banner) return;
@@ -2105,7 +2245,7 @@ function renderUpdateBanner(s) {
   if (s.available && !dismissed) {
     banner.classList.add('visible');
     document.getElementById('update-banner-detail').innerHTML =
-      ` — ${escHtml(s.latest_message || '')} <code>${escHtml(s.latest_short || '')}</code>`;
+      ` — ${escHtml(s.latest_message || '')} <code>${escHtml(s.latest_short || '')}</code> from <code>${escHtml(s.branch || 'main')}</code>`;
     const link = document.getElementById('update-banner-view');
     link.onclick = () => { if (s.latest_url) window.open(s.latest_url, '_blank'); };
   } else {
@@ -2116,6 +2256,19 @@ function renderUpdateBanner(s) {
 function renderUpdateStatusCard(s) {
   const el = document.getElementById('update-status-card');
   if (!el) return;
+  // Toggle the install button based on availability
+  const btn = document.getElementById('btn-install-update');
+  if (btn) btn.disabled = !s.available || !!s.installing;
+
+  if (s.installing) {
+    el.innerHTML = `<div style="color: var(--sev-warning);">⏳ Installing update… do not close this tab.</div>`;
+    return;
+  }
+  if (s.last_install_error) {
+    el.innerHTML = `<div style="color: var(--sev-unplayable);">✗ Last install failed: ${escHtml(s.last_install_error)}</div>` +
+                   `<div class="small" style="margin-top: 4px">Try again or update manually with <code>git pull</code>.</div>`;
+    return;
+  }
   if (s.last_error) {
     el.innerHTML = `
       <div style="color: var(--sev-unplayable);">⚠ ${escHtml(s.last_error)}</div>
@@ -2129,13 +2282,13 @@ function renderUpdateStatusCard(s) {
   const same = s.current_sha && s.current_sha === s.latest_sha;
   if (same) {
     el.innerHTML = `
-      <div style="color: var(--sev-ok);">✓ Up to date — running <code>${escHtml(s.current_short)}</code></div>
+      <div style="color: var(--sev-ok);">✓ Up to date — running <code>${escHtml(s.current_short)}</code> on <code>${escHtml(s.branch || 'main')}</code></div>
       <div class="small" style="margin-top: 4px">${escHtml(s.latest_message || '')}</div>
       <div class="small" style="margin-top: 2px">Last checked: ${escHtml(s.last_checked || '')}</div>`;
     return;
   }
   el.innerHTML = `
-    <div><strong style="color: var(--sev-ok)">⬆ Update available</strong></div>
+    <div><strong style="color: var(--sev-ok)">⬆ Update available on <code>${escHtml(s.branch || 'main')}</code></strong></div>
     <div style="margin-top: 6px">
       <span class="small">Current:</span> <code>${escHtml(s.current_short || 'unknown')}</code>
       <span class="small" style="margin-left: 8px">→</span>
@@ -2144,8 +2297,9 @@ function renderUpdateStatusCard(s) {
     <div class="small" style="margin-top: 6px">${escHtml(s.latest_message || '')}</div>
     ${s.latest_committed_at ? `<div class="small" style="margin-top: 2px">Committed ${escHtml(s.latest_committed_at)}</div>` : ''}
     <div class="small" style="margin-top: 8px">
-      Pull with <code>git pull</code> in the Auditarr folder, then click <strong>Mark current as latest</strong>.
+      Click <strong>Install update</strong> to download and apply automatically. You'll need to restart Auditarr afterward.
     </div>
+    ${s.last_install_at ? `<div class="small" style="margin-top: 4px;color: var(--muted)">Last installed: ${escHtml(s.last_install_at)}</div>` : ''}
   `;
 }
 
@@ -2161,6 +2315,34 @@ async function forceUpdateCheck() {
     else if (s.available) toast('Update available!', 'ok');
     else toast('Up to date', 'ok');
   } catch { toast('Check failed', 'err'); }
+}
+
+async function installUpdate() {
+  if (!_updateState || !_updateState.available) {
+    toast('No update available', 'err');
+    return;
+  }
+  if (!confirm(`Install update from '${_updateState.branch}'?\n\n` +
+               `This will download the new version and overwrite Python/JS/HTML files.\n` +
+               `Your config, auth, and database are preserved.\n\n` +
+               `You will need to restart Auditarr after the install completes.`)) return;
+  const btn = document.getElementById('btn-install-update');
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+  try {
+    const r = await fetch('/api/update/install', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      toast(`Installed ${d.files_installed} files. Restart Auditarr to finish.`, 'ok');
+      loadUpdateStatus();
+    } else {
+      toast(d.error || 'Install failed', 'err');
+    }
+  } catch (e) {
+    toast('Install failed', 'err');
+  } finally {
+    if (btn) btn.textContent = 'Install update';
+    loadUpdateStatus();
+  }
 }
 
 async function markCurrentVersion() {
@@ -2187,6 +2369,79 @@ function dismissUpdateBanner() {
     sessionStorage.setItem('auditarr_update_dismissed', _updateState.latest_sha);
   }
   document.getElementById('update-banner').classList.remove('visible');
+}
+
+// ──────────────────────────────────────────────────────────────
+// Dependencies
+// ──────────────────────────────────────────────────────────────
+async function checkDeps() {
+  const el = document.getElementById('deps-status-card');
+  if (!el) return;
+  el.textContent = 'Checking…';
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    renderDepsCard(d);
+  } catch (e) {
+    el.textContent = 'Failed to check.';
+  }
+}
+
+function renderDepsCard(d) {
+  const el = document.getElementById('deps-status-card');
+  if (!el) return;
+  if (d.ok) {
+    el.className = 'dep-card ok';
+    el.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+      <span style="color:var(--sev-ok);font-size:16px">✓</span>
+      <span>All dependencies present</span>
+      <span class="small" style="margin-left:auto">${escHtml(d.platform)}${d.distro !== 'generic' ? ' / ' + escHtml(d.distro) : ''}</span>
+    </div>`;
+    return;
+  }
+  el.className = 'dep-card ' + ((d.python_missing||[]).length ? 'err' : 'warn');
+  let html = `<div style="margin-bottom:6px;font-weight:600">Missing dependencies</div>`;
+  for (const m of (d.python_missing || [])) {
+    html += `<div class="dep-row">
+      <span class="name">${escHtml(m.name)} <span class="small">(Python)</span></span>
+      <span class="status missing">missing</span>
+    </div>
+    <div class="dep-cmd">${escHtml(m.install_cmd_root || m.install_cmd)}</div>`;
+  }
+  for (const m of (d.binary_missing || [])) {
+    html += `<div class="dep-row">
+      <span class="name">${escHtml(m.name)} <span class="small">(${escHtml(m.description)})</span></span>
+      <span class="status missing">missing</span>
+    </div>
+    <div class="dep-cmd">${escHtml(m.install_cmd)}</div>
+    <div class="small" style="margin-bottom:8px">Expected: <code>${escHtml(m.expected_path)}</code></div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function installDeps() {
+  if (!confirm('Try to install missing Python packages?\n\nThis runs pip with sudo if needed.')) return;
+  const el = document.getElementById('deps-status-card');
+  if (el) el.textContent = 'Installing… this may take a minute.';
+  try {
+    const r = await fetch('/api/install-deps', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      toast('Install completed', 'ok');
+    } else {
+      toast('Install failed — see log', 'err');
+    }
+    if (d.log) {
+      const log = document.createElement('pre');
+      log.style.cssText = 'background:var(--surface3);padding:8px;font-size:11px;max-height:200px;overflow:auto;margin-top:8px;border-radius:3px';
+      log.textContent = d.log.slice(-2000);
+      if (el) { renderDepsCard(d.report); el.appendChild(log); }
+    } else {
+      checkDeps();
+    }
+  } catch (e) {
+    toast('Install failed', 'err');
+  }
 }
 
 // ──────────────────────────────────────────────────────────────
