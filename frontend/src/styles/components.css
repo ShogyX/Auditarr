@@ -1,0 +1,1540 @@
+/* ──────────────────────────────────────────────────────────
+   Auditarr — component utilities
+   Things that don't map cleanly to Tailwind classes.
+   ────────────────────────────────────────────────────────── */
+
+/* Status dots — used on pills, sidebar, integration list */
+.dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.dot.sev-ok {
+  background: var(--sev-ok);
+}
+.dot.sev-info {
+  background: var(--sev-info);
+}
+.dot.sev-warn {
+  background: var(--sev-warn);
+}
+.dot.sev-high {
+  background: var(--sev-high);
+}
+.dot.sev-error {
+  background: var(--sev-error);
+}
+.dot.sev-crit {
+  background: var(--sev-crit);
+}
+.dot.ok {
+  background: var(--sev-ok);
+}
+.dot.warn {
+  background: var(--sev-warn);
+}
+.dot.error {
+  background: var(--sev-error);
+}
+
+/* Pill — the universal severity/status chip */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  background: var(--surface-sunk);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.pill.solid {
+  background: var(--text);
+  color: var(--surface);
+  border-color: transparent;
+}
+.pill.sev-ok {
+  color: var(--sev-ok);
+  border-color: color-mix(in oklab, var(--sev-ok) 22%, var(--border));
+}
+.pill.sev-info {
+  color: var(--sev-info);
+  border-color: color-mix(in oklab, var(--sev-info) 22%, var(--border));
+}
+.pill.sev-warn {
+  color: var(--sev-warn);
+  border-color: color-mix(in oklab, var(--sev-warn) 22%, var(--border));
+}
+.pill.sev-high {
+  color: var(--sev-high);
+  border-color: color-mix(in oklab, var(--sev-high) 22%, var(--border));
+}
+.pill.sev-error {
+  color: var(--sev-error);
+  border-color: color-mix(in oklab, var(--sev-error) 30%, var(--border));
+}
+.pill.sev-crit {
+  color: var(--sev-crit);
+  border-color: color-mix(in oklab, var(--sev-crit) 30%, var(--border));
+}
+
+/* Tag — neutral chip for filters, taxonomies */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--surface-sunk);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+.tag.accent {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklab, var(--accent) 25%, var(--border));
+  color: var(--accent);
+}
+
+/* Sparkline */
+.spark {
+  width: 100%;
+  display: block;
+}
+.spark .area {
+  fill: color-mix(in oklab, var(--text) 8%, transparent);
+}
+.spark .line {
+  stroke: var(--text-2);
+  stroke-width: 1.5;
+  fill: none;
+  stroke-linecap: round;
+}
+.spark .line.accent {
+  stroke: var(--accent);
+}
+
+/* Heatmap (severity distribution bar) */
+.heatmap {
+  display: flex;
+  align-items: stretch;
+  height: 36px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.heatmap > * {
+  cursor: pointer;
+  transition: filter 120ms ease;
+  min-width: 4px;
+}
+.heatmap > *:hover {
+  filter: brightness(1.08);
+}
+.heatmap-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 22px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.heatmap-legend > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.heatmap-legend .mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.bg-sev-ok {
+  background: var(--sev-ok);
+}
+.bg-sev-info {
+  background: var(--sev-info);
+}
+.bg-sev-warn {
+  background: var(--sev-warn);
+}
+.bg-sev-high {
+  background: var(--sev-high);
+}
+.bg-sev-error {
+  background: var(--sev-error);
+}
+.bg-sev-crit {
+  background: var(--sev-crit);
+}
+
+/* Toast queue */
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 1000;
+  pointer-events: none;
+}
+.toast {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  pointer-events: auto;
+  animation: toastIn 180ms ease;
+  max-width: 360px;
+}
+.toast.error {
+  border-color: color-mix(in oklab, var(--sev-error) 35%, var(--border));
+}
+.toast.warn {
+  border-color: color-mix(in oklab, var(--sev-warn) 35%, var(--border));
+}
+.toast.ok {
+  border-color: color-mix(in oklab, var(--sev-ok) 35%, var(--border));
+}
+
+@keyframes toastIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Scrollbars (subtle, themed) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+  background-clip: padding-box;
+}
+
+/* Tabular figures for monospace numerics */
+.mono,
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.num {
+  text-align: right;
+}
+
+/* Truncation helper */
+.truncate-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Metric delta arrows */
+.metric-delta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.metric-delta.up {
+  color: var(--sev-ok);
+}
+.metric-delta.down {
+  color: var(--sev-error);
+}
+
+/* Reusable bar (Categories card etc.) */
+.bar-track {
+  position: relative;
+  height: 6px;
+  background: var(--surface-sunk);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  transition: width 220ms ease;
+}
+
+/* ── Stage 14.1: scope bar + segmented control (Files page) ── */
+.scope-bar {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.scope-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.scope-bar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  padding: 2px;
+  gap: 0;
+}
+.segmented button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-2);
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.segmented button:hover {
+  color: var(--text);
+}
+.segmented button.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+.scope-chip {
+  appearance: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.55;
+}
+.scope-chip:hover {
+  border-color: var(--border-strong);
+}
+.scope-chip.on {
+  opacity: 1;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.scope-chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 22: operational-settings UI primitives
+   ──────────────────────────────────────────────────────────
+   Building blocks for any future page that needs:
+     - a left category rail with active state + dirty marker
+     - a list of dense field-cards with inline metadata pills
+     - inline warnings tied to dirty state
+     - a sticky save bar with multi-action impact summary
+     - a centered confirm dialog with a diff table
+     - encrypted-secret cards with set/test/clear semantics
+     - per-row mapping editors (path mappings, etc.)
+   The runtime-settings + secrets + path-mappings panels are the
+   first consumers. The classes here intentionally aren't scoped
+   to those panels — the same primitives will style the future
+   modernizations of integrations/plugins/automation.
+   ────────────────────────────────────────────────────────── */
+
+/* ── 22.1 Inline form input — quieter than the auth form inputs.
+   Used for runtime-settings text/number fields, secret entry, and
+   path-mapping rows. Same height as Button.sm so adjacent controls
+   align visually. ──────────────────────────────────────────────── */
+.settings-input {
+  appearance: none;
+  height: 28px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
+  min-width: 0;
+}
+.settings-input:hover {
+  border-color: var(--border-strong);
+}
+.settings-input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.settings-input.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.settings-input[aria-invalid="true"] {
+  border-color: color-mix(in oklab, var(--sev-warn) 50%, var(--border-strong));
+}
+.settings-input[type="number"] {
+  /* Tighten the spinner area so the field renders compactly. */
+  text-align: right;
+  padding-right: 6px;
+}
+select.settings-input {
+  padding-right: 24px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M2 4l3 3 3-3' stroke='%23999' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+/* ── 22.2 Toggle switch — used for boolean fields in field-cards
+   and the future plugin-enable / channel-enable toggles. ────── */
+.settings-switch {
+  appearance: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease;
+  flex-shrink: 0;
+}
+.settings-switch:hover {
+  border-color: var(--border-strong);
+}
+.settings-switch.is-on {
+  background: var(--accent);
+  border-color: transparent;
+}
+.settings-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  background: var(--surface);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 150ms ease;
+}
+.settings-switch.is-on .settings-switch-thumb {
+  transform: translateX(14px);
+}
+
+/* ── 22.3 Runtime settings: layout grid (rail | fields) ──────── */
+.runtime-grid {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  /* Cap the panel's interior height so long category lists scroll
+     internally rather than pushing the page. */
+  min-height: 0;
+}
+@media (max-width: 720px) {
+  .runtime-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.runtime-rail {
+  border-right: 1px solid var(--border);
+  background: var(--surface-2);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+@media (max-width: 720px) {
+  .runtime-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 6px;
+    gap: 4px;
+  }
+}
+
+.runtime-rail-item {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.runtime-rail-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.runtime-rail-item.is-active {
+  background: var(--active);
+  color: var(--text);
+}
+@media (max-width: 720px) {
+  .runtime-rail-item {
+    width: auto;
+    white-space: nowrap;
+  }
+  .runtime-rail-item svg:last-child {
+    display: none;
+  }
+}
+
+.runtime-fields {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ── 22.4 Field card — one editable runtime setting ───────────
+   The card is the canonical "operational form element" — used here
+   for runtime settings, and slated for plugin / integration / auto-
+   mation configuration in future stages. Density target: comfort-
+   able-but-dense, ~70-80px tall at rest. Dirty state inverts the
+   border to the accent and tints the background. ─────────────── */
+.runtime-field {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease;
+}
+.runtime-field.is-dirty {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+[data-theme="dark"] .runtime-field.is-dirty {
+  /* The dark accent-soft is alpha-blended; use a slightly stronger
+     mix on field cards so the dirty state stays legible against the
+     panel's surface-2 background. */
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+}
+.runtime-field.is-applied {
+  animation: runtimeFieldApplied 1.6s ease-out;
+}
+@keyframes runtimeFieldApplied {
+  0% {
+    border-color: var(--sev-ok);
+    background: color-mix(in oklab, var(--sev-ok) 14%, var(--surface));
+  }
+  100% {
+    border-color: var(--border);
+    background: var(--surface);
+  }
+}
+
+.runtime-field-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.runtime-field-key {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--surface-sunk);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.runtime-field.is-dirty .runtime-field-key {
+  background: color-mix(in oklab, var(--accent) 20%, var(--surface));
+}
+.runtime-field-label {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+.runtime-field-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+  text-wrap: pretty;
+}
+.runtime-field-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.runtime-field-default {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.runtime-field-default code {
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
+/* ── 22.5 Inline warning row — under a dirty field, inside the
+   confirm dialog, and adjacent to validation failures. Uses sev-warn
+   for the rail color and a tinted surface so it sits visually below
+   the field's own border without competing with it. ─────────── */
+.runtime-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  background: color-mix(in oklab, var(--sev-warn) 12%, var(--surface));
+  border: 1px solid color-mix(in oklab, var(--sev-warn) 30%, var(--border));
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+/* ── 22.6 Sticky save bar — pinned to the bottom of the panel
+   when there are pending changes. Surface-2 background lets it sit
+   distinctly from both the panel body and the page's --bg. ───── */
+.runtime-savebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  flex-wrap: wrap;
+}
+
+/* ── 22.7 Dialog primitives — modal backdrop + centered dialog
+   shell. Reused by the confirm-apply dialog and the future
+   integration-test / plugin-install dialogs. ──────────────────── */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 100;
+  animation: backdropIn 120ms ease;
+}
+@keyframes backdropIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.dialog {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  animation: dialogIn 160ms ease;
+}
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dialog-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+.dialog-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+}
+
+/* ── 22.8 Diff table — used inside the confirm dialog. The grid
+   columns mirror the prototype: setting · before · after · apply
+   pill. Tight enough to fit ~5 rows above the fold. ──────────── */
+.diff-table {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.diff-head,
+.diff-row {
+  display: grid;
+  grid-template-columns: 1fr 92px 92px 78px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+}
+.diff-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.diff-row + .diff-row {
+  border-top: 1px solid var(--border);
+}
+.diff-cell,
+.diff-cell-after {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.diff-cell {
+  color: var(--muted);
+}
+.diff-cell-after {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ── 22.9 Secret cards — encrypted-secret editor rows. Same
+   border/radius vocabulary as runtime-field, but with a slightly
+   tighter head row since the description is the primary content
+   and the test/clear actions sit inline with the input. ─────── */
+.secret-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.secret-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.secret-card-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.secret-card-meta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.secret-card-meta code {
+  font-family: var(--font-mono);
+}
+
+/* ── 22.10 Path-mapping rows — per-integration editor card. Two-
+   column grid for from/to inputs with a trash button column. ── */
+.path-mapping-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 150ms ease;
+}
+.path-mapping-card.is-dirty {
+  border-color: var(--accent);
+}
+.path-mapping-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.path-mapping-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.path-mapping-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 28px;
+  align-items: center;
+  gap: 6px;
+}
+.path-mapping-row-head {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0 2px;
+}
+.path-mapping-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 8px;
+}
+@media (max-width: 560px) {
+  .path-mapping-row,
+  .path-mapping-row-head {
+    grid-template-columns: 1fr;
+  }
+  .path-mapping-row-head span:nth-child(2),
+  .path-mapping-row-head span:nth-child(3) {
+    display: none;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 23: Files-page UI primitives
+   ──────────────────────────────────────────────────────────
+   Same reuse-first philosophy as Stage 22 — the components here
+   (toolbar, dense table, selection bar, popover, drawer) are
+   named generically so the next pages can adopt them. Specifically:
+     - .popover + .popover-head/row/foot: column-visibility menu
+       today; Stage 24's rule-builder filter menus and Stage 25's
+       plugin-options menus will use them.
+     - .files-table + variants: the dense table shape, reusable by
+       any future page that needs sortable columns with checkbox
+       selection.
+     - .file-drawer + variants: slide-in detail panel; the rules /
+       integrations / notifications pages all have detail-view
+       work coming and can adopt this.
+   ────────────────────────────────────────────────────────── */
+
+/* ── 23.1 Popover — anchored menu used by the column-visibility
+   button. Positioned ABOVE the trigger when there's room below
+   the viewport edge would clip; pure top-positioned for now since
+   the toolbar lives near the top of the page. ──────────────── */
+.popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  animation: popoverIn 120ms ease;
+}
+@keyframes popoverIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.popover-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.popover-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.popover-row:hover {
+  background: var(--hover);
+}
+.popover-row input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.popover-row.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.popover-row.is-disabled input {
+  cursor: not-allowed;
+}
+.popover-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+}
+
+/* ── 23.2 Files toolbar — one-row strip above the table.
+   Wraps gracefully on narrow viewports. Each control's height
+   matches .settings-input (28px) for visual alignment. ─────── */
+.files-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.files-toolbar-search {
+  position: relative;
+  flex: 1 1 240px;
+  max-width: 360px;
+  min-width: 180px;
+}
+
+/* ── 23.3 Selection action bar — appears in the toolbar when one
+   or more rows are checked. Surface-sunk background sets it
+   apart from the main toolbar without competing with severity
+   pills. ───────────────────────────────────────────────────── */
+.files-selection-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 12px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+
+/* ── 23.4 Dense table — replaces the previous CSS grid. Real
+   <table> markup so semantic role=grid + aria-sort just work.
+   ``overflow-x: auto`` on .files-table-wrap keeps wide column
+   sets scrollable on narrow viewports without breaking the
+   sticky header on tall ones. ──────────────────────────────── */
+.files-table-wrap {
+  overflow-x: auto;
+}
+.files-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.files-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-sunk);
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted-2);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  user-select: none;
+}
+.files-table thead th.num {
+  text-align: right;
+}
+.files-table thead th.is-sortable {
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.files-table thead th.is-sortable:hover {
+  color: var(--text-2);
+}
+.files-table thead th.is-sorted {
+  color: var(--text);
+}
+.files-table-sort-ind {
+  font-family: var(--font-mono);
+  margin-left: 4px;
+  opacity: 0.6;
+}
+.files-table thead th.is-sorted .files-table-sort-ind {
+  opacity: 1;
+}
+
+.files-table tbody td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+  max-width: 0; /* lets ``truncate`` work on cells */
+}
+.files-table tbody td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.files-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.files-table-row {
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+.files-table-row:hover {
+  background: var(--hover);
+}
+.files-table-row.is-selected {
+  background: color-mix(in oklab, var(--accent) 8%, var(--surface));
+}
+.files-table-row.is-selected:hover {
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+}
+
+.files-table-check {
+  width: 36px;
+  padding-left: 14px !important;
+  padding-right: 4px !important;
+}
+.files-checkbox {
+  accent-color: var(--accent);
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+}
+
+/* ── 23.5 Pager — sticky-feel footer for the table card. ────── */
+.files-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+/* ── 23.6 File detail drawer — slides in from the right with a
+   semi-transparent backdrop. Width clamps so it can't dwarf
+   narrow viewports but still gives room for ffprobe JSON.
+   The drawer's header / body / footer mirror the dialog vocab
+   from Stage 22 (.dialog-head / .dialog-body / .dialog-foot) but
+   use a different geometry so they don't conflict. ──────────── */
+.file-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 90;
+  animation: backdropIn 120ms ease;
+}
+.file-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(520px, 100vw);
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  z-index: 91;
+  display: flex;
+  flex-direction: column;
+  animation: drawerIn 180ms ease;
+}
+@keyframes drawerIn {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.file-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+.file-drawer-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.file-drawer-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.file-drawer-section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.file-drawer-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Metadata grid inside the drawer — 2 columns of small key/value
+   cells. ``minmax(0, 1fr)`` lets the value truncate cleanly. */
+.file-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.file-meta-cell {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  min-width: 0;
+}
+
+.file-probe-pre {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--surface-sunk);
+  color: var(--text-2);
+  overflow-x: auto;
+  max-height: 280px;
+  white-space: pre;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 24: Rules-page UI primitives
+   ──────────────────────────────────────────────────────────
+   Builds on Stages 22/23 vocabulary:
+     - .dialog-* / .runtime-warn from Stage 22
+     - .files-table, .segmented, .settings-input from earlier stages
+   Adds:
+     - .dialog-wide for the rule editor (it needs more room than the
+       runtime-settings confirm-apply dialog)
+     - .rules-toolbar + .rules-toolbar-search to mirror .files-toolbar
+     - .rules-table-toggle and .rules-row-actions to host the
+       per-row switch / duplicate / delete affordances
+     - .rules-row.is-disabled to tone down disabled rules in the table
+     - .rule-tab-strip / .rule-tab for the dialog's section tabs
+   ────────────────────────────────────────────────────────── */
+
+.dialog.dialog-wide {
+  max-width: 880px;
+}
+
+.rules-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.rules-toolbar-search {
+  position: relative;
+  flex: 1 1 240px;
+  max-width: 320px;
+  min-width: 180px;
+}
+
+.rules-table-toggle {
+  width: 52px;
+  padding-left: 14px !important;
+}
+
+.rules-row.is-disabled td:not(.rules-row-actions) {
+  /* Dim every cell except the action buttons so the row reads
+     "disabled" at a glance without burying the controls operators
+     might still want to use (toggle back on, duplicate, delete). */
+  opacity: 0.65;
+}
+.rules-row.is-disabled .files-table-row:hover {
+  opacity: 1;
+}
+
+.rules-row-actions {
+  white-space: nowrap;
+  text-align: right;
+  padding-right: 12px !important;
+}
+.rules-row-actions > * + * {
+  margin-left: 2px;
+}
+
+/* ── Dialog tab strip used inside the rule editor body. Same
+   vocabulary as the .segmented control but spans the dialog width
+   with a single underline rather than a pill background — that
+   reads better inside an already-bordered card body. ──────────── */
+.rule-tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin: 4px -14px 0;
+  padding: 0 14px;
+}
+.rule-tab {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--muted-2);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.rule-tab:hover {
+  color: var(--text-2);
+}
+.rule-tab.is-active {
+  color: var(--text);
+  border-bottom-color: var(--text);
+  font-weight: 500;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 25: Plugins-page UI primitives
+   ──────────────────────────────────────────────────────────
+   Reuses Stages 22-24 vocabulary nearly wholesale:
+     - .files-table for the dense table
+     - .rules-toolbar / .segmented / .settings-input for the toolbar
+     - .dialog-* for the settings dialog
+     - .runtime-warn for the in-dialog error banner
+   Adds one new primitive:
+     - .plugin-monogram: the small letter badge in the first column,
+       mirroring the prototype's design. Named generically so future
+       Integrations / Notifications rows can pick up the same look.
+   ────────────────────────────────────────────────────────── */
+
+.plugin-monogram {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--surface-sunk);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 26: Dashboard primitives
+   ──────────────────────────────────────────────────────────
+   Reuses earlier stages nearly wholesale:
+     - .files-table for the Recent scans / Recent automation runs
+     - .segmented for the range toggle (with new -sm modifier)
+   Adds:
+     - .segmented-sm: smaller padding for header-level segmented
+       controls (vs the toolbar-level controls in Files / Rules /
+       Plugins). Generic enough to apply anywhere in the header.
+     - .categories-card-body and .categories-* family: the
+       library-composition card's sectioned bar list. The bars are
+       sized relative to the *group total*, not the library-wide
+       total, so containers with smaller cumulative size still
+       render readable bars.
+   ────────────────────────────────────────────────────────── */
+
+.segmented.segmented-sm {
+  padding: 1px;
+}
+.segmented.segmented-sm button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.categories-card-body {
+  padding: 12px 14px 4px;
+}
+.categories-group + .categories-group {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.categories-group-label {
+  margin: 0 0 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+.categories-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+}
+/* Stage 31: rows that link out to a Files filter. The grid
+   moves onto the link itself so it lays out identically to a
+   static row; the row wrapper is then just a marker. The hover
+   state surfaces the click affordance which the static row
+   correctly didn't have. */
+.categories-row-link {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 6px;
+  margin: 0 -6px;
+  border-radius: 4px;
+  color: inherit;
+  text-decoration: none;
+  transition: background 120ms ease-out;
+}
+.categories-row-link:hover {
+  background: var(--surface-sunk);
+}
+.categories-row-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* When a row is wrapped in a link, the link does the padding
+   and the wrapper li shouldn't double it. */
+.categories-row:has(.categories-row-link) {
+  padding: 0;
+}
+.categories-row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.categories-row-bar {
+  height: 6px;
+  background: var(--surface-sunk);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.categories-row-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  /* Smooth the transition when the underlying data refetches —
+     reduces the jarring step when a scan completes and the bars
+     shift. */
+  transition: width 240ms ease-out;
+}
+.categories-row-num {
+  font-size: 12px;
+  text-align: right;
+  white-space: nowrap;
+}
+.categories-row-count {
+  font-size: 11.5px;
+  text-align: right;
+  white-space: nowrap;
+  min-width: 48px;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 1 — Primitive animations
+   Mirrors the design package's @keyframes for overlay, modal,
+   and drawer entry/exit so the canonical Modal and Drawer
+   primitives don't need an animation library.
+   ────────────────────────────────────────────────────────── */
+
+@keyframes ui-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes ui-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes ui-modal-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%);
+  }
+}
+@keyframes ui-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+
+.ui-overlay {
+  animation: ui-fade-in 0.16s ease-out;
+}
+.ui-overlay[data-state="closed"] {
+  animation: ui-fade-out 0.12s ease-in;
+}
+.ui-modal {
+  animation: ui-modal-in 0.2s ease-out;
+}
+.ui-drawer {
+  animation: ui-drawer-in 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Stage 2 — App shell layout stability
+   ──────────────────────────────────────────────────────────
+   Issue 1: page load centering flash / layout jump.
+   Issue 2: scroll target inconsistency (sidebar swallowed page
+            scroll when the pointer was over it).
+   Issue 3: horizontal scroll on pages that should never scroll
+            horizontally (Rules etc.).
+
+   Strategy:
+     - Encode the sidebar / top-nav offset in a static CSS class
+       on <main> so the offset is in effect on the very first
+       paint, not after Tailwind class resolution. The matching
+       Tailwind utilities (.pl-sidebar / .pt-header / .min-h-screen
+       / .flex / .flex-col) are kept in the markup for visual
+       back-compat; values are identical, so the duplication
+       is intentionally a no-op for the rendered output.
+     - overflow-x: hidden on the main element prevents wide
+       content (e.g. an unconstrained table row) from pushing
+       the *page* into horizontal scroll. Components that need
+       horizontal scroll (.files-table-wrap) opt in locally and
+       are unaffected by this rule because they create their own
+       scroll context.
+   ────────────────────────────────────────────────────────── */
+
+.app-main {
+  padding-left: var(--sidebar-w);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+}
+
+.app-main-top {
+  padding-top: var(--header-h);
+  min-height: 100vh;
+  overflow-x: hidden;
+}

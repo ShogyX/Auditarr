@@ -1,0 +1,14 @@
+{
+  "id": "plex",
+  "name": "Plex Media Server",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Plex via the official API for library and metadata reads.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.plex"],
+  "requires": []
+}

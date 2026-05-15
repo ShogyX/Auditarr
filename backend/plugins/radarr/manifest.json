@@ -1,0 +1,14 @@
+{
+  "id": "radarr",
+  "name": "Radarr",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Radarr (v3+) for movie library + tag sync.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.radarr"],
+  "requires": []
+}

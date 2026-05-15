@@ -1,0 +1,37 @@
+# VCS + IDE
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.swp
+
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/htmlcov
+**/.venv
+**/venv
+**/env
+
+# Node
+**/node_modules
+**/dist
+**/.vite
+**/coverage
+
+# Local data
+backend/auditarr.db
+backend/data
+backend/.env
+.env
+**/*.log
+
+# Build artifacts not needed
+tests/e2e/

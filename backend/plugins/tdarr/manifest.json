@@ -1,0 +1,14 @@
+{
+  "id": "tdarr",
+  "name": "Tdarr",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Tdarr for transcode pipeline status and library awareness.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.tdarr"],
+  "requires": []
+}

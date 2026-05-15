@@ -1,0 +1,14 @@
+{
+  "id": "jellyfin",
+  "name": "Jellyfin",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Jellyfin via the official HTTP API for library reads.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.jellyfin"],
+  "requires": []
+}

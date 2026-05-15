@@ -1,0 +1,14 @@
+{
+  "id": "sonarr",
+  "name": "Sonarr",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Sonarr (v3+) for TV library + tag sync.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.sonarr"],
+  "requires": []
+}

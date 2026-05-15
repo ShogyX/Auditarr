@@ -1,0 +1,130 @@
+name: auditarr
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-auditarr}
+      POSTGRES_USER: ${POSTGRES_USER:-auditarr}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auditarr}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-auditarr} -d ${POSTGRES_DB:-auditarr}"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks: [auditarr]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks: [auditarr]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auditarr:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AUDITARR_ENV: ${AUDITARR_ENV:-production}
+      AUDITARR_HOST: 0.0.0.0
+      AUDITARR_PORT: 8000
+      AUDITARR_LOG_FORMAT: ${AUDITARR_LOG_FORMAT:-json}
+      AUDITARR_LOG_LEVEL: ${AUDITARR_LOG_LEVEL:-info}
+      AUDITARR_SECRET_KEY: ${AUDITARR_SECRET_KEY:?set AUDITARR_SECRET_KEY in .env}
+      AUDITARR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-auditarr}:${POSTGRES_PASSWORD:-auditarr}@postgres:5432/${POSTGRES_DB:-auditarr}
+      AUDITARR_REDIS_URL: redis://redis:6379/0
+      AUDITARR_DATA_DIR: /app/data
+      AUDITARR_PLUGIN_DIR: /app/plugins
+      AUDITARR_BUILTIN_PLUGIN_DIR: /app/builtin-plugins
+      AUDITARR_DOCS_DIR: /app/docs
+      AUDITARR_FRONTEND_DIST: /app/frontend
+      AUDITARR_BOOTSTRAP_ADMIN_USERNAME: ${AUDITARR_BOOTSTRAP_ADMIN_USERNAME:-}
+      AUDITARR_BOOTSTRAP_ADMIN_PASSWORD: ${AUDITARR_BOOTSTRAP_ADMIN_PASSWORD:-}
+      AUDITARR_BOOTSTRAP_ADMIN_EMAIL: ${AUDITARR_BOOTSTRAP_ADMIN_EMAIL:-}
+      AUDITARR_SMTP_ENABLED: ${AUDITARR_SMTP_ENABLED:-false}
+      AUDITARR_SMTP_BACKEND: ${AUDITARR_SMTP_BACKEND:-console}
+      AUDITARR_SMTP_HOST: ${AUDITARR_SMTP_HOST:-localhost}
+      AUDITARR_SMTP_PORT: ${AUDITARR_SMTP_PORT:-25}
+      AUDITARR_SMTP_USERNAME: ${AUDITARR_SMTP_USERNAME:-}
+      AUDITARR_SMTP_PASSWORD: ${AUDITARR_SMTP_PASSWORD:-}
+      AUDITARR_SMTP_USE_TLS: ${AUDITARR_SMTP_USE_TLS:-false}
+      AUDITARR_SMTP_USE_SSL: ${AUDITARR_SMTP_USE_SSL:-false}
+      AUDITARR_SMTP_FROM_EMAIL: ${AUDITARR_SMTP_FROM_EMAIL:-noreply@example.com}
+      AUDITARR_SMTP_FROM_NAME: ${AUDITARR_SMTP_FROM_NAME:-Auditarr}
+      AUDITARR_SMTP_RESET_LINK_BASE: ${AUDITARR_SMTP_RESET_LINK_BASE:-http://localhost:8000}
+    ports:
+      - "${AUDITARR_PORT:-8000}:8000"
+    volumes:
+      - app-data:/app/data
+      - app-plugins:/app/plugins
+      # Optional: mount media read-only for scanning (Stage 4+).
+      # - /path/to/media:/media:ro
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/auditarr-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks: [auditarr]
+
+  worker:
+    # Optional ARQ worker for out-of-process scans. Opt in with:
+    #   docker compose --profile worker up -d
+    profiles: ["worker"]
+    image: auditarr:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["worker"]
+    environment:
+      AUDITARR_ENV: ${AUDITARR_ENV:-production}
+      AUDITARR_LOG_FORMAT: ${AUDITARR_LOG_FORMAT:-json}
+      AUDITARR_LOG_LEVEL: ${AUDITARR_LOG_LEVEL:-info}
+      AUDITARR_SECRET_KEY: ${AUDITARR_SECRET_KEY:?set AUDITARR_SECRET_KEY in .env}
+      AUDITARR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-auditarr}:${POSTGRES_PASSWORD:-auditarr}@postgres:5432/${POSTGRES_DB:-auditarr}
+      AUDITARR_REDIS_URL: redis://redis:6379/0
+      AUDITARR_DATA_DIR: /app/data
+      AUDITARR_PLUGIN_DIR: /app/plugins
+      AUDITARR_BUILTIN_PLUGIN_DIR: /app/builtin-plugins
+      AUDITARR_DOCS_DIR: /app/docs
+    volumes:
+      - app-data:/app/data
+      - app-plugins:/app/plugins
+      # Same media mount as the app service when configured.
+      # - /path/to/media:/media:ro
+    networks: [auditarr]
+
+volumes:
+  postgres-data:
+  redis-data:
+  app-data:
+  app-plugins:
+
+networks:
+  auditarr:
+    driver: bridge

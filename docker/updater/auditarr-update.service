@@ -1,0 +1,25 @@
+# Drop into /etc/systemd/system/auditarr-update.service then
+#   systemctl daemon-reload && systemctl enable --now auditarr-update
+# Adjust paths to your installation.
+
+[Unit]
+Description=Auditarr update helper
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+# Same path you bind-mount into the Auditarr container at /app/data.
+Environment=AUDITARR_DATA_DIR=/opt/auditarr/data
+# Path to the docker-compose.yml that defines the Auditarr stack.
+Environment=AUDITARR_COMPOSE_FILE=/opt/auditarr/docker-compose.yml
+# Compose service name to pull + recreate. Defaults to "app".
+Environment=AUDITARR_COMPOSE_SERVICE=app
+ExecStart=/opt/auditarr/docker/updater/auditarr-update.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

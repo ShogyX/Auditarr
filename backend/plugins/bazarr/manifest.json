@@ -1,0 +1,14 @@
+{
+  "id": "bazarr",
+  "name": "Bazarr",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to Bazarr to surface subtitle gaps and statuses.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.bazarr"],
+  "requires": []
+}

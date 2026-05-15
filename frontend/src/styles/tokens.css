@@ -1,0 +1,150 @@
+/* ──────────────────────────────────────────────────────────
+   Auditarr — design tokens
+   Aesthetic: black/white/grey, single accent, signal colors
+   only on status pills / bars / sparklines.
+
+   Stage 1 / ADR-001: this token file is the system specification.
+   The design package (UI-Design-Update-Package.zip :: styles.css)
+   is authoritative for every value here. Any divergence is a
+   regression and should be fixed in this file, not worked around.
+
+   Stage 1 / ADR-006: three light/dark border values were reconciled
+   to match the authoritative design package (--border light/dark,
+   --border-strong dark).
+
+   Stage 1: nine layout/density tokens were promoted from implicit
+   values in the design package to first-class custom properties so
+   page scaffolds, drawers, modals and data grids share one contract.
+   ────────────────────────────────────────────────────────── */
+
+:root {
+  /* Type */
+  --font-sans:
+    "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Light mode (default) */
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --surface-2: #fafaf9;
+  --surface-sunk: #f1f1ef;
+  --border: #e6e6e3;          /* ADR-006: was #ededeb; design package wins */
+  --border-strong: #d4d4d1;
+  --text: #0e0e10;
+  --text-2: #3a3a3d;
+  --muted: #74747a;
+  --muted-2: #a1a1a6;
+  --hover: rgba(15, 15, 17, 0.045);
+  --active: rgba(15, 15, 17, 0.08);
+
+  /* Accent (indigo, single — used sparingly) */
+  --accent: oklch(0.52 0.16 268);
+  --accent-2: oklch(0.62 0.16 268);
+  --accent-soft: oklch(0.95 0.04 268);
+  --accent-fg: #ffffff;
+
+  /* Severity / signal — used ONLY on pills, bars, dots */
+  --sev-ok: oklch(0.62 0.13 155);
+  --sev-info: oklch(0.58 0.13 248);
+  --sev-warn: oklch(0.74 0.14 78);
+  --sev-high: oklch(0.68 0.16 55);
+  --sev-error: oklch(0.58 0.2 25);
+  --sev-crit: oklch(0.5 0.22 350);
+
+  --cat-media: oklch(0.58 0.13 248);
+  --cat-subtitle: oklch(0.6 0.13 295);
+  --cat-image: oklch(0.62 0.13 155);
+  --cat-metadata: oklch(0.74 0.14 78);
+  --cat-junk: oklch(0.6 0.16 20);
+
+  /* ─── Layout / shape / shadow ──────────────────────────── */
+  --sidebar-w: 232px;
+  --header-h: 56px;
+  --radius: 8px;
+  --radius-sm: 5px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 2px rgba(15, 15, 17, 0.04), 0 1px 1px rgba(15, 15, 17, 0.03);
+  --shadow: 0 4px 14px rgba(15, 15, 17, 0.06), 0 1px 2px rgba(15, 15, 17, 0.04);
+  --shadow-lg: 0 18px 50px rgba(15, 15, 17, 0.12), 0 4px 12px rgba(15, 15, 17, 0.06);
+
+  /* ─── Promoted layout tokens (Stage 1) ─────────────────── */
+  /* Page scaffold: design package .page-body */
+  --page-max-width: 1480px;
+  --page-pad-x: 28px;
+  --page-pad-y-top: 22px;
+  --page-pad-y-bottom: 60px;
+
+  /* DataGrid density: design package .tbl */
+  --row-h: 40px;
+  --row-h-dense: 32px;
+  --header-row-h: 36px;
+
+  /* Toolbar: implied 44px control rail in design package */
+  --toolbar-h: 44px;
+
+  /* Drawer + modal: design package .drawer / .modal */
+  --drawer-w: min(580px, 100vw);
+  --modal-w-sm: 480px;
+  --modal-w-md: 640px;
+  --modal-w-lg: 760px;
+}
+
+[data-theme="dark"] {
+  --bg: #0b0b0d;
+  --surface: #131316;
+  --surface-2: #17171b;
+  --surface-sunk: #0e0e11;
+  --border: #25252a;          /* ADR-006: was #1c1c20; design package wins */
+  --border-strong: #34343b;    /* ADR-006: was #2c2c33; design package wins */
+  --text: #f4f4f3;
+  --text-2: #c8c8c6;
+  --muted: #8b8b90;
+  --muted-2: #5a5a60;
+  --hover: rgba(255, 255, 255, 0.04);
+  --active: rgba(255, 255, 255, 0.07);
+
+  --accent: oklch(0.68 0.16 268);
+  --accent-2: oklch(0.74 0.15 268);
+  --accent-soft: oklch(0.3 0.1 268 / 0.35);
+  --accent-fg: #0b0b0d;
+
+  --sev-ok: oklch(0.72 0.15 155);
+  --sev-info: oklch(0.7 0.14 248);
+  --sev-warn: oklch(0.82 0.16 78);
+  --sev-high: oklch(0.76 0.17 55);
+  --sev-error: oklch(0.68 0.21 25);
+  --sev-crit: oklch(0.62 0.22 350);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5), 0 1px 1px rgba(0, 0, 0, 0.3);
+  --shadow: 0 4px 14px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 18px 50px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01", "cv11";
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}

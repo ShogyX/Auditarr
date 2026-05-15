@@ -1,0 +1,15 @@
+{
+  "id": "example-hello",
+  "name": "Hello (example)",
+  "version": "0.1.0",
+  "type": "generic",
+  "description": "Reference plugin demonstrating discovery, routes, capabilities, and event subscription.",
+  "author": "Auditarr",
+  "backend_entry": "backend.py",
+  "routes": true,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["example.hello"],
+  "requires": []
+}

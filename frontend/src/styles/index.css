@@ -1,0 +1,33 @@
+/*
+ * Entry stylesheet.
+ *
+ * CSS @import declarations MUST precede all other statements (besides @charset
+ * and empty @layer). Tailwind directives are processed after imports so that
+ * design tokens are available everywhere — including inside @layer base below
+ * — and so the token cascade is deterministic.
+ *
+ * Order rationale:
+ *   1. tokens.css       — CSS custom properties (light + dark)
+ *   2. components.css   — token-driven component classes consumed by features
+ *   3. doc-body.css     — typography for rendered documentation surfaces
+ *   4. @tailwind base / components / utilities
+ *   5. @layer base      — small global typography overrides
+ */
+
+@import "./tokens.css";
+@import "./components.css";
+@import "./doc-body.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+}
