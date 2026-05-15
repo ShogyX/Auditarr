@@ -1,7 +1,7 @@
 <h1 align="center">Auditarr</h1>
 
 <p align="center">
-  <strong>The self-hosted audit layer for your media library.</strong>
+  <strong>The self-hosted AI-slop audit layer for your media library.</strong>
 </p>
 
 <p align="center">
@@ -28,6 +28,11 @@
 </p>
 
 ---
+
+## Disclaimer
+
+This is the epitome of AI-slop software, built 100% with Claude Code and no real knowledge of programming.
+
 
 ## What it does
 
