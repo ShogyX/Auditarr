@@ -33,9 +33,9 @@ import datetime as _dt
 from typing import Any
 
 from app.core.logging import get_logger
-from app.events.bus import EventBus
+from app.events.bus import get_event_bus
 from app.integrations.manager import IntegrationManager
-from app.security.box import get_secret_box
+from app.security.secrets import get_secret_box
 from app.services.playback.session_manager import (
     SessionStateManager,
     enrichment_from_live_dto,
@@ -175,7 +175,12 @@ async def _run_plex_listener(
     failures the operator must fix.
     """
     # Resolve integration config + provider.
-    bus = registry.get_optional(EventBus) if hasattr(registry, "get_optional") else None
+    # v1.8.3: use the EventBus singleton directly. Pre-1.8.3 this
+    # tried ``registry.get_optional(EventBus)`` which never worked
+    # because ``ServiceRegistry`` has no ``get_optional`` method —
+    # the hasattr check just silently returned None and the
+    # listener ran without an event bus.
+    bus = get_event_bus()
     secret_box = get_secret_box()
 
     async with db.session() as session:

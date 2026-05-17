@@ -3,6 +3,134 @@
 All notable changes to Auditarr. Dates reflect the day the stage was
 shipped from the workspace.
 
+## [1.8.3] — 2026-05-17 — Critical worker crash-loop fix (Plex SSE)
+
+Patch release fixing a `ModuleNotFoundError` that crash-looped the
+`auditarr-worker.service` on every restart since v1.8.0. Production
+log from MediaMon showed restart counter 180 — the worker hadn't
+successfully started since v1.8.0 deployed.
+
+### What was wrong
+
+`app/worker_sse.py` line 38 imported from a path that doesn't exist:
+
+```python
+from app.security.box import get_secret_box     # WRONG
+```
+
+The actual module is `app.security.secrets` — every other consumer
+in the codebase (10 files) had the correct path. The typo was
+introduced in v1.8.0 when wiring up the SSE listener and slipped
+through every release sweep since.
+
+### Why the test suite didn't catch it
+
+No test imported `app.worker_sse`. The supervisor entry-point is
+loaded lazily from inside `app.worker.startup()` (an async function),
+so:
+
+  * Import-collection at test time only walks modules touched by
+    test files; `worker_sse` was never touched.
+  * No test exercised the worker's `startup()` because doing so
+    requires booting the full arq stack.
+  * Production found the bug because `arq` calls `startup()` on
+    every worker process start.
+
+### Secondary issue (smaller)
+
+Same file, line 178:
+
+```python
+bus = registry.get_optional(EventBus) if hasattr(registry, "get_optional") else None
+```
+
+`ServiceRegistry` doesn't have `get_optional`. The `hasattr` check
+silently returned `None`, so the SSE listener ran without an event
+bus from v1.8.0 onward — `playback.*` events from SSE state
+transitions never reached subscribers. Fixed to use
+`get_event_bus()` directly like every other consumer in the worker.
+
+### Production impact
+
+  * **Worker crash-looped every 5 seconds since v1.8.0 deployed.**
+    No playback polling, no scan reaper, no integration health
+    checks, no automation ticks, no analyzer.
+  * **Plex live tile was empty** for the entire window. Without the
+    worker, the SSE listener never spawned, so `playback_sessions`
+    rows were never written. The endpoint reads from that table
+    when querying Plex sessions, so the UI saw no Plex sessions.
+  * **All scans queued via the API timed out** because the worker
+    consuming the queue was dead.
+
+### Fixes
+
+1. **Correct import path** in `app/worker_sse.py`:
+   ```python
+   from app.security.secrets import get_secret_box
+   ```
+2. **Use `get_event_bus()` singleton** instead of the broken
+   registry lookup, matching the pattern used by every other
+   function in `app/worker.py`.
+3. **NEW: `tests/unit/test_imports_smoke.py`** — parametrized test
+   that walks every module under `app.` and imports it. 194 modules
+   imported. Verified the test catches the regression by temporarily
+   reverting the fix: both the parametrized case for `app.worker_sse`
+   AND an explicit regression test for it fail loudly. **This gap
+   is what allowed the bug to ship in v1.8.0.**
+
+### Test counts
+
+  * Backend unit: **746/746** (+194 import-smoke cases; was 552)
+  * Backend integration: 59/59
+  * Backend e2e: 4/4 with bumped 1.8.3 pin
+  * Ruff F-rules: clean
+
+### Upgrade from v1.8.2
+
+No DB migration needed. Drop the new files and restart:
+
+```bash
+sudo systemctl stop auditarr-api auditarr-worker
+# Extract v1.8.3 over /opt/auditarr
+sudo systemctl start auditarr-api auditarr-worker
+sudo journalctl -u auditarr-worker -f
+```
+
+Within seconds you should see (instead of the traceback):
+
+```
+worker.plex_listeners_spawned count=N
+worker.started
+```
+
+Where N is the number of enabled Plex integrations. Subsequent
+state changes in Plex should produce `session_manager.event_recorded`
+lines.
+
+### Diagnostic methodology
+
+For the next operator hitting "worker won't start":
+
+1. **Watch the journal at restart.** If you see
+   `ModuleNotFoundError: No module named 'X'` followed by an arq
+   restart-loop, you have a Python import error somewhere in the
+   `worker.startup()` path. v1.8.3 prevents this class of bug from
+   shipping again via the import-smoke test.
+2. **Check the restart counter.** `systemctl show auditarr-worker
+   --property=NRestarts`. A value >5 means the worker isn't reaching
+   a steady state. Anything triple-digit means it's been broken for
+   a while.
+3. **Run the import-smoke test locally.** From a checkout:
+   `python -m pytest backend/tests/unit/test_imports_smoke.py`.
+   If any of the 194 module imports fails, you have the same class
+   of bug.
+
+### Backwards compatibility
+
+No DB or API contract changes. Pure code-only fix.
+
+---
+
 ## [1.8.2] — 2026-05-17 — Updater wiring fixes for bare-metal install
 
 Patch release fixing four overlapping defects that prevented the
