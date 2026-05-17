@@ -41,7 +41,6 @@ from app.integrations.types import (
     TagSync,
 )
 from app.main import create_app
-from app.models.integration import Integration
 from app.models.library import Library
 from app.models.media import MediaFile
 from app.models.user import User
@@ -75,6 +74,26 @@ class _StubProvider:
         return []
 
     async def fetch_playback_events(self, _config, _since) -> list:
+        return []
+
+    # Stage 07 / Stage 08 protocol additions — inherited by the
+    # Sonarr/Radarr subclasses; needed for ``runtime_checkable``
+    # isinstance to pass.
+    async def submit_transcode_job(self, _config, _job_spec):  # noqa: ANN001, ANN202
+        from app.integrations.types import JobSubmitResult
+
+        return JobSubmitResult(status="rejected", detail="stub")
+
+    async def list_transcode_profiles(self, _config):  # noqa: ANN001, ANN202
+        return []
+
+    async def get_transcode_job_status(self, _config, _upstream_job_id):  # noqa: ANN001, ANN202
+        from app.integrations.types import TranscodeJobStatus
+
+        return TranscodeJobStatus(status="unknown")
+
+    # Stage 09 (v1.7) — return [] so runtime_checkable passes.
+    async def fetch_live_playbacks(self, _config):  # noqa: ANN001, ANN202
         return []
 
 
@@ -409,7 +428,12 @@ async def test_webhook_kind_mismatch_returns_400(
     sonarr_id = await _create_integration(
         client, headers, kind="sonarr", name="sonarr 1"
     )
-    radarr_id = await _create_integration(
+    # Create a radarr integration too so both routes are
+    # configured; the test below sends the wrong kind to the
+    # radarr endpoint and expects rejection. The id isn't
+    # used directly — its existence is the side-effect we
+    # depend on.
+    await _create_integration(
         client, headers, kind="radarr", name="radarr 1"
     )
     await _set_webhook_secret(client, headers, sonarr_id)

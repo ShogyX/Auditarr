@@ -34,6 +34,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = get_settings()
     log = get_logger("auditarr.startup", category="system")
 
+    # ── SSL sanity check (v1.7.2) ──────────────────────────
+    # A v1.7.0 production deployment surfaced cryptic
+    # FileNotFoundError tracebacks from every outbound HTTPS
+    # call because the venv's certifi was missing AND no env
+    # var pointed at the OS CA bundle. Probing once at startup
+    # surfaces the misconfiguration loudly before integration
+    # pollers start failing in the background. Non-fatal —
+    # the rest of the app can still serve requests, just with
+    # weakened TLS (verify=False fallback in app.core.http).
+    from app.core.ssl_bundle import startup_sanity_check
+
+    startup_sanity_check(fatal=False)
+
     # ── Storage ────────────────────────────────────────────
     db = get_database()
     redis = get_redis()
@@ -111,6 +124,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings_reload_task = asyncio.create_task(
         reload_listener(settings),
         name="settings-reload-listener",
+    )
+
+    # ── Stage 08 (v1.7): hardware acceleration probe ──────────
+    # Plan §445-448 + addendum C.4. We probe ffmpeg's -hwaccels
+    # output with a 5-second timeout. The probe runs in a
+    # background task so it never blocks startup even on the
+    # error-handling paths (its own internal timeout already
+    # protects against subprocess hangs, but offloading to a task
+    # keeps startup latency consistent regardless).
+    from app.optimization.hwaccel import run_startup_probe
+
+    async def _hwaccel_probe_task() -> None:
+        try:
+            await run_startup_probe(event_bus=bus)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("optimization.hwaccel.probe_crashed", error=str(exc))
+
+    app.state.hwaccel_probe_task = asyncio.create_task(
+        _hwaccel_probe_task(), name="hwaccel-startup-probe"
     )
 
     await bus.emit("system.startup", {"version": __version__}, source="core")

@@ -59,3 +59,13 @@ class AnalyzePlaybackRunResponse(BaseModel):
     skipped_dismissed: int
     skipped_deployed: int
     skipped_too_few_events: bool
+    # ── Stage 09 (v1.7) — playback-count fix per plan §482 ──
+    # The recommendation card's "N playbacks in 30 days" empty-
+    # state copy reads ``examined_events_total`` (NOT
+    # ``examined_events``, which is resolved-only). When
+    # ``examined_events_unresolved > 0`` the card surfaces an
+    # inline hint pointing operators at path mappings per
+    # addendum A.7.
+    examined_events_total: int = 0
+    examined_events_resolved: int = 0
+    examined_events_unresolved: int = 0

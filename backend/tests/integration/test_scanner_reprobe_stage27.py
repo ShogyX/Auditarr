@@ -26,7 +26,7 @@ from app.models.library import Library
 from app.models.media import MediaFile
 from app.services.media import FfprobeResult
 from app.services.media.scanner import Scanner
-from app.services.repositories import LibraryRepository, MediaRepository
+from app.services.repositories import LibraryRepository
 from app.storage.base import Base
 from app.storage.database import get_database
 from app.utils.datetime import utcnow

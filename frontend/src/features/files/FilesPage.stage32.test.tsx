@@ -106,7 +106,6 @@ const FILE_WITH_RULES = {
   height: 1080,
   has_subtitles: false,
   is_orphaned: false,
-  quarantined: false,
   matched_rules: [
     { rule_id: "r-1", rule_name: "HEVC media", severity: "warn" },
     { rule_id: "r-2", rule_name: "Bitrate ceiling", severity: "high" },

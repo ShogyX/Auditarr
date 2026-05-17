@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Query, status
 
 from app.api.auth_deps import AdminUser, CurrentUser
@@ -17,6 +19,7 @@ from app.schemas.integrations import (
     IntegrationKind,
     IntegrationRead,
     IntegrationUpdate,
+    TranscodeProfileSummaryRead,
 )
 from app.security.secrets import get_secret_box
 from app.services.repositories import IntegrationRepository
@@ -494,4 +497,164 @@ async def generate_webhook_secret(
             "X-Auditarr-Signature with format sha256=<hex>. "
             "This value is NOT retrievable again — store it now."
         ),
+    }
+
+
+@router.get(
+    "/{integration_id}/transcode-profiles",
+    response_model=list[TranscodeProfileSummaryRead],
+    summary="Stage 08: list the integration's available transcode profiles",
+)
+async def list_transcode_profiles(
+    integration_id: str,
+    _user: CurrentUser,
+    session: SessionDep,
+    registry: RegistryDep,
+    bus: EventBusDep,
+) -> list[TranscodeProfileSummaryRead]:
+    """Stage 08 (v1.7) — return the provider-side transcode
+    profiles for an integration so the Auditarr optimization
+    profile editor can render them in a picker.
+
+    Plan §438 (Tdarr) / §441 (Plex) / §443 (Jellyfin degrades to
+    empty list). The endpoint is read-only and available to any
+    authenticated user (profile editing itself is admin-gated
+    elsewhere; just *listing* available targets doesn't change
+    anything).
+
+    Providers that don't implement ``list_transcode_profiles``
+    return an empty list (the Protocol default), so the picker
+    renders "(no profiles available)" rather than failing.
+    """
+    integration = await IntegrationRepository(session).get(integration_id)
+    if integration is None:
+        raise NotFoundError("Integration not found")
+
+    manager = _manager(session, registry, bus)
+    provider = manager.provider_for(integration.kind)
+    if provider is None:
+        raise NotFoundError(
+            f"No provider registered for kind={integration.kind!r}"
+        )
+    if not hasattr(provider, "list_transcode_profiles"):
+        return []
+
+    config = manager.build_config(integration)
+    profiles = await provider.list_transcode_profiles(config)
+    return [
+        TranscodeProfileSummaryRead(
+            id=p.id,
+            name=p.name,
+            description=p.description,
+            metadata=p.metadata,
+        )
+        for p in profiles
+    ]
+
+
+# ── Stage 10 (v1.7) — VirusTotal status surface ─────────────────
+
+
+@router.get(
+    "/virustotal/status",
+    summary="VirusTotal quota + queue snapshot",
+)
+async def virustotal_status(
+    _user: CurrentUser,
+    session: SessionDep,
+) -> dict:
+    """Return the current VirusTotal quota state across all
+    three windows (per-minute / per-day / per-month — addendum
+    B.7) plus the queue size.
+
+    The frontend's VirusTotal card on the Integrations page
+    polls this so operators see how close they are to each
+    quota limit and how many files are pending lookup.
+
+    Per plan §516 the response carries:
+        * quota_used_today, quota_limit (legacy fields)
+        * queue_size
+        * last_check_at
+    Stage 10 extends with the three-window split required by
+    addendum B.7. Operators on the free tier can see which
+    window is closest to its cap.
+
+    When no VT integration is configured, the response still
+    surfaces an empty-state shape (zero quota usage, ``enabled
+    =False``) so the frontend can render a "Not configured"
+    state rather than 404'ing.
+    """
+    from sqlalchemy import func, select
+
+    from plugins.virustotal.backend import (
+        VT_DAILY_CEILING_DEFAULT,
+        VT_MONTHLY_CEILING_DEFAULT,
+        quota_snapshot,
+    )
+
+    # Find the VT integration row (at most one — Stage 19 audit
+    # added uniqueness on kind for the VT case implicitly via
+    # the integrations table's unique-name constraint, but
+    # we still defensively handle multiple by picking the most
+    # recent).
+    vt_integration = (
+        await session.execute(
+            select(Integration)
+            .where(Integration.kind == "virustotal")
+            .order_by(Integration.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    # Per-integration overrides for the configured caps. When
+    # no integration is configured, use the free-tier defaults
+    # so the card renders sensibly.
+    config = (vt_integration.config or {}) if vt_integration else {}
+    daily_cap = int(
+        config.get("daily_quota") or VT_DAILY_CEILING_DEFAULT
+    )
+    monthly_cap = int(
+        config.get("monthly_quota") or VT_MONTHLY_CEILING_DEFAULT
+    )
+    snap = quota_snapshot(daily_cap=daily_cap, monthly_cap=monthly_cap)
+
+    # Queue size — COUNT(*) on vt_queue. Local import keeps
+    # the dependency surface for this module unchanged when
+    # the VT plugin isn't installed.
+    from app.models.vt_queue import VtQueueItem
+
+    queue_size = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(VtQueueItem)
+            )
+        ).scalar_one()
+        or 0
+    )
+
+    return {
+        # Stage 10 (addendum B.7) — three-window quota state.
+        "minute_used": snap["minute_used"],
+        "minute_cap": snap["minute_cap"],
+        "minute_remaining": snap["minute_remaining"],
+        "day_used": snap["day_used"],
+        "day_cap": snap["day_cap"],
+        "day_remaining": snap["day_remaining"],
+        "month_used": snap["month_used"],
+        "month_cap": snap["month_cap"],
+        "month_remaining": snap["month_remaining"],
+        # Plan §516 legacy field names — preserved for the
+        # contract the plan specified. ``quota_used_today``
+        # aliases ``day_used``; ``quota_limit`` aliases the
+        # daily cap.
+        "quota_used_today": snap["day_used"],
+        "quota_limit": snap["day_cap"],
+        # Queue + most-recent-check timestamps.
+        "queue_size": queue_size,
+        "last_check_at": snap["last_check_at"],
+        # Integration enablement so the frontend can render
+        # "Not configured" / "Configured but disabled" /
+        # "Active" states.
+        "enabled": bool(vt_integration and vt_integration.enabled),
+        "configured": vt_integration is not None,
     }

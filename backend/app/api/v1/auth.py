@@ -8,6 +8,7 @@ from app.api.auth_deps import (
     AuthContextDep,
     AuthServiceDep,
     CurrentUser,
+    EmailServiceDep,
     SettingsDep,
 )
 from app.schemas.auth import (
@@ -206,3 +207,26 @@ async def confirm_reset(
         token=body.token, new_password=body.new_password, ctx=ctx
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Stage 12 (v1.7) — email-configured probe ────────────────────
+
+
+@router.get(
+    "/email-configured",
+    summary="Whether an email provider is configured",
+)
+async def email_configured(email: EmailServiceDep) -> dict[str, bool]:
+    """Returns ``{"configured": bool}``.
+
+    Used by the ForgotPasswordPage to swap its UI copy between
+    "we'll send you an email" (email enabled) and "check the
+    server logs for the one-time password" (email disabled,
+    Stage 12 terminal-OTP path).
+
+    Public (no auth) because the forgot-password screen needs
+    to render the correct copy before the user has any
+    session. Returns only a boolean — no provider details
+    that could aid reconnaissance.
+    """
+    return {"configured": bool(email.enabled)}

@@ -112,12 +112,45 @@ async def trigger_scan(
         await session.commit()
 
         try:
-            await redis.enqueue(
+            # v1.8.1: pass an explicit ``_job_id`` that includes
+            # the ScanRun id so ARQ's dedupe key is unique per
+            # row. Without this, ARQ hashes (function, args) and
+            # silently returns None on a duplicate — leaving the
+            # row stuck at "queued" forever. The 409 check above
+            # SHOULD catch this case at the application level,
+            # but a unique job_id is the defense-in-depth that
+            # surfaces the issue if the 409 check ever misses
+            # (e.g. concurrent requests racing the check).
+            job = await redis.enqueue(
                 "scan_library",
                 library.id,
                 mode=body.mode,
                 follow_symlinks=body.follow_symlinks,
+                _job_id=f"scan_library:{run.id}",
             )
+            if job is None:
+                # ARQ returned None — a job with this id was
+                # already on the queue. Given the unique run.id
+                # in the key, this means a stale job from a prior
+                # restart is still there. Mark the row failed
+                # with a clear message so the operator knows
+                # exactly what to do.
+                log.error(
+                    "scans.enqueue_dedup_collision",
+                    library_id=library.id,
+                    run_id=run.id,
+                )
+                run.status = "failed"
+                run.error = (
+                    "ARQ refused to enqueue this scan because a job "
+                    "with the same id is already on the queue. This "
+                    "usually means a prior worker crashed without "
+                    "clearing its in-flight jobs. Restart the worker "
+                    "or wait for the stale-scan reaper to clean up "
+                    "the queued row."
+                )
+                run.finished_at = utcnow()
+                await session.commit()
         except Exception as exc:  # noqa: BLE001
             log.error("scans.enqueue_failed", error=str(exc), library_id=library.id)
             # Stage 8 (audit follow-up): with async as the default,
@@ -212,12 +245,27 @@ async def trigger_scan_all(
 
     for run in queued:
         try:
-            await redis.enqueue(
+            job = await redis.enqueue(
                 "scan_library",
                 run.library_id,
                 mode=body.mode,
                 follow_symlinks=body.follow_symlinks,
+                _job_id=f"scan_library:{run.id}",
             )
+            if job is None:
+                log.error(
+                    "scans.scan_all_enqueue_dedup_collision",
+                    library_id=run.library_id,
+                    run_id=run.id,
+                )
+                run.status = "failed"
+                run.error = (
+                    "ARQ refused to enqueue: a job with the same "
+                    "id is already on the queue. Likely a stale job "
+                    "from a prior worker crash. Restart the worker "
+                    "or wait for the reaper."
+                )
+                run.finished_at = utcnow()
         except Exception as exc:  # noqa: BLE001
             log.error(
                 "scans.scan_all_enqueue_failed",
@@ -231,3 +279,70 @@ async def trigger_scan_all(
 
     await session.commit()
     return [ScanRunRead.model_validate(r) for r in queued]
+
+
+@router.post(
+    "/libraries/{library_id}/reset",
+    response_model=dict,
+    status_code=status.HTTP_200_OK,
+    summary="Reset stuck scans for a library (v1.8.1)",
+)
+async def reset_library_scans(
+    library_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+) -> dict:
+    """v1.8.1: manually mark any stuck ``queued``/``running`` scans
+    for a library as ``failed`` so the operator can start a new one.
+
+    Same effect as waiting for the ``reap_stale_scans`` cron to fire
+    (every 5 min) plus the 1-hour staleness threshold, but
+    available immediately when the operator knows the scan is dead
+    (worker restart, OOM, etc.) and doesn't want to wait.
+
+    The frontend offers this as an "Unstick library" button when
+    the user hits 409 on a scan trigger.
+
+    Returns ``{"reset_count": N, "run_ids": [...]}``.
+    """
+    library = await LibraryRepository(session).get(library_id)
+    if library is None:
+        raise NotFoundError("Library not found")
+
+    from sqlalchemy import select
+
+    from app.models.scan_run import ScanRun
+
+    result = await session.execute(
+        select(ScanRun).where(
+            ScanRun.library_id == library_id,
+            ScanRun.status.in_(("queued", "running")),
+        )
+    )
+    stuck = list(result.scalars().all())
+
+    now = utcnow()
+    for run in stuck:
+        previous_status = run.status
+        run.status = "failed"
+        run.finished_at = now
+        run.error = (
+            f"Manually reset by operator (was '{previous_status}'). "
+            "Use this when a scan is stuck because the worker died "
+            "mid-run; the library is now free for new scans."
+        )
+
+    if stuck:
+        library.last_scan_status = "failed"
+        await session.commit()
+        log.info(
+            "scans.manual_reset",
+            library_id=library_id,
+            run_ids=[r.id for r in stuck],
+            count=len(stuck),
+        )
+
+    return {
+        "reset_count": len(stuck),
+        "run_ids": [r.id for r in stuck],
+    }

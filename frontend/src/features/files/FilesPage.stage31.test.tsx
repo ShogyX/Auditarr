@@ -140,7 +140,6 @@ const FILE_A = {
   container: "matroska",
   has_subtitles: false,
   is_orphaned: false,
-  quarantined: false,
 };
 
 function wrap(child: ReactNode): ReactNode {

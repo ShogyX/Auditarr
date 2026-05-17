@@ -103,6 +103,29 @@ class Scanner:
         )
 
         added = updated = orphaned = probe_failures = seen = 0
+        # Stage 10 (v1.7) — check VT integration enablement
+        # ONCE at scan start. The result gates the per-file
+        # ``vt_queue`` insert below so we don't run a SELECT
+        # per file. ``vt_enabled`` is True iff at least one
+        # integration row with ``kind="virustotal"`` and
+        # ``enabled=True`` exists.
+        from sqlalchemy import select as _select
+
+        from app.models.integration import Integration as _Integration
+
+        _vt_check = await self._session.execute(
+            _select(_Integration.id)
+            .where(_Integration.kind == "virustotal")
+            .where(_Integration.enabled.is_(True))
+            .limit(1)
+        )
+        vt_enabled = _vt_check.scalar_one_or_none() is not None
+        # Counter so the scan report can surface "N files
+        # enqueued for VT lookup" in a future stage. Tracked
+        # locally; not persisted on the ScanRun row to avoid
+        # a migration in Stage 10.
+        vt_enqueued = 0
+
         # Stage 8 (audit follow-up): emit a progress event every
         # PROGRESS_EVERY files so the UI gets a real progress bar
         # rather than just start/complete. 100 is small enough that
@@ -171,10 +194,21 @@ class Scanner:
                     probe=probe_result,
                     last_scan_id=run.id,
                 )
-                # Stage 9 (audit follow-up): apply the remaining three
-                # dispositions BEFORE the upsert so the row lands with
-                # the right initial state:
-                #   - ``malicious``  → severity=crit + quarantined
+                # Stage 9 (audit follow-up), updated Stage 05 (v1.7):
+                # apply the remaining three extension-rule dispositions
+                # BEFORE the upsert so the row lands with the right
+                # initial state:
+                #   - ``malicious``  → severity=crit. Stage 05 retired
+                #                       the quarantine flag (Section
+                #                       A.0 — "delete means delete");
+                #                       the row's ``crit`` severity is
+                #                       what surfaces the file to the
+                #                       operator now. Operators who
+                #                       want auto-delete on malicious
+                #                       extensions write a rule that
+                #                       matches ``severity eq crit``
+                #                       AND ``tags contains malicious``
+                #                       and applies a Delete action.
                 #   - ``accepted``   → severity capped at ok (the
                 #                       rule engine still re-runs but
                 #                       won't escalate this row)
@@ -189,11 +223,6 @@ class Scanner:
                 if disposition == "malicious":
                     mf.severity = "crit"
                     mf.severity_rank = 5
-                    mf.quarantined = True
-                    mf.quarantined_at = utcnow()
-                    mf.quarantined_reason = (
-                        f"Extension rule: {extension} marked malicious"
-                    )
                 elif disposition == "accepted":
                     mf.severity = "ok"
                     mf.severity_rank = 0
@@ -215,6 +244,29 @@ class Scanner:
                     )
                 else:
                     updated += 1
+
+                # Stage 10 (plan §515) — when VT integration is
+                # enabled AND the file has a hash AND we haven't
+                # already looked it up, enqueue it for VT
+                # lookup. Idempotent via the helper's ON CONFLICT
+                # DO NOTHING pattern. The actual lookup is done
+                # by the (future) drain worker; this layer just
+                # makes the work visible to the operator via the
+                # status endpoint's ``queue_size`` field.
+                if (
+                    vt_enabled
+                    and saved.hash_sha256 is not None
+                    and saved.vt_status is None
+                ):
+                    from plugins.virustotal.backend import (
+                        enqueue_for_vt_lookup,
+                    )
+
+                    inserted = await enqueue_for_vt_lookup(
+                        self._session, media_file_id=saved.id
+                    )
+                    if inserted:
+                        vt_enqueued += 1
 
                 # Stage 8 (audit follow-up): periodic progress emit.
                 # Every PROGRESS_EVERY files we ship a snapshot so the
@@ -441,6 +493,18 @@ class Scanner:
             raise NotADirectoryError(f"library root is not a directory: {root}")
 
         out: list[tuple[str, Path, os.stat_result]] = []
+        # v1.7.2 fix: filenames containing bytes that aren't valid
+        # UTF-8 come back from ``os.walk`` with Python's
+        # ``surrogateescape`` lone-surrogate substitutions
+        # (codepoints U+DC80..U+DCFF). PostgreSQL via asyncpg
+        # refuses to bind such strings as VARCHAR — it raises
+        # ``UnicodeEncodeError: 'utf-8' codec can't encode
+        # character '\udcXX'``. We can't fix the filesystem
+        # encoding, so we skip these files and log the skip.
+        # The operator can then rename the offending file at the
+        # filesystem level. Pinning a count tells them how big
+        # the problem is at a glance.
+        skipped_bad_encoding = 0
         for dirpath, _dirnames, filenames in os.walk(
             root, followlinks=opts.follow_symlinks
         ):
@@ -453,7 +517,44 @@ class Scanner:
                 if not _is_regular_file(st.st_mode):
                     continue
                 rel = str(p.relative_to(root))
+                if _contains_undecodable_bytes(rel) or _contains_undecodable_bytes(str(p)):
+                    skipped_bad_encoding += 1
+                    if skipped_bad_encoding <= 10:
+                        # Cap the log spam at 10 examples; the
+                        # final count is still recorded.
+                        try:
+                            log.warning(
+                                "scanner.skipped_bad_encoding",
+                                # Use repr() so the log line itself
+                                # is encodable (the path contains
+                                # surrogates).
+                                path_repr=repr(str(p)),
+                                detail=(
+                                    "Filename contains bytes that aren't "
+                                    "valid UTF-8 (surrogateescape "
+                                    "codepoints U+DC80..U+DCFF). Rename "
+                                    "the file on disk to a valid UTF-8 "
+                                    "name so Auditarr can index it."
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001
+                            # Defensive: even repr() can fail on some
+                            # exotic edge cases; never let logging
+                            # crash the scan.
+                            pass
+                    continue
                 out.append((rel, p, st))
+        if skipped_bad_encoding:
+            log.warning(
+                "scanner.skipped_bad_encoding_total",
+                count=skipped_bad_encoding,
+                detail=(
+                    f"Skipped {skipped_bad_encoding} file(s) whose names "
+                    "are not valid UTF-8. Run `find <library-root> "
+                    "-name '*' -print0 | LC_ALL=C grep -aP '[\\x80-\\xff]'"
+                    "` to locate them."
+                ),
+            )
         return out
 
     def _build_media_file(
@@ -510,3 +611,30 @@ class Scanner:
 def _is_regular_file(mode: int) -> bool:
     """``stat.S_ISREG`` without importing ``stat`` everywhere."""
     return (mode & 0o170000) == 0o100000
+
+
+def _contains_undecodable_bytes(s: str) -> bool:
+    """Return True when *s* contains surrogateescape codepoints.
+
+    Python's ``os.walk`` returns filenames as ``str`` even when the
+    underlying bytes aren't valid UTF-8. The fallback is the PEP 383
+    "surrogateescape" error handler, which substitutes the
+    un-decodable byte ``0xNN`` with the Unicode codepoint
+    ``0xDC00 + NN`` (in the lone-surrogate range U+DC80..U+DCFF).
+
+    Such strings round-trip through Python fine, but PostgreSQL via
+    asyncpg refuses to bind them as VARCHAR — the surrogate isn't
+    valid UTF-8 to encode. Detecting these up front lets the
+    scanner skip them gracefully instead of crashing the whole
+    scan.
+
+    The fast path: try to encode the string as UTF-8; if that
+    raises ``UnicodeEncodeError`` we know there's a surrogate (or
+    similar) lurking. Cheap for the common case of ASCII / valid
+    UTF-8 names (a single C-level encode pass).
+    """
+    try:
+        s.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False

@@ -159,6 +159,9 @@ async def test_describe_includes_every_category(client: AsyncClient) -> None:
         # specifically to catch a NEW category arriving without a
         # field to fill it, which is the inverse failure mode.
         "dashboard",
+        # Stage 07 (v1.7): the "optimization" category was added
+        # for the in-process runner kill-switch (plan §401).
+        "optimization",
     }
 
 

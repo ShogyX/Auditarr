@@ -9,6 +9,10 @@ export interface AuthUser {
   role: string;
   is_active: boolean;
   is_verified: boolean;
+  /** Stage 12 (v1.7) — set True when the user has consumed
+   *  a terminal-OTP password reset. The post-login redirect
+   *  routes to the change-password screen when this is true. */
+  must_change_password?: boolean;
 }
 
 export interface AuthTokens {

@@ -7,7 +7,12 @@ fine-grained control:
 
   - ``ignore``        — skip during scan; never indexed
   - ``stats_only``    — indexed but never notified / never optimized
-  - ``malicious``     — severity=crit + quarantined on scan
+  - ``malicious``     — severity=crit on scan. Stage 05 (v1.7)
+                        retired the quarantine flag this used to
+                        set; operators who want auto-delete on
+                        malicious extensions write a rule that
+                        matches ``severity eq crit`` + the tag
+                        and applies a Delete action.
   - ``accepted``      — severity capped at ok (never escalates)
 
 The disposition is read by the scanner at scan-start so a one-off

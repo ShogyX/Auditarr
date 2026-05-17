@@ -21,6 +21,7 @@
  */
 
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/Button";
 import { Card, CardBodyFlush, CardHead } from "@/components/ui/Card";
@@ -63,6 +64,9 @@ export function SuggestionsCard({
   // active even when collapsed — the operator can re-run the
   // analyzer without expanding the card.
   const hidden = useUiStore((s) => s.dashboardHidden.includes("suggestions"));
+  // Stage 13 (plan §606) — when the operator moves this
+  // card to the disabled rail, skip the whole render.
+  const disabled = useUiStore((s) => s.dashboardDisabled.includes("suggestions"));
   const toggle = useUiStore((s) => s.toggleDashboardSection);
 
   // Show at most 5 by default; the user can expand to see the rest.
@@ -70,6 +74,10 @@ export function SuggestionsCard({
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? (suggestions.data ?? []) : (suggestions.data ?? []).slice(0, 5);
   const hiddenCount = (suggestions.data?.length ?? 0) - visible.length;
+
+  // Early-return AFTER all hooks (react-hooks/rules-of-hooks
+  // requires the hook count to be stable across renders).
+  if (disabled) return null;
 
   return (
     <Card>
@@ -124,15 +132,51 @@ export function SuggestionsCard({
             </div>
           ) : !suggestions.data || suggestions.data.length === 0 ? (
             <div className="px-4 py-6">
-              <EmptyState
-                icon="rules"
-                title="No suggestions yet"
-                description={
-                  runAnalyzer.data?.skipped_too_few_events
-                    ? `Auditarr saw ${fmtNum(runAnalyzer.data.examined_events)} playback event${runAnalyzer.data.examined_events === 1 ? "" : "s"} in the last 30 days — the analyzer needs at least 20 before it surfaces suggestions. Connect Plex or Jellyfin and let some playback accumulate.`
-                    : "The analyzer surfaces recurring playback issues (transcodes, bitrate ceilings, failed playbacks) as Auditarr rule suggestions. Connect Plex or Jellyfin and let some playback accumulate, then come back."
-                }
-              />
+              {(() => {
+                // Stage 09 (v1.7) — playback-count fix + addendum A.7.
+                // The card's empty-state copy must show the TRUE
+                // count (``examined_events_total``), not the
+                // resolved-only count (``examined_events``). When
+                // some events couldn't be resolved we surface a
+                // path-mappings hint linking to the Integrations
+                // page.
+                //
+                // Fallback to ``examined_events`` for older
+                // backends that haven't shipped the split yet,
+                // so the card always shows *something*.
+                const out = runAnalyzer.data;
+                const total = out?.examined_events_total ?? out?.examined_events ?? 0;
+                const unresolved = out?.examined_events_unresolved ?? 0;
+                const description = out?.skipped_too_few_events
+                  ? `Auditarr saw ${fmtNum(total)} playback event${total === 1 ? "" : "s"} in the last 30 days — the analyzer needs at least 20 resolved events before it surfaces suggestions. Connect Plex or Jellyfin and let some playback accumulate.`
+                  : "The analyzer surfaces recurring playback issues (transcodes, bitrate ceilings, failed playbacks) as Auditarr rule suggestions. Connect Plex or Jellyfin and let some playback accumulate, then come back.";
+                return (
+                  <>
+                    <EmptyState
+                      icon="rules"
+                      title="No suggestions yet"
+                      description={description}
+                    />
+                    {unresolved > 0 ? (
+                      <div
+                        className="mx-auto mt-2 max-w-sm rounded-md border border-border bg-surface-sunk px-3 py-2 text-center text-[12px] text-muted"
+                        data-testid="suggestions-card-unresolved-hint"
+                      >
+                        {fmtNum(unresolved)} of {fmtNum(total)} playback
+                        {total === 1 ? "" : "s"} couldn't be matched to
+                        library files.{" "}
+                        <Link
+                          to="/integrations"
+                          className="text-accent hover:underline"
+                        >
+                          Configure path mappings
+                        </Link>
+                        .
+                      </div>
+                    ) : null}
+                  </>
+                );
+              })()}
             </div>
           ) : (
             <>

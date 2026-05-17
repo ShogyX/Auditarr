@@ -39,7 +39,6 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.events.bus import get_event_bus
 from app.main import create_app

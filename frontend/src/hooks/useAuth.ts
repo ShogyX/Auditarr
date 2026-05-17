@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { invalidateRelated } from "@/lib/invalidate";
 import { apiClient } from "@/services/apiClient";
 import { useAuthStore, type AuthTokens, type AuthUser } from "@/stores/authStore";
 
@@ -104,23 +105,35 @@ export function useConfirmPasswordReset() {
 }
 
 export function useChangePassword() {
+  const qc = useQueryClient();
   return useMutation({
     mutationKey: ["auth", "change-password"],
     mutationFn: (body: { current_password: string; new_password: string }) =>
       apiClient.post("/auth/password/change", body),
+    // Stage 13 (plan §604) — change-password bumps the
+    // server-side token version and (Stage 12) may clear
+    // the must_change_password flag. Both are visible via
+    // ``/auth/me`` so invalidate the auth-kind graph to
+    // refresh any current-user-derived query.
+    onSuccess: () => invalidateRelated(qc, "auth"),
   });
 }
 
 // Stage 5 (audit follow-up): edit your own profile (display name,
 // email). Backend already supports this — the hook was missing.
 export function useUpdateProfile() {
+  const qc = useQueryClient();
   const setUser = useAuthStore((s) => s.setUser);
   return useMutation({
     mutationKey: ["auth", "update-profile"],
     mutationFn: (body: { full_name?: string; email?: string }) =>
       apiClient.patch<AuthUser>("/auth/me", body),
     onSuccess: (user) => {
+      // Stage 13 (plan §604) — update the auth store
+      // AND invalidate the auth-kind graph in case any
+      // other query has cached the user's display info.
       setUser(user);
+      invalidateRelated(qc, "auth");
     },
   });
 }

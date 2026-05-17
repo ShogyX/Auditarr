@@ -39,6 +39,7 @@ import {
 import { ConfiguredIntegrationsCard } from "./ConfiguredIntegrationsCard";
 import { ConnectorDirectoryCard } from "./ConnectorDirectoryCard";
 import { IntegrationConnectDialog } from "./IntegrationConnectDialog";
+import { VirusTotalCard } from "./VirusTotalCard";
 
 export function IntegrationsPage() {
   useHelpKey("integrations.overview");
@@ -94,6 +95,9 @@ export function IntegrationsPage() {
             }
           }}
         />
+
+        {/* Stage 10 (v1.7) — VirusTotal quota + queue card. */}
+        <VirusTotalCard />
       </div>
 
       {connectingKind ? (

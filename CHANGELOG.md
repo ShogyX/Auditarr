@@ -3,6 +3,682 @@
 All notable changes to Auditarr. Dates reflect the day the stage was
 shipped from the workspace.
 
+## [1.8.1] — 2026-05-17 — Scan trigger reliability
+
+Patch release fixing the "sometimes works, sometimes doesn't, no
+error shown" symptom on the Run Scan / Scan all libraries buttons.
+
+### What was wrong
+
+Four overlapping defects in the scan-trigger flow:
+
+1. **Stale `running`/`queued` ScanRun rows blocked all future
+   scans.** The `POST /scans/libraries/{id}` endpoint refuses
+   to start a scan if there's already a `queued` or `running`
+   row for the library. If the worker process was killed
+   mid-scan (OOM, SIGKILL from systemd, container restart, host
+   reboot), the row never transitioned to `failed` — Python
+   exception handlers don't run on a hard kill. The row sat at
+   `running` forever, blocking every subsequent click with a
+   409 the frontend swallowed silently.
+
+2. **ARQ silently dropped duplicate enqueues.** The API called
+   `redis.enqueue("scan_library", library.id, ...)` without
+   `_job_id`. ARQ generates a deterministic hash of
+   `(function, args, kwargs)` for dedup; two scans of the same
+   library with the same mode would collide, and the second
+   `enqueue_job()` returned `None`. The API never checked the
+   return value, so the row was committed as `queued` but the
+   worker never picked it up.
+
+3. **Frontend had zero error handling.** `useTriggerScan` and
+   `useTriggerScanAll` had `onSuccess` but no `onError`. The
+   409 / 5xx messages never reached the user. The button just
+   stopped being "Scanning…" and the operator was left guessing.
+
+4. **No success feedback.** A 202 with the queued ScanRun row
+   produced a brief "Scanning…" state but no positive
+   confirmation. Combined with #3, operators couldn't tell
+   whether their click did anything.
+
+### Fixes
+
+**Backend:**
+
+- **New `reap_stale_scans` worker cron** — runs every 5 minutes,
+  marks any `queued`/`running` row whose `started_at` (or
+  `created_at` for never-started queued rows) is older than 1
+  hour as `failed` with a diagnostic message
+  ("Reaped by stale-scan watchdog: row was stuck at 'running'
+  for N seconds…"). Also flips the library's
+  `last_scan_status` and emits a `scan.reaped` event so WS
+  subscribers refresh.
+- **Explicit `_job_id` on ARQ enqueue** — passes
+  `_job_id=f"scan_library:{run.id}"` so each call gets a
+  unique dedup key, AND checks the return value. On `None`
+  (collision with a stale job), marks the row failed with a
+  clear "ARQ refused to enqueue" message instead of leaving
+  it stuck.
+- **New `POST /scans/libraries/{id}/reset` admin endpoint**
+  — forcibly marks any stuck `queued`/`running` rows for a
+  library as `failed`. Operators who don't want to wait the
+  full hour for the reaper can use this immediately.
+
+**Frontend:**
+
+- **`onSuccess` and `onError` toasts** on `useTriggerScan` and
+  `useTriggerScanAll`. Success toasts confirm "Scan queued".
+  Errors toast a useful message; 409 surfaces a "Use 'Unstick
+  library' to clear it if it's stuck" hint; 403 names the
+  admin-permission requirement.
+- **`useResetLibraryScans` hook** wrapping the new reset
+  endpoint with its own success/error toasts.
+- **`FilesScanErrorBanner` on the Files page** — renders when
+  the most recent `useTriggerScan` error was a 409 with the
+  current library, with an "Unstick library" button calling
+  the reset endpoint. Dismissable, replaces itself the next
+  time the trigger fails.
+
+### Test counts
+
+- Backend unit: **549/549** (unchanged)
+- Backend integration:
+  - Scan reaper + reset: **10/10** (new)
+  - Stage 8 scan tests: 18/18 (unchanged)
+- Backend e2e: 4/4 (with 1.8.1 version pin)
+- Frontend: **432/432** (+7 banner tests)
+- Smoke source-tree: 8/8 with 1.8.1 stamps
+
+### Diagnostic methodology
+
+For the next operator hitting "scan does nothing":
+
+1. **Check the worker log for `worker.reap_stale_scans.reaped`** —
+   if you see it within 5 minutes of restart, you had stuck rows;
+   the reaper just cleaned them up. Click Run Scan again and it
+   should work.
+2. **Check for 409 in the network panel** when clicking Run Scan
+   — that means a stuck row was present at click time. The new
+   banner offers an "Unstick library" button; in 1.8.0 you'd
+   have to wait for the reaper or restart the worker.
+3. **Check `scans.enqueue_dedup_collision`** in the worker log
+   — that's the new diagnostic for the ARQ-collision case.
+   Should be rare with v1.8.1's unique `_job_id`, but the log
+   line will name the run_id so you know which row.
+
+### Upgrade from v1.8.0
+
+No migration needed (additive code only).
+
+```bash
+sudo systemctl stop auditarr-api auditarr-worker
+# Extract v1.8.1 over /opt/auditarr
+sudo -u $APP_USER /opt/auditarr/venv/bin/pip install -e /opt/auditarr/backend
+sudo systemctl start auditarr-api auditarr-worker
+# Verify within 5 minutes:
+sudo journalctl -u auditarr-worker | grep "reap_stale_scans" | tail -5
+```
+
+If your worker had stuck scans from prior crashes, the first
+reaper tick (at startup) will unstick them. Your Run Scan
+button starts working again immediately.
+
+### Backwards compatibility
+
+- No DB migration. Schema unchanged.
+- New `POST /scans/libraries/{id}/reset` endpoint; existing
+  endpoints unchanged.
+- New `_job_id` parameter on ARQ enqueue is purely additive.
+- Frontend `useResetLibraryScans` is a new hook; existing
+  `useTriggerScan` / `useTriggerScanAll` signatures unchanged
+  (only behaviour was added).
+
+---
+
+## [1.8.0] — 2026-05-17 — SSE-based Plex session tracking
+
+Architectural rework of Plex live-session monitoring. Diagnosed via
+the working Tracearr reference repo
+(https://github.com/connorgallopo/Tracearr) after v1.7.2 fixed the
+SSL bundle issue but the underlying "first 2 sessions captured, rest
+not" symptom persisted.
+
+### Why polling didn't work
+
+The Stage 09 (v1.7) live tile polled `GET /status/sessions` every
+15 seconds. Two design flaws made this inherently lossy:
+
+1. **`/status/sessions` is a snapshot, not an event log.** Sessions
+   that start AND end within a 15-second poll window are invisible.
+   Sessions that span multiple polls show up. That exactly matches
+   the production symptom: long sessions captured, short ones
+   missed.
+2. **`/status/sessions/history/all` only contains "watched" plays.**
+   Plex's history table only records sessions that crossed the
+   watched threshold (configurable per-library, default ~90% of
+   duration). Aborted, scrubbed, or sub-threshold sessions never
+   enter Plex's history, so they never reached our `playback_events`
+   table no matter how often the worker polled.
+
+Neither flaw is fixable by patching the parser. The fix is the
+architecture: subscribe to Plex's real-time event stream and
+record session lifecycle ourselves.
+
+### What's new in v1.8.0
+
+**Plex SSE listener.** Plex Media Server exposes
+`GET /:/eventsource/notifications` — a long-running Server-Sent
+Events endpoint that pushes JSON-encoded events (playing, paused,
+stopped, transcode progress) as activity happens on the server.
+The v1.8.0 worker establishes one persistent SSE connection per
+enabled Plex integration and records every session lifecycle
+event.
+
+  * **New `app.core.sse`** — async SSE client with W3C spec
+    compliant block parsing, exponential reconnect backoff
+    (1s, 2s, 4s, 8s, 16s, 30s), and a synthetic `RECONNECTING`
+    event so subscribers can re-sync state after reconnect.
+  * **`PlexProvider.subscribe_sessions()`** — wraps the SSE
+    client, parses Plex's `NotificationContainer` envelope, and
+    yields `PlexSessionEvent` dataclasses.
+  * **`PlexProvider.fetch_one_session_snapshot()`** — enriches an
+    SSE event with the full `/status/sessions` metadata
+    (codec, user, device, path) since Plex's SSE payload is
+    thin (just sessionKey, state, ratingKey, viewOffset).
+
+**New `playback_sessions` table.** Mutable lifecycle row per
+session. Schema:
+
+  * `(integration_id, session_key)` unique constraint —
+    one row per upstream session.
+  * `state` — "playing" / "paused" / "buffering" / "stopped"
+  * `decision`, `reason_code` — captured at start; updated on
+    transcoder-decision-change events.
+  * Source + target stream details: codec, bitrate, resolution,
+    container.
+  * `view_offset_ms`, `duration_ms` — refreshed on every event
+    so the live tile shows accurate progress.
+  * `started_at`, `last_event_at`, `stopped_at` — lifecycle
+    timestamps recorded by us, not scraped from Plex's history.
+  * `reconciled_with_history` — flipped to TRUE when the
+    existing history scrape later observes the same session,
+    so the analyzer doesn't double-count.
+
+Migration `0027_stage17_playback_sessions` is purely additive
+(new table + index). Existing `playback_events` data is
+untouched.
+
+**`SessionStateManager`** — owns the SSE → DB write path. Uses
+a query-first INSERT-or-UPDATE pattern (not an ON CONFLICT
+upsert) so a stop event without enrichment doesn't blank the
+metadata we captured at start. Idempotent — replaying the same
+event produces the same row, which matters because Plex retries
+SSE events on reconnect.
+
+**Worker supervisor** (`app.worker_sse`). At startup queries
+enabled Plex integrations and spawns one long-running listener
+task per. Each task is supervised: a permanent error (4xx auth)
+stops the listener; a transient error (transport blip, 5xx)
+restarts with exponential backoff (5s, 15s, 60s, 300s). Tasks
+are cancelled cleanly at worker shutdown.
+
+**Live endpoint rewrite.** `GET /api/v1/playback/live` now
+reads Plex sessions from the `playback_sessions` table —
+~50ms DB query instead of a per-request upstream HTTP call.
+Sessions appear within milliseconds of start because the SSE
+listener writes them as Plex pushes the event. Jellyfin
+sessions continue to use the polling fallback path
+(`fetch_live_playbacks`) because Jellyfin doesn't expose SSE —
+its WebSocket equivalent is planned for v1.8.x.
+
+**History reconciliation.** The existing
+`PlaybackPoller.poll_one` (15-minute history scrape) still
+runs. When it observes an event whose `(integration_id,
+started_at±60s)` matches an existing `playback_sessions` row,
+it flips `reconciled_with_history=True`. The analyzer queries
+both tables and dedupes on the flag.
+
+### What's NOT in v1.8.0
+
+  * **No frontend changes.** The dashboard's live tile reads
+    the same JSON shape from `/api/v1/playback/live` — the
+    fields haven't changed. The tile will now show short
+    sessions that the v1.7 polling path missed.
+  * **Jellyfin still polls.** v1.8.x will add Jellyfin
+    WebSocket session monitoring.
+  * **No UI for `playback_sessions` history.** The new table
+    captures every session including aborted ones, but the
+    history page still reads `playback_events`. A future
+    release will surface the richer history.
+
+### Test counts
+
+  * Backend unit: **549/549** (+11 SSE tests; was 538)
+  * Backend integration playback: **42/42** (+7 session
+    manager + +1 stopped-sessions-excluded; was 34)
+  * Backend integration plugin lifecycle: 50/50
+  * Backend integration VT: 38/38
+  * Backend e2e: 4/4 (with 1.8.0 version pin)
+  * Migration chain test: green at head `0027_stage17_playback_sessions`
+
+### Upgrade from v1.7.2
+
+```bash
+sudo systemctl stop auditarr-api auditarr-worker
+# Replace /opt/auditarr with the v1.8.0 extracted tree
+sudo -u $APP_USER /opt/auditarr/venv/bin/pip install -e /opt/auditarr/backend
+sudo -u $APP_USER /opt/auditarr/venv/bin/alembic -c /opt/auditarr/backend/alembic.ini upgrade head
+sudo systemctl start auditarr-api auditarr-worker
+# Within ~5 seconds the worker should log:
+sudo journalctl -u auditarr-worker -f | grep -E "sse\.|worker\.sse\."
+```
+
+Expected sequence within seconds of restart:
+```
+worker.sse.listener_starting  integration_id=...  integration_name=My Plex Server
+sse.connected                  url=...:/eventsource/notifications  status=200
+worker.plex_listeners_spawned  count=1
+worker.started
+```
+
+Then as soon as someone hits play in any Plex client:
+```
+session_manager.event_recorded  state=playing  view_offset_ms=N  enriched=True
+```
+
+The next dashboard render shows the session.
+
+### Backwards compatibility
+
+  * `playback_events` schema unchanged — old data preserved.
+  * `playback_sessions` is additive — no existing code depends
+    on it before v1.8.0.
+  * Integration provider Protocol gains `subscribe_sessions`
+    and `fetch_one_session_snapshot` but both are optional
+    (Jellyfin / Sonarr / Radarr / etc don't implement them).
+  * No frontend changes; live tile JSON shape is identical.
+  * Worker config unchanged. The SSE listeners spawn at startup
+    and are cancelled at shutdown.
+
+---
+
+## [1.7.2] — 2026-05-17 — SSL bundle + integration bugfixes
+
+Patch release addressing a cluster of production-reported bugs
+diagnosed from a 503k-line log forensics pass.
+
+### Root cause (Plex playback still broken in 1.7.1)
+
+The v1.7.1 wire-shape fix to `fetch_playback_events` was correct
+but irrelevant on the affected host. **Every** outbound HTTPS call
+from the worker process was dying at `httpx.AsyncClient` construction
+with `FileNotFoundError: [Errno 2] No such file or directory`. The
+traceback chain proved this was `ssl.create_default_context` →
+`load_verify_locations` failing because no CA bundle was reachable.
+
+Root cause: the operator's venv had no `certifi` installed
+(missing transitive dependency surfaced under Python 3.12 + httpx
+≥ 0.27 strict-CA defaults), AND the host's `/etc/ssl/certs/
+ca-certificates.crt` was present but httpx wasn't pointed at it.
+So the worker's healthchecks AND playback polls all silently
+failed before any HTTP traffic left the process.
+
+### Fixes
+
+1. **New `app.core.ssl_bundle` resolver.** Three-tier fallback:
+   `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`
+   env vars → `certifi.where()` → an OS bundle candidate list
+   (Debian/Ubuntu, RHEL/CentOS, Alpine, FreeBSD, macOS Homebrew).
+   Resolution result cached process-wide. When nothing is
+   found, raises `CABundleMissingError` with a diagnostic that
+   names every path tried.
+
+2. **New `app.core.http.async_client`** factory. Drop-in
+   replacement for `httpx.AsyncClient(...)` that resolves the
+   CA bundle once and passes it via `verify=`. On
+   `CABundleMissingError`, falls back to `verify=False` with a
+   loud `http.client_verify_disabled` warning. This trades
+   strict TLS verification for keeping the application functional
+   on misconfigured hosts — the operator MUST fix the bundle to
+   restore verification.
+
+3. **Every integration plugin retrofitted** to use the new
+   factory: Plex, Jellyfin, Sonarr, Radarr, Bazarr, Tdarr,
+   VirusTotal. Also retrofitted: the updater feed, secret
+   testers, HTTP notification provider, plugin gallery.
+
+4. **Startup SSL sanity check.** Both `app.main` and
+   `app.worker` startup hooks call `startup_sanity_check()`
+   so misconfiguration is loud at boot rather than at the
+   first poll tick. Non-fatal: the app keeps serving requests
+   with the verify=False fallback if no bundle is found.
+
+5. **`certifi>=2024.0` added explicitly** to `backend/
+   pyproject.toml` dependencies. It was a transitive dep of
+   httpx; explicit declaration makes deployment tooling notice
+   when it's missing.
+
+### Other bugs fixed this release
+
+6. **VirusTotal plugin failed to load** with `TypeError:
+   Plugin.__init__() got an unexpected keyword argument
+   'id'`. `Plugin(id=..., version=...)` was always wrong — the
+   base class takes only `(context)`. Other plugins (Plex,
+   Sonarr, etc.) had this right; VT diverged in an earlier
+   refactor and no test caught it because the plugin loader
+   was stubbed in tests.
+
+7. **VirusTotal healthcheck 404'd** because the URL was
+   `/users/<self>` literally — the docstring's angle-bracket
+   placeholder leaked into the f-string. Real VT v3 endpoint
+   is `/users/me`.
+
+8. **Scanner crashed on filenames with non-UTF-8 bytes.**
+   `os.walk` returns surrogateescape-substituted strings
+   (codepoints `U+DC80..U+DCFF`) for un-decodable filenames;
+   asyncpg refuses to bind these as VARCHAR with
+   `UnicodeEncodeError`. Scanner now detects via
+   `_contains_undecodable_bytes()` and skips them with a
+   `scanner.skipped_bad_encoding` warning (capped at 10
+   examples + a final total) so the operator can find and
+   rename the offending files. The grep recipe to locate
+   them is included in the summary log line.
+
+### Diagnostic upgrade
+
+When the next operator hits a similar issue, the logs will
+now say `ssl.ca_bundle_unresolvable` with an enumerated
+"paths tried" list and a quick-fix command for Debian/
+Ubuntu, instead of opaque `[Errno 2] No such file or
+directory`. The 1.7.1 silent-swallow log fix in
+`/api/v1/playback/live` remains in place.
+
+### Backward compatibility
+
+Patch-release safe. No DB migration. No DTO shape changes.
+Integration provider Protocol surface unchanged. Restart the
+backend after upgrading; if SSL was already working on your
+host the only visible change is one info-level
+`ssl.ca_bundle_resolved` line at startup.
+
+### Upgrading from 1.7.1
+
+On the affected host (the one with `ModuleNotFoundError:
+No module named 'certifi'`):
+
+```bash
+sudo systemctl stop auditarr-api auditarr-worker
+sudo -u $APP_USER /opt/auditarr/venv/bin/pip install -e /opt/auditarr/backend
+sudo systemctl start auditarr-api auditarr-worker
+```
+
+Then within ~15 seconds the worker log should show
+`plex.playback.fetched count=N raw_count=N` instead of
+`plex.playback.fetch_failed`.
+
+---
+
+## [1.7.1] — 2026-05-17 — Plex playback bugfix
+
+Patch release. Both Plex playback surfaces (live-now dashboard card
+and historical playback ingestion) were silently failing in 1.7.0
+despite the integration healthcheck reporting green. Root cause was
+two HTTP wire-format bugs in `plugins/plex/backend.py` plus a
+diagnostic gap in the live aggregating endpoint that hid the
+symptom.
+
+### Bugs fixed
+
+1. **`fetch_playback_events` — pagination sent as query params
+   instead of headers.** Plex documents `X-Plex-Container-Start` /
+   `Size` as HTTP headers; sending as query params is silently
+   ignored on most PMS builds and falls back to the server's
+   default page (typically 50 entries). Fixed: pagination now in
+   headers, container size raised to 500.
+
+2. **`fetch_playback_events` — `viewedAt>=` URL filter operator
+   was URL-encoded.** httpx encodes `>` to `%3E` regardless of
+   how the URL is constructed (we tested raw strings,
+   `httpx.URL`, and `httpx.Request` — all encode). PMS's filter
+   parser is inconsistent across versions about decoding-then-
+   matching. Fixed: removed the URL filter, apply the cutoff in
+   Python after parsing. Deterministic across every PMS version.
+
+3. **`fetch_live_playbacks` and `/playback/live` aggregator —
+   silent exception swallowing.** Both surfaces caught provider
+   errors with no logging, so operators saw an empty live tile
+   with no signal in the logs to debug from. Fixed: every
+   degradation path now logs a structured warning with the
+   integration id, error type, and (where relevant) the upstream
+   content-type.
+
+### New tests
+
+`backend/tests/integration/test_plex_playback_wire_shape.py` —
+six tests using `httpx.MockTransport` to capture and inspect the
+actual outgoing HTTP request shape. The original Stage 09 / Stage
+16 sweeps tested the parsers in isolation and stubbed the
+provider at the Protocol level; neither approach exercised the
+actual wire shape, which is how the bug shipped green. These
+new tests close the gap.
+
+### Diagnostic checklist for operators after applying
+
+When you start a Plex session, within ~15 seconds the live
+aggregator logs one of:
+
+  * `plex.live.fetched count=N raw_count=N` — working.
+  * `plex.live.fetch_failed error_type=...` — actionable upstream
+    error.
+  * `plex.live.fetch_parse_failed content_type=...` — proxy or
+    content-negotiation issue.
+  * `playback.live.provider_failed integration_id=...` — provider
+    blew up entirely.
+
+At the worker's next playback-poll tick (default 15min):
+`plex.playback.fetched count=N raw_count=N
+filtered_out_pre_cutoff=K cutoff_unix=T` per integration.
+
+### Backward compatibility
+
+The DTO shapes and downstream consumers are unchanged. Anyone
+upgrading from 1.7.0 to 1.7.1 needs to do nothing except restart
+the backend; the bugfix is wire-shape only.
+
+---
+
+## [1.7.0] — 2026-05-16
+
+**v1.7.0 is the consolidated v1.7 release.** Sixteen-stage plan
+executed against the v1.6.x line, closing every UI screenshot
+issue from the bug report and every item in `fixes.txt`. The
+version number resets to 1.7.0 because this is a major
+user-facing release; prior internal cuts went up to 1.17.0
+which was an internal-only series. v1.7.0 supersedes everything
+through 1.17.x.
+
+**Migration head**: `0026_stage12_must_change_pw`. Sixteen
+migrations total across Stages 01–13; only Stage 05's
+quarantine-column drop is destructive. See `docs/getting-started/
+upgrade-to-v1.7.md` for the upgrade flow and rollback notes.
+
+### Stage 01 — Installer rename, build hygiene
+
+`install.sh` renamed to `install-docker.sh` (and the bare-metal
+installer to `install-bare-metal.sh`) so the Docker and
+bare-metal paths are unambiguously named. A stub `install.sh`
+remains at the repo root that prints the new name and exits —
+muscle-memory operators get a clear message, not a silent miss.
+Build flags tightened (`set -euo pipefail` standard across all
+shell entry points). README + docs updated to call the new
+installer names.
+
+### Stage 02 — Column resize state for Files + Rules tables
+
+Persisted per-column widths across reloads via the existing
+prefs-store pattern. Pointer drag commits the new width on
+`pointerup`. Pinned by `RulesTable.resize.test.tsx` and the
+Files-table resize harness.
+
+### Stage 03 — Built-in Plex compatibility rule
+
+New `default-rule:plex-compat` shipped at first boot. Matches
+codecs that fail on most Plex clients (av1, vp9, prores,
+truehd, dts-hd ma). Honest description per addendum A.6: "most
+clients, not all" — `docs/rules/plex-compatibility.md` (added
+in Stage 14) documents the per-client compatibility matrix.
+
+### Stage 04 — Help context for the Files page
+
+`/api/v1/docs/help/files.overview` now returns the Files-page
+docs page (the key existed; the content was the gap). The
+auto-pick effect on `HelpPage` resolves the contextual link to
+the right doc.
+
+### Stage 05 — Quarantine removal
+
+Quarantine column dropped from `media_files`. The pre-v1.7
+quarantine-view dropdown gone from the Files toolbar; the
+rule action gone from the engine; the dispositions-on-extension
+"malicious" path now sets severity=crit and applies a
+`malicious-extension` tag instead. Migration deletes rows
+with `quarantined=TRUE`; the count is logged at WARNING level
+so operators see what was deleted. Documented in
+`docs/getting-started/upgrade-to-v1.7.md`.
+
+### Stage 06 — Rule engine rewrite
+
+`severity`, `action`, `conditions` columns on `rules`.
+`acknowledged_destructive` flag required for any rule with a
+`delete` action — the engine refuses to evaluate destructive
+rules without the operator's explicit acknowledgement (addendum
+A.0.1). Notify action gains a `throttle` block to cap delivery
+frequency. Visual rule builder surfaces the new fields.
+Dry-run preview shows exactly which files a rule would flag
+before save.
+
+### Stage 07 — Optimization profile routing
+
+New `routing_target` column with `in_process` default (matches
+pre-v1.7 behaviour) and a `tdarr` option for routing transcodes
+through Tdarr. The profile dialog gained a provider profile
+picker that fetches `/integrations/{id}/transcode-profiles`
+when routing target is `tdarr`. New `tag_scope` array column.
+
+### Stage 08 — Provider profile picker
+
+Stage 07's routing-target picker enriched: the picker surfaces
+profile id + label and persists the selection on
+`provider_metadata.provider_profile_id`. Clearing the picker
+removes the field cleanly (no orphan keys).
+
+### Stage 09 — Live-now playback card
+
+New `LiveNowCard` reads the Plex/Jellyfin live-playback
+endpoints and renders currently-playing sessions on the
+dashboard. Path-mappings hint surfaces when sessions are
+unresolved (addendum A.7). Resolved sessions deep-link to the
+file detail drawer.
+
+### Stage 10 — VirusTotal integration
+
+New `vt_status` column on `media_files`; new `vt_queue` table.
+Integration disabled by default; enable in Settings →
+Integrations → VirusTotal with an API key. Sends file hashes
+only — never file contents (cross-cutting privacy 4.4). Visual
+rule builder gains `vt_status` as a field with enum.
+
+### Stage 11 — Webhook HMAC bypass + IP/DNS whitelist
+
+For webhooks where HMAC isn't possible (some upstream services
+emit unsigned payloads), Stage 11 adds an opt-in bypass paired
+with an IP/DNS source whitelist. The UI is loud about it —
+warning banner whenever the bypass is enabled (cross-cutting
+security 4.3). Default behaviour unchanged.
+
+### Stage 12 — Forgot-password terminal OTP path
+
+When email isn't configured, the forgot-password flow now
+generates a 12-character OTP, prints it in a bordered banner
+to the application log at WARNING level (and to stdout), and
+flags the resulting reset token as `must_change_on_use=True`.
+On confirmation, the user lands on `/change-password` and
+their account is gated until the new password is set.
+`/auth/email-configured` endpoint added so the frontend can
+adapt its forgot-password copy.
+
+### Stage 13 — Live UI refresh polish + dashboard card management
+
+Three improvements bundled. (1) Invalidation audit closed two
+gaps (`useChangePassword`, `useUpdateProfile`) and documented
+nine legitimate skips. (2) Scan progress now survives
+navigation — state moved to a central `scanProgressStore`; WS
+subscription lifted to AppShell. (3) Dashboard cards can be
+disabled, restored, swapped via a per-card overflow menu;
+addendum B.10 migrate callback preserves existing operators'
+layout.
+
+### Stage 14 — Documentation overhaul
+
+Three new doc pages: `docs/getting-started/upgrade-to-v1.7.md`
+(addendum C.3 — quarantine data-loss + migration list +
+rollback), `docs/rules/plex-compatibility.md` (addendum A.6 —
+honest per-client framing), `docs/rules/ai-authoring.md` (plan
+§630 — complete rule-JSON vocabulary + AI-prompt template +
+mass-import format). Three existing pages updated to remove
+stale v1.6 references.
+
+### Stage 15 — Context-driven dropdowns
+
+New `GET /api/v1/media/vocabulary` endpoint returns the
+distinct codec / container / extension / tag values currently
+in the indexed library; cached in-process for 60 seconds. The
+rule builder's value-input and the optimization profile
+dialog's tag-scope input gained `<datalist>`-backed
+autocomplete driven by the vocabulary. Free-text input
+survives — vocabulary is non-restricting per plan §668.
+Automation surfaces already vocabulary-driven via the
+pre-existing `useTagsCatalog` and `useLibraries`.
+
+### Stage 16 — Release gate
+
+Version bumped to 1.7.0 across `backend/app/__init__.py`,
+`backend/pyproject.toml`, `frontend/package.json`, and
+`install-bare-metal.sh`. CHANGELOG entry consolidates Stages
+01–15. New integration smoke test (`backend/tests/e2e/
+test_release_smoke_stage16.py`) walks register → admin grant
+→ login → `/health`, `/docs`, `/media`, `/media/vocabulary`,
+`/rules` against an in-memory app instance. New
+`scripts/post-fix-smoke.sh` validates installer rename, no
+`quarantine` references in shipped sources, VT integration
+registered, optimization routing targets present, files-page
+resize wiring present.
+
+### Test counts at release
+
+- Backend unit: 520/520
+- Backend integration: 230+ across all slices
+- Frontend full sweep: 425/425 across 68 files
+- Migration chain: 26 migrations, head `0026_stage12_must_change_pw`
+- Lint: ruff F-rules clean, eslint 0 warnings, tsc strict clean
+
+### Breaking changes (vs v1.6.x)
+
+- **Quarantine removed.** The `quarantined` column on
+  `media_files` is dropped by migration 0021. Rows with
+  `quarantined=TRUE` are deleted (count logged). The
+  `quarantine` rule action is gone. See the upgrade doc.
+
+### Non-breaking notable changes
+
+- Installer renames (`install.sh` → `install-docker.sh`). The
+  stub still exists for muscle-memory invocations.
+- Frontend localStorage `auditarr.ui` schema bumped to
+  `version: 1`. Existing state is migrated by the addendum
+  B.10 callback; operators see no layout jump.
+
+---
+
 ## Audit follow-up — Stages 1–16 (2026-05-14 → 2026-05-15)
 
 Sixteen-stage cleanup pass executed against the consolidated audit

@@ -2,7 +2,7 @@
 id: settings/extension-rules
 title: Extension rules
 category: settings
-tags: [settings, extensions, scanner, rules, quarantine]
+tags: [settings, extensions, scanner, rules]
 summary: Per-extension scanner + rule-engine overrides — ignore, accept, flag as malicious, or index-only.
 help_context: [settings.extension-rules, system.extension-rules]
 related: [rules/actions, rules/severity]
@@ -45,10 +45,19 @@ Use for: `.nfo` files, `.txt` notes, manifest files alongside media.
 
 ### `malicious`
 
-The file is indexed at severity `crit` AND quarantined immediately.
-The scanner stamps `quarantined_reason` with `"Extension rule: {ext}
-marked malicious"`. This bypasses the rule engine's normal
-escalation — operators see the file flagged from the moment of scan.
+The file is indexed at severity `crit` immediately. The scanner
+stamps the file with a tag (`malicious-extension`) recording the
+reason. This bypasses the rule engine's normal escalation —
+operators see the file flagged from the moment of scan and can
+take action via the rules page or the file detail drawer.
+
+> **Note (v1.7).** Pre-v1.7 this disposition also "quarantined"
+> the file via a dedicated quarantine column. Stage 05 removed
+> the quarantine surface; the disposition now flags at `crit`
+> only. To take action (delete, move, etc.) write a rule that
+> matches on the `malicious-extension` tag — see
+> [rules/actions](/help/rules/actions) for the available
+> action types.
 
 Use for: known-dangerous extensions on systems where executable
 content shouldn't appear (`.exe`, `.scr`, etc.).
@@ -101,7 +110,8 @@ hundreds of thousands of files, the cost is negligible.
 
 ## See also
 
-- [Rule actions](/help/rules/actions) — the `quarantine` action
-  reaches the same end-state as a `malicious` disposition.
+- [Rule actions](/help/rules/actions) — the action vocabulary
+  (set_severity, tag, delete, notify). The pre-v1.7 `quarantine`
+  action was removed in Stage 05.
 - [Severity levels](/help/rules/severity) — what `info`, `crit`,
   etc. mean for the rest of the pipeline.

@@ -58,6 +58,30 @@ def build_ffmpeg_argv(req: TranscodeRequest, *, ffmpeg_bin: str = "ffmpeg") -> l
     ``[ffmpeg, global flags, -i input, encode flags, output flags, output]``.
     """
     p = req.profile
+
+    # Stage 07 (v1.7) — ``transcode_scope`` is the source of
+    # truth for which stream gets re-encoded. When the scope
+    # excludes a stream, that stream's effective codec becomes
+    # ``copy`` regardless of what the profile's video/audio
+    # block says. We compute the effective codec strings up
+    # front so the rest of the argv builder reads from one
+    # place. The profile's video/audio blocks are still used for
+    # the ENCODING parameters (crf, bitrate, scale) of whichever
+    # stream IS in scope — they're only ignored on the excluded
+    # side.
+    if p.transcode_scope == "video_only":
+        video_codec = p.video.codec
+        audio_codec = "copy"
+    elif p.transcode_scope == "audio_only":
+        video_codec = "copy"
+        audio_codec = p.audio.codec
+    else:
+        # ``video_and_audio`` — both streams use the profile's
+        # configured codec, including the case where one or both
+        # happen to be ``copy`` (a "re-mux only" profile).
+        video_codec = p.video.codec
+        audio_codec = p.audio.codec
+
     argv = [
         ffmpeg_bin,
         "-y",  # overwrite the output if it exists (the worker uses a temp path anyway)
@@ -85,8 +109,8 @@ def build_ffmpeg_argv(req: TranscodeRequest, *, ffmpeg_bin: str = "ffmpeg") -> l
         argv += ["-map", "0:s?"]
 
     # ── Video encode flags ──
-    argv += ["-c:v", p.video.codec]
-    if p.video.codec != "copy":
+    argv += ["-c:v", video_codec]
+    if video_codec != "copy":
         if p.video.crf is not None:
             argv += ["-crf", str(p.video.crf)]
         if p.video.preset:
@@ -108,8 +132,8 @@ def build_ffmpeg_argv(req: TranscodeRequest, *, ffmpeg_bin: str = "ffmpeg") -> l
             ]
 
     # ── Audio encode flags ──
-    argv += ["-c:a", p.audio.codec]
-    if p.audio.codec != "copy":
+    argv += ["-c:a", audio_codec]
+    if audio_codec != "copy":
         if p.audio.bitrate_kbps is not None:
             argv += ["-b:a", f"{p.audio.bitrate_kbps}k"]
         if p.audio.channels is not None:

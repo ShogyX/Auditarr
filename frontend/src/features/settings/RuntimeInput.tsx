@@ -1,6 +1,15 @@
 /**
  * Stage 2 — Runtime settings per-type input.
  *
+ * Stage 02 (v1.7) adds: for the ``scanner_max_file_size_mb``
+ * runtime field, render a slider + numeric input pair instead of
+ * the bare number input. The slider uses a log-ish step ladder
+ * (1, 5, 10, 25, 50, 100, 250, 500, 1024, 2048, 5120, 10240,
+ * 20480, 51200, 102400) so the operator can pick reasonable
+ * sizes from 1 MB to 100 GB with one drag. The number field
+ * stays in sync so an operator who wants an exact value can type
+ * it. The displayed unit auto-switches: < 1024 → MB, ≥ 1024 → GB.
+ *
  * Extracted from the inline ``RuntimeInput`` in RuntimeSettingsPanel.
  * Four branches based on the field's type and constraint shape:
  *
@@ -8,7 +17,7 @@
  *   - enum (pattern-derived) → <select> with the parsed options
  *   - ``integer`` / ``number`` → <input type="number"> with ge/le
  *     constraints, with the standard "fall back to env default on
- *     empty" recovery
+ *     empty" recovery (or the new slider for the size-mb key)
  *   - everything else → free-text <input>
  *
  * The pre-Stage-2 panel used local ``.settings-input`` / ``.settings-
@@ -31,6 +40,54 @@ export interface RuntimeInputProps {
   field: RuntimeField;
   value: EditValue;
   onChange: (v: EditValue) => void;
+}
+
+/**
+ * Stage 02 — discrete step ladder for the file-size slider.
+ *
+ * Linear would cover 1–102400 MB with one MB granularity that's
+ * useless to the operator at any large value. The ladder gives
+ * useful resolution at every order of magnitude.
+ */
+export const SCANNER_MAX_FILE_SIZE_LADDER: readonly number[] = [
+  1, 5, 10, 25, 50, 100, 250, 500, 1024, 2048, 5120, 10240, 20480, 51200,
+  102400,
+] as const;
+
+/** Map an arbitrary MB value to the closest ladder index. */
+function ladderIndexForValue(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  let best = 0;
+  let bestDiff = Infinity;
+  for (let i = 0; i < SCANNER_MAX_FILE_SIZE_LADDER.length; i += 1) {
+    // TS strict mode flags array indexing as possibly-undefined
+    // even when bounded by length; the loop guards i so the cast
+    // is safe.
+    const step = SCANNER_MAX_FILE_SIZE_LADDER[i] as number;
+    const diff = Math.abs(step - value);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** Render a MB value with KB / MB / GB unit suffix as appropriate. */
+export function formatFileSizeMB(value: number): { value: string; unit: string } {
+  if (!Number.isFinite(value)) return { value: "—", unit: "MB" };
+  if (value < 1) {
+    return { value: Math.round(value * 1024).toString(), unit: "KB" };
+  }
+  if (value < 1024) {
+    return { value: value.toString(), unit: "MB" };
+  }
+  // value >= 1024 ⇒ display as GB with up to 1 decimal place
+  const gb = value / 1024;
+  return {
+    value: Number.isInteger(gb) ? gb.toString() : gb.toFixed(1),
+    unit: "GB",
+  };
 }
 
 export function RuntimeInput({ field, value, onChange }: RuntimeInputProps) {
@@ -57,6 +114,64 @@ export function RuntimeInput({ field, value, onChange }: RuntimeInputProps) {
           </option>
         ))}
       </Select>
+    );
+  }
+  // Stage 02 — slider variant for the file-size knob. Detected
+  // by the field's persisted key so other size-style fields can
+  // opt in later by name.
+  if (
+    (field.type === "integer" || field.type === "number") &&
+    field.key === "scanner_max_file_size_mb"
+  ) {
+    const numeric =
+      typeof value === "number" ? value : Number(value) || 0;
+    const idx = ladderIndexForValue(numeric);
+    const display = formatFileSizeMB(numeric);
+    return (
+      <div
+        className="runtime-slider"
+        role="group"
+        aria-label="Scanner maximum file size"
+      >
+        <div className="runtime-slider-row">
+          <input
+            type="range"
+            className="runtime-slider-track"
+            min={0}
+            max={SCANNER_MAX_FILE_SIZE_LADDER.length - 1}
+            step={1}
+            value={idx}
+            aria-label={field.label}
+            onChange={(e) => {
+              const i = Number(e.target.value);
+              const next = SCANNER_MAX_FILE_SIZE_LADDER[i] ?? numeric;
+              onChange(next);
+            }}
+          />
+          <span className="runtime-slider-value">
+            {display.value}
+            <span className="runtime-slider-unit">{display.unit}</span>
+          </span>
+        </div>
+        <Input
+          type="number"
+          variant="mono"
+          style={{ width: 140 }}
+          value={numeric}
+          min={field.constraints.ge ?? 1}
+          max={field.constraints.le ?? 102400}
+          aria-label={`${field.label} (precise MB)`}
+          onChange={(e) => {
+            const raw = e.target.value;
+            if (raw === "") {
+              onChange(field.env_default as EditValue);
+              return;
+            }
+            const n = Number(raw);
+            if (Number.isFinite(n)) onChange(n);
+          }}
+        />
+      </div>
     );
   }
   if (field.type === "integer" || field.type === "number") {

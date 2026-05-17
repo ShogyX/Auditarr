@@ -136,3 +136,65 @@ class CursorRead(BaseModel):
     cursor_kind: str
     cursor_value: str
     updated_at: _dt.datetime
+
+
+# ── Stage 09 (v1.7) — live playback ─────────────────────────────
+
+
+class LivePlaybackSession(BaseModel):
+    """One in-progress playback session as returned by
+    :func:`app.api.v1.playback.list_live_playbacks`.
+
+    Differs from :class:`PlaybackEventRead` in that nothing
+    here is persisted — the dashboard's "Live now" tile is a
+    realtime view sourced directly from the integration's
+    /sessions endpoint via the provider's
+    ``fetch_live_playbacks`` method.
+
+    ``source_path`` is post-remap: the aggregating endpoint
+    applies the integration's path mappings before returning
+    so the frontend sees Auditarr-side paths and can link to
+    library files when resolved.
+    """
+
+    integration_id: str
+    integration_name: str
+    integration_kind: str
+    upstream_id: str
+    source_path: str
+    decision: str
+    state: str
+    started_at: _dt.datetime
+    progress_pct: float | None = None
+    user: str | None = None
+    device_kind: str | None = None
+    device_name: str | None = None
+    source_codec: str | None = None
+    source_bitrate_kbps: int | None = None
+    source_width: int | None = None
+    source_height: int | None = None
+    source_container: str | None = None
+    target_codec: str | None = None
+    target_bitrate_kbps: int | None = None
+    title: str | None = None
+    #: Stage 09 (addendum A.7) — when the post-remap path
+    #: matches a known MediaFile, the matched row's id. Lets the
+    #: frontend deep-link from the tile to the file's detail
+    #: drawer. ``None`` when path mappings haven't caught the
+    #: file — the frontend can hint at "Configure path mappings".
+    media_file_id: str | None = None
+
+
+class LivePlaybackResponse(BaseModel):
+    """Aggregated response for ``GET /playback/live``.
+
+    Returns a flat list of sessions across every enabled
+    Plex/Jellyfin integration plus a small summary counter so
+    the frontend can render "N playing now" without re-counting.
+    """
+
+    sessions: list[LivePlaybackSession]
+    total: int
+    resolved: int
+    unresolved: int
+    polled_at: _dt.datetime

@@ -5,6 +5,7 @@ import { RequireAuth } from "@/components/shell/RequireAuth";
 import { AccountPage } from "@/features/account/AccountPage";
 import { AuditLogPage } from "@/features/audit/AuditLogPage";
 import { DashboardPage } from "@/features/dashboard/DashboardPage";
+import { ForcedChangePasswordPage } from "@/features/auth/ForcedChangePasswordPage";
 import { ForgotPasswordPage } from "@/features/auth/ForgotPasswordPage";
 import { LoginPage } from "@/features/auth/LoginPage";
 import { ResetPasswordPage } from "@/features/auth/ResetPasswordPage";
@@ -29,6 +30,11 @@ export function AppRoutes() {
       <Route path="login" element={<LoginPage />} />
       <Route path="forgot" element={<ForgotPasswordPage />} />
       <Route path="reset-password" element={<ResetPasswordPage />} />
+      {/* Stage 12 (plan §584) — forced change-password screen
+          for users with must_change_password=true. Lives
+          outside the RequireAuth shell because the user has
+          a session but isn't allowed into the app yet. */}
+      <Route path="change-password" element={<ForcedChangePasswordPage />} />
 
       <Route
         element={

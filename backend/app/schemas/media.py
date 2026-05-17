@@ -103,9 +103,11 @@ class MediaFileSummary(BaseModel):
     height: int | None
     has_subtitles: bool
     is_orphaned: bool
-    # Stage 27: quarantine state. Summaries carry the flag so the
-    # Files table can show a badge without a per-row detail fetch.
-    quarantined: bool = False
+    # Stage 27 added a ``quarantined`` flag here. Stage 05 (v1.7)
+    # removed it along with the rest of the quarantine workflow
+    # (Section A.0 — "delete means delete"). A file is either in
+    # the library or it's in ``data_dir/trash/`` after a rule
+    # deleted it; there is no intermediate state on the row.
     # Stage 3 (audit follow-up): matched-rules chips for the Files
     # table. Default empty list so callers that don't request the
     # join (the dashboard summary endpoints, internal services) get
@@ -149,10 +151,9 @@ class MediaFileDetail(MediaFileSummary):
     probe_error: str | None
     last_scan_id: str | None
     seen_at: _dt.datetime
-    # Stage 27: quarantine audit fields. Only meaningful when
-    # ``quarantined: true``; ``None`` otherwise.
-    quarantined_at: _dt.datetime | None = None
-    quarantined_reason: str | None = None
+    # Stage 27 added ``quarantined_at`` and ``quarantined_reason``
+    # here. Stage 05 (v1.7) removed them — see ``MediaFileSummary``
+    # comment above.
     # Stage 19 (audit follow-up): content hash + VirusTotal result.
     # All four nullable; the file drawer hides its Security section
     # when both ``hash_sha256`` and ``virustotal_result`` are None.

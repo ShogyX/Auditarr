@@ -545,9 +545,17 @@ select.settings-input {
 
 .runtime-fields {
   padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  /* Stage 04 (v1.7) — was ``display: flex; flex-direction: column``
+     which rendered one card per row regardless of viewport width.
+     Housekeeping cards in particular are short (a number + a
+     small description); on a wide screen they should sit two-up.
+     ``auto-fit + minmax`` gives us exactly that with no per-
+     category branching: short content cards naturally stack two
+     across on wide screens, longer cards collapse to one column
+     when their min-width can't fit. */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
   min-width: 0;
 }
 
@@ -1015,8 +1023,16 @@ select.settings-input {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
+  /* Stage 02 — fixed layout is required for the colgroup-driven
+     column widths the resize handles set. Without this, the
+     browser ignores explicit widths and lays out by content. */
+  table-layout: fixed;
 }
 .files-table thead th {
+  /* ``position: sticky`` is a positioning context for absolutely-
+     positioned descendants — that's how the Stage 02 resize handle
+     anchors to the right edge of the th. So both behaviours are
+     served by this one declaration. */
   position: sticky;
   top: 0;
   z-index: 1;
@@ -1031,6 +1047,11 @@ select.settings-input {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   user-select: none;
+  /* Stage 02 — clip overflowing label text when a column is
+     squeezed below its content width. The resize handle is
+     positioned beyond the clip, so it stays grabbable. */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .files-table thead th.num {
   text-align: right;
@@ -1378,10 +1399,15 @@ select.settings-input {
   color: var(--muted-2);
 }
 .categories-row {
-  display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) auto auto;
-  align-items: center;
-  gap: 12px;
+  /* Stage 04 (v1.7) — the row's grid layout moves from the
+     ``<li>`` to an inner element (``.categories-row-link`` for
+     deep-linked rows, ``.categories-row-static`` for ``unknown``)
+     so both row variants share the same column origin. Before
+     this change the ``<li>`` carried the grid; ``unknown`` rows
+     filled all four columns directly while linked rows packed
+     their grid children into a single ``<a>`` child sitting in
+     column 1 — which made the unknown row's bar / size / count
+     visibly offset from the others. */
   padding: 5px 0;
 }
 /* Stage 31: rows that link out to a Files filter. The grid
@@ -1389,11 +1415,14 @@ select.settings-input {
    static row; the row wrapper is then just a marker. The hover
    state surfaces the click affordance which the static row
    correctly didn't have. */
-.categories-row-link {
+.categories-row-link,
+.categories-row-static {
   display: grid;
   grid-template-columns: minmax(120px, 1fr) minmax(80px, 2fr) auto auto;
   align-items: center;
   gap: 12px;
+}
+.categories-row-link {
   padding: 5px 6px;
   margin: 0 -6px;
   border-radius: 4px;
@@ -1413,6 +1442,8 @@ select.settings-input {
 .categories-row:has(.categories-row-link) {
   padding: 0;
 }
+/* Static unknown rows: keep the li padding (no link-driven
+   padding kicks in via :has). Inner grid handles columns. */
 .categories-row-label {
   display: flex;
   align-items: center;
@@ -1537,4 +1568,126 @@ select.settings-input {
   padding-top: var(--header-h);
   min-height: 100vh;
   overflow-x: hidden;
+}
+
+/* ── Stage 02 — Files page resize / per-column filter / full width ──
+   See ``frontend/src/features/files/FilesTable.tsx``. The handle is
+   inline-rendered inside each ``<th>`` and uses pointer events. */
+
+/* Full-width Files page surface — overrides any inherited
+   ``max-width`` from the shell so the table can occupy the
+   viewport. */
+.files-page {
+  max-width: 100%;
+  width: 100%;
+}
+
+/* Resize handle. Both class names are exported by the component:
+   ``.files-th-resizer`` is the legacy name; ``.ui-th-resizer`` is
+   the name Stage 03 will reuse via the shared
+   ``ResizableHeaderCell`` primitive. The two classes are
+   intentionally interchangeable so Stage 03 can drop in the shared
+   primitive without breaking existing CSS. */
+.files-th-resizer,
+.ui-th-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  /* Subtle indicator that this is a draggable affordance. The
+     full background renders on hover so the operator can find it
+     without already knowing it's there. */
+  background: transparent;
+  transition: background-color 80ms ease;
+  touch-action: none;
+}
+.files-th-resizer:hover,
+.ui-th-resizer:hover,
+.files-th-resizer:active,
+.ui-th-resizer:active {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+/* Per-column filter row, rendered below the header when the
+   toolbar's filter toggle is on. */
+.files-table-filter-row > th {
+  position: static; /* not sticky — only the main header is */
+  padding: 4px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  text-transform: none;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+.files-th-filter {
+  width: 100%;
+  font-size: 11px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-sunk);
+  color: var(--text);
+  border-radius: 4px;
+  font-family: var(--font-mono, monospace);
+}
+.files-th-filter:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Stage 02 — Runtime slider (scanner_max_file_size_mb)
+   ─────────────────────────────────────────────────────── */
+.runtime-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, 100%);
+}
+.runtime-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.runtime-slider-track {
+  flex: 1;
+  /* native input[type=range] — keep the look minimal and let the
+     OS / browser provide thumb interaction (a11y / keyboard come
+     free this way). */
+  accent-color: var(--accent);
+  height: 4px;
+}
+.runtime-slider-value {
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  color: var(--text);
+  min-width: 80px;
+  text-align: right;
+}
+.runtime-slider-unit {
+  font-size: 10.5px;
+  color: var(--muted-2);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+
+/* ── Stage 03 — Rules page full-width override ──
+   Mirrors Stage 02's ``.files-page``. The Rules page previously
+   had ``max-w-5xl`` on its body wrapper which clipped the table
+   at 1280 px; this rule drops that ceiling so the table extends
+   to the viewport edge on wider screens. */
+.rules-page {
+  max-width: 100%;
+  width: 100%;
+}
+
+/* ── Stage 04 — Plugins page full-width override ──
+   Mirror of Stage 02's ``.files-page`` and Stage 03's
+   ``.rules-page``. */
+.plugins-page {
+  max-width: 100%;
+  width: 100%;
 }

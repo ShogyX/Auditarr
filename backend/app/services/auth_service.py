@@ -44,6 +44,11 @@ from app.services.repositories import (
 log = get_logger("auditarr.auth", category="security")
 
 RESET_TOKEN_TTL_MINUTES = 30
+# Stage 12 (v1.7) — terminal-OTP path uses a tighter TTL than
+# the long email token. Plan §577 specifies 15 minutes; the
+# shorter OTP (71 bits of entropy) doesn't need the longer
+# window the email path uses for the much longer token.
+TERMINAL_OTP_TTL_MINUTES = 15
 
 
 @dataclass(slots=True)
@@ -242,6 +247,12 @@ class AuthService:
             raise AuthenticationError("Current password is incorrect")
         _validate_password(new_password)
         user.password_hash = hash_password(new_password)
+        # Stage 12 (plan §581) — a successful password change
+        # clears the forced-change flag. Whether the user
+        # arrived here via the terminal-OTP flow or just
+        # ordinarily updating their password, the next login
+        # should NOT be blocked by the gate.
+        user.must_change_password = False
         await self._users.bump_token_version(user)
         await self._sessions.revoke_for_user(user.id)
         await self._audit.record(
@@ -326,30 +337,75 @@ class AuthService:
             )
             return
 
-        token = secrets.token_urlsafe(48)
+        # Stage 12 (v1.7) — split the path based on email
+        # provider configuration. When email isn't enabled,
+        # we generate a short human-typable OTP (12 base64
+        # chars) and print it to the operator's terminal via
+        # both a WARNING log AND ``print()`` (addendum B.9:
+        # production INFO logs may not go to stdout; the
+        # bordered banner must always reach the operator).
+        # We persist the hash with ``must_change_on_use=True``
+        # so the post-reset login flow forces a password
+        # change.
+        if self._email.enabled:
+            token = secrets.token_urlsafe(48)
+            must_change_on_use = False
+            ttl_minutes = RESET_TOKEN_TTL_MINUTES
+        else:
+            # Operator-typeable OTP. base64 (no '/' or '+')
+            # at 9 bytes → 12 chars. URL-safe so no special
+            # chars to escape when the operator types it.
+            token = secrets.token_urlsafe(9)
+            must_change_on_use = True
+            # Tighter TTL for the terminal path — the OTP is
+            # shorter (~71 bits vs ~384 bits for the email
+            # token) so we minimize the brute-force window.
+            ttl_minutes = TERMINAL_OTP_TTL_MINUTES
+
         token_hash = _hash_reset_token(token)
-        expires = _dt.datetime.now(_dt.UTC) + _dt.timedelta(minutes=RESET_TOKEN_TTL_MINUTES)
+        expires = _dt.datetime.now(_dt.UTC) + _dt.timedelta(minutes=ttl_minutes)
 
         await self._resets.delete_for_user(user.id)
         await self._resets.add(
             PasswordResetToken(
-                token_hash=token_hash, user_id=user.id, expires_at=expires
+                token_hash=token_hash,
+                user_id=user.id,
+                expires_at=expires,
+                must_change_on_use=must_change_on_use,
             )
         )
-        try:
-            await self._email.send_password_reset(
-                to=user.email, full_name=user.full_name, token=token
+
+        if self._email.enabled:
+            try:
+                await self._email.send_password_reset(
+                    to=user.email, full_name=user.full_name, token=token
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Don't leak failure to the caller; just log + audit.
+                log.error("auth.reset_email_failed", error=str(exc))
+        else:
+            # Stage 12 (plan §572 + addendum B.9) — terminal
+            # OTP banner. WARNING log so it lands above the
+            # operator's default INFO threshold, AND print()
+            # so it always reaches stdout regardless of log
+            # config. The banner shape matches the plan
+            # spec verbatim.
+            _print_otp_banner(
+                username=user.username,
+                otp=token,
+                ttl_minutes=ttl_minutes,
             )
-        except Exception as exc:  # noqa: BLE001
-            # Don't leak failure to the caller; just log + audit.
-            log.error("auth.reset_email_failed", error=str(exc))
+
         await self._audit.record(
             "auth.password_reset_requested",
             actor_id=user.id,
             actor_label=user.username,
             ip_address=(ctx.ip_address if ctx else None),
             request_id=(ctx.request_id if ctx else None),
-            metadata={"matched": True},
+            metadata={
+                "matched": True,
+                "delivery": "email" if self._email.enabled else "terminal_otp",
+            },
         )
 
     async def confirm_password_reset(
@@ -371,6 +427,12 @@ class AuthService:
             raise NotFoundError("User no longer exists")
 
         user.password_hash = hash_password(new_password)
+        # Stage 12 (plan §581) — flag the user for forced
+        # password change on next login when the consumed
+        # token came from the terminal-OTP path. The flag
+        # gets cleared by ``change_password`` (below).
+        if record.must_change_on_use:
+            user.must_change_password = True
         await self._users.bump_token_version(user)
         await self._sessions.revoke_for_user(user.id)
         await self._resets.mark_used(record)
@@ -380,6 +442,9 @@ class AuthService:
             actor_label=user.username,
             ip_address=(ctx.ip_address if ctx else None),
             request_id=(ctx.request_id if ctx else None),
+            metadata={
+                "must_change_on_use": record.must_change_on_use,
+            },
         )
 
     # ── Helpers ───────────────────────────────────────────────
@@ -417,3 +482,62 @@ def _validate_password(password: str) -> None:
 
 def _hash_reset_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# ── Stage 12 (v1.7) — terminal OTP banner ───────────────────────
+
+
+def _print_otp_banner(*, username: str, otp: str, ttl_minutes: int) -> None:
+    """Emit the password-reset OTP to the operator's terminal.
+
+    Per addendum B.9: emit at WARNING level (so it lands above
+    any default INFO threshold) AND via ``print()`` (so it
+    always reaches stdout regardless of log configuration —
+    operators in production may have INFO/WARNING redirected
+    elsewhere). The duplication is intentional and minimal.
+
+    Banner shape matches plan §572 verbatim. Width chosen so
+    a 12-char OTP fits comfortably with surrounding context;
+    the box-drawing characters are ASCII-compatible across all
+    POSIX terminals.
+    """
+    # Build the banner. The plan spec uses 60-char inner width.
+    width = 60
+    line_top = "┌" + "─" * (width + 2) + "┐"
+    line_mid = "└" + "─" * (width + 2) + "┘"
+
+    def _pad(text: str) -> str:
+        # Truncate or pad to the inner width so the right
+        # border lines up.
+        if len(text) > width:
+            text = text[: width - 1] + "…"
+        return "│ " + text.ljust(width) + " │"
+
+    lines = [
+        line_top,
+        _pad(
+            f"AUDITARR — Password reset request for user '{username}'"
+        ),
+        _pad(f"One-time password: {otp}"),
+        _pad(
+            f"Valid for {ttl_minutes} minutes. "
+            "Operator must change on next login."
+        ),
+        line_mid,
+    ]
+    banner = "\n".join(lines)
+
+    # WARNING-level structured log so the operator's log
+    # aggregator catches it.
+    log.warning(
+        "auth.password_reset_terminal_otp",
+        username=username,
+        ttl_minutes=ttl_minutes,
+        otp_length=len(otp),
+        banner=banner,
+    )
+
+    # And direct stdout so the OTP always reaches the
+    # operator's terminal even if log routing redirects
+    # WARNING elsewhere.
+    print("\n" + banner + "\n", flush=True)

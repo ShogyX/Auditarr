@@ -206,3 +206,68 @@ export function useResetCursors() {
     onSuccess: () => invalidateRelated(qc, "playback"),
   });
 }
+
+// ── Stage 09 (v1.7) — live playback ──────────────────────────
+
+/** One in-progress playback session as returned by
+ *  ``GET /playback/live``. The dashboard's "Live now" tile
+ *  consumes a list of these. */
+export interface LivePlaybackSession {
+  integration_id: string;
+  integration_name: string;
+  integration_kind: string;
+  upstream_id: string;
+  source_path: string;
+  decision: string;
+  state: string;
+  started_at: string;
+  progress_pct: number | null;
+  user: string | null;
+  device_kind: string | null;
+  device_name: string | null;
+  source_codec: string | null;
+  source_bitrate_kbps: number | null;
+  source_width: number | null;
+  source_height: number | null;
+  source_container: string | null;
+  target_codec: string | null;
+  target_bitrate_kbps: number | null;
+  title: string | null;
+  /** When the post-remap path matches a known MediaFile, the
+   *  row's id. ``null`` means path mappings haven't caught the
+   *  file — frontend shows a path-mappings hint when any
+   *  session has ``media_file_id=null`` (addendum A.7). */
+  media_file_id: string | null;
+}
+
+export interface LivePlaybackResponse {
+  sessions: LivePlaybackSession[];
+  total: number;
+  resolved: number;
+  unresolved: number;
+  polled_at: string;
+}
+
+/** Poll the live-playback aggregating endpoint.
+ *
+ *  Plan §487 — the dashboard's "Live now" tile reads this on
+ *  a 15-second interval. ``refetchInterval`` keeps the tile
+ *  fresh without operator interaction. The endpoint is cheap
+ *  (one round-trip per enabled Plex/Jellyfin integration,
+ *  bounded by the small per-server session counts).
+ *
+ *  Future enhancement: the backend's
+ *  ``playback.live_changed`` WebSocket event invalidates this
+ *  query for snappier updates between polls. */
+export function useLivePlaybacks() {
+  return useQuery({
+    queryKey: ["playback", "live"],
+    queryFn: () => apiClient.get<LivePlaybackResponse>("/playback/live"),
+    refetchInterval: 15_000,
+    refetchOnWindowFocus: true,
+    // The session list changes on every play/pause/seek, so a
+    // short stale time means cross-component remounts (e.g.
+    // navigating away + back) re-fetch promptly.
+    staleTime: 5_000,
+  });
+}

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ── Severity scale (must align with MediaFile.severity_rank) ────────
 SEVERITY_LEVELS: dict[str, int] = {
@@ -71,7 +71,32 @@ SUPPORTED_FIELDS: frozenset[str] = frozenset(
         "subtitle_languages",
         "audio_languages",
         "tags",
+        # Stage 06 (v1.7) — rule engine extensions.
+        # ``probe_failed`` (bool): True when ffprobe couldn't read
+        # the file. Populated by the scanner; reset to False on a
+        # successful re-probe. Enables the built-in "Probe failed"
+        # rule to fire only on rows where the probe actually failed
+        # (pre-Stage-06 the rule was stubbed because there was no
+        # column to match on).
+        "probe_failed",
+        # ``vt_status`` (string, literal): VirusTotal scan result.
+        # Stored as a column on MediaFile (real column, not a
+        # computed property — simpler queries, easier indexing).
+        # Allowed values are ``VT_STATUS_VALUES``. Stage 10 will
+        # wire the VT plugin to populate this column; Stage 06
+        # adds the field so the built-in "VirusTotal non-clean"
+        # rule validates and is available for operator use.
+        "vt_status",
     }
+)
+
+# Stage 06 (v1.7) — allowed values for the ``vt_status`` field.
+# Defined here so both the rule engine and the VT plugin (Stage
+# 10) reference the same canonical list. A rule body that uses
+# any other value is rejected at validation; the VT plugin
+# writes only these strings into the column.
+VT_STATUS_VALUES: frozenset[str] = frozenset(
+    {"clean", "malicious", "suspicious", "not_found", "error"}
 )
 
 # Numeric ops apply to numeric fields, string ops to strings, set ops to
@@ -85,7 +110,9 @@ BOOL_OPS: frozenset[str] = frozenset({"eq", "ne"})
 NUMERIC_FIELDS: frozenset[str] = frozenset(
     {"width", "height", "duration_seconds", "bitrate_kbps", "framerate", "size_bytes"}
 )
-BOOL_FIELDS: frozenset[str] = frozenset({"has_subtitles", "is_orphaned"})
+BOOL_FIELDS: frozenset[str] = frozenset(
+    {"has_subtitles", "is_orphaned", "probe_failed"}
+)
 ARRAY_FIELDS: frozenset[str] = frozenset(
     {"subtitle_languages", "audio_languages", "tags"}
 )
@@ -122,6 +149,41 @@ class Condition(BaseModel):
                 f"Operator {v!r} not valid for field {field!r}. "
                 f"Allowed: {sorted(allowed)}"
             )
+        return v
+
+    @field_validator("value")
+    @classmethod
+    def _validate_value(cls, v: Any, info) -> Any:  # type: ignore[no-untyped-def]
+        """Stage 06 (v1.7): enforce literal values where the DSL
+        ships a fixed enumeration.
+
+        ``vt_status`` is the first such field — values must be in
+        ``VT_STATUS_VALUES`` (clean/malicious/suspicious/not_found/
+        error). For the ``in`` op the value is a list; we check
+        each element. Other fields pass through (the per-op
+        type checks live in the evaluator at runtime; the schema
+        intentionally keeps ``value: Any`` so callers can author
+        rules without contorting types through JSON)."""
+        field = info.data.get("field")
+        op = info.data.get("op")
+        if field == "vt_status":
+            if op == "in":
+                if not isinstance(v, list) or not v:
+                    raise ValueError(
+                        "vt_status with op 'in' requires a non-empty list"
+                    )
+                bad = [x for x in v if x not in VT_STATUS_VALUES]
+                if bad:
+                    raise ValueError(
+                        f"vt_status value(s) {bad!r} not in allowed set "
+                        f"{sorted(VT_STATUS_VALUES)}"
+                    )
+            else:
+                if v not in VT_STATUS_VALUES:
+                    raise ValueError(
+                        f"vt_status value {v!r} not in allowed set "
+                        f"{sorted(VT_STATUS_VALUES)}"
+                    )
         return v
 
 
@@ -185,66 +247,169 @@ class QueueOptimization(BaseModel):
     profile: str = Field(min_length=1, max_length=64)
 
 
+class NotifyThrottle(BaseModel):
+    """Stage 06 (v1.7) — notification throttle window.
+
+    A rule with ``Notify(throttle=...)`` will deliver at most
+    ``max_per_window`` notifications inside any rolling
+    ``window_seconds``-second window. Beyond that limit, the
+    rules engine emits a ``rule.throttled`` event (consumed by
+    the dashboard) and writes one summary audit-log entry per
+    window per rule — NOT one per suppressed event (per addendum
+    A.2, §125: "every throttle-suppressed notification → one
+    summary entry per window per rule (not per suppressed
+    event)").
+
+    Default unthrottled: the field is optional on ``Notify``.
+    ``window_seconds`` minimum 60 — anything shorter is more
+    likely a typo than a deliberate sub-minute throttle.
+    ``max_per_window`` minimum 1 — a value of 0 would mean
+    "never send", which the operator should express by
+    disabling the rule instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    window_seconds: int = Field(ge=60)
+    max_per_window: int = Field(ge=1)
+
+
 class Notify(BaseModel):
-    """Hand-off to the notification engine (Stage 9)."""
+    """Hand-off to the notification engine (Stage 9), extended in
+    Stage 06 (v1.7) with optional throttle.
+
+    The ``message`` field already shipped in Stage 9 — Stage 06
+    confirms it flows through ``notifications/templating.py`` to
+    the rendered email body. When the same rule also includes a
+    ``delete`` action, the email template renders an extra
+    "auto-deleting; no action required" badge so the operator
+    knows the file has already been removed by the time the
+    email arrives.
+    """
 
     model_config = ConfigDict(extra="forbid")
     type: Literal["notify"]
     channel: str = Field(min_length=1, max_length=64)
     message: str | None = Field(default=None, max_length=512)
-
-
-class Quarantine(BaseModel):
-    """Quarantine the matched file (Stage 9 audit follow-up).
-
-    Sets ``MediaFile.quarantined=True`` and emits ``media.quarantined``.
-    The reason is optional and persists on the row for the operator
-    to see. Pre-Stage-9, quarantining was only reachable via the
-    manual endpoint or the orphan-cleanup path; this lets rules
-    automate it.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["quarantine"]
-    reason: str | None = Field(default=None, max_length=256)
+    throttle: NotifyThrottle | None = Field(default=None)
 
 
 class Delete(BaseModel):
-    """Delete the matched file (Stage 9 audit follow-up).
+    """Delete the matched file (Stage 05 v1.7 — "delete means delete").
 
-    Defensive default: ``confirm=False`` resolves to a soft-delete
-    (quarantine + mark for deletion) so a misconfigured rule can't
-    nuke a library overnight. Only with ``confirm=True`` does the
-    service actually move the file to ``data_dir/trash/`` and
-    remove the row.
+    Stage 05 retired the quarantine intermediate state (Section
+    A.0 of the v1.7 addendum). A delete action now unconditionally
+    moves the file to ``data_dir/trash/`` and removes the
+    ``MediaFile`` row. The ``trash`` subdirectory remains the
+    operator's recovery surface — a misconfigured rule is still
+    recoverable by moving files back out of trash.
+
+    The pre-Stage-05 ``confirm`` flag is gone — the soft-delete
+    branch it gated (quarantine + flag) no longer exists. Stored
+    rule bodies that still carry ``confirm`` are migrated by the
+    0015 migration (the flag is dropped silently — every persisted
+    Delete already had ``confirm`` as a no-op gate on the new
+    semantics).
+
+    ``reason`` is preserved for the audit log entry that every
+    successful delete emits via ``AuditService``. Operators
+    reading the audit trail see WHY a file was removed, not just
+    WHEN. The field is optional; when absent, the service
+    synthesizes a generic "Deleted by rule" reason so the audit
+    row still carries something readable.
     """
 
     model_config = ConfigDict(extra="forbid")
     type: Literal["delete"]
-    confirm: bool = Field(
-        default=False,
+    reason: str | None = Field(
+        default=None,
+        max_length=256,
         description=(
-            "Hard delete switch. False (default) = soft-delete "
-            "(quarantine + flag); True = move the file to "
-            "data_dir/trash/ and remove the MediaFile row."
+            "Human-readable reason recorded in the audit log "
+            "entry for the delete. Optional but recommended — "
+            "the audit trail surfaces this verbatim."
         ),
     )
 
 
+# Stage 05 (v1.7) — the ``Quarantine`` action class is removed.
+# Stored rule bodies that referenced ``type: "quarantine"`` are
+# rewritten to ``type: "delete"`` during the 0015 migration; new
+# rule submissions that include ``type: "quarantine"`` fail
+# validation because that literal is no longer in the
+# discriminated union below.
+
 Action = Annotated[
-    Union[SetSeverity, AddTag, QueueOptimization, Notify, Quarantine, Delete],
+    Union[SetSeverity, AddTag, QueueOptimization, Notify, Delete],
     Field(discriminator="type"),
 ]
 
 
 # ── Top-level rule ────────────────────────────────────────────────────
 class RuleDefinition(BaseModel):
-    """The body of a rule, validated on save and on load."""
+    """The body of a rule, validated on save and on load.
+
+    Stage 06 (v1.7) — destructive-action acknowledgement.
+
+    Per addendum A.0.1: a rule that contains any ``delete`` action
+    MUST carry an ``acknowledged_destructive: true`` flag at the
+    rule level. This is the defensive layer that replaced the
+    pre-Stage-05 ``Delete.confirm`` flag — the operator
+    acknowledges, once per rule, that this rule will remove
+    files. Without the acknowledgement, the API refuses to save.
+
+    The acknowledgement is at the rule level (not the action
+    level) deliberately: a rule may have multiple delete
+    actions through aggregation, and the operator's intent is
+    "I understand this rule deletes files", not "I confirm each
+    individual delete action". The visual rule builder surfaces
+    this as a single checkbox labeled "I understand this rule
+    deletes files from disk."
+
+    Rules without any delete action MUST NOT carry
+    ``acknowledged_destructive: true`` — that would be
+    misleading. The validator rejects bodies that set the flag
+    without a corresponding delete action.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     match: Match
     actions: list[Action] = Field(min_length=1)
+    acknowledged_destructive: bool = Field(
+        default=False,
+        description=(
+            "Operator acknowledges this rule will delete files "
+            "from disk. Required when ``actions`` contains any "
+            "``delete`` action; forbidden otherwise."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_destructive_ack(self) -> "RuleDefinition":
+        """Stage 06 (v1.7) — destructive-action acknowledgement.
+
+        ``model_validator(mode="after")`` runs after all fields are
+        populated (including defaults), so the check fires even
+        when the operator omits ``acknowledged_destructive`` from
+        the request body — that's the common case we care about
+        rejecting."""
+        has_delete = any(
+            getattr(a, "type", None) == "delete" for a in self.actions
+        )
+        if has_delete and not self.acknowledged_destructive:
+            raise ValueError(
+                "Rules containing a 'delete' action require "
+                "acknowledged_destructive: true at the rule level. "
+                "This is the Stage 06 v1.7 defensive layer that "
+                "replaced the retired Delete.confirm flag."
+            )
+        if self.acknowledged_destructive and not has_delete:
+            raise ValueError(
+                "acknowledged_destructive: true is forbidden on "
+                "rules without a 'delete' action; set it only on "
+                "rules that actually delete files."
+            )
+        return self
 
 
 # Forward refs for self-referencing combinators.

@@ -26,6 +26,8 @@ from __future__ import annotations
 from typing import Awaitable, Callable
 
 import httpx
+
+from app.core.http import async_client
 import structlog
 
 log = structlog.get_logger(category="secrets")
@@ -42,7 +44,7 @@ async def _test_virustotal_api_key(plaintext: str) -> tuple[bool, str]:
     url = "https://www.virustotal.com/api/v3/users/me"
     headers = {"x-apikey": plaintext, "Accept": "application/json"}
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with async_client(timeout=10) as client:
             r = await client.get(url, headers=headers)
     except httpx.HTTPError as exc:
         # Network failure, DNS, timeout — distinguishable from an

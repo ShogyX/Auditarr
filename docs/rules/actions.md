@@ -14,8 +14,10 @@ When a rule matches, every entry in its `actions` array runs. Actions
 are applied in order but each is **independent** — a failure in one
 does not abort the others. Across many rules matching the same file,
 results are aggregated: tags accumulate (deduped); severity escalates
-to the highest matched value; quarantine is a one-way switch (once
-any rule quarantines, the file stays quarantined).
+to the highest matched value; a `delete` action by any matched rule
+removes the file (delete is one-way — once any rule deletes, the row
+and file are gone). The pre-Stage-05 `quarantine` aggregation is gone
+along with the action itself.
 
 The full vocabulary is published by the backend at
 `GET /api/v1/rules/vocabulary` and rendered by the visual rule
@@ -70,49 +72,64 @@ the active channel.
 The `channel` is required; `message` is optional (defaults to a
 generic format string derived from the rule name).
 
-### `quarantine` <span class="pill">Stage 9</span>
+### `quarantine` <span class="pill">Removed in Stage 05 (v1.7)</span>
 
-Flag the file as quarantined. Emits `media.quarantined` for any
-listening consumer. Quarantined files are hidden from the default
-files view but remain in the index.
+**The `quarantine` action no longer exists.** It was retired in
+Stage 05 (Section A.0 of the v1.7 addendum) along with the rest
+of the quarantine workflow — "delete means delete."
 
-```json
-{ "type": "quarantine", "reason": "Unwanted codec" }
-```
+If your rule used to quarantine, you have two paths now:
 
-`reason` is optional but **highly recommended** — it persists on
-the file row so an operator scanning the quarantine list later can
-tell which rule caught it. If multiple rules quarantine the same
-file, the first non-null reason wins.
+  * Tag the matched files (`add_tag`) and let the operator
+    review the tagged set.
+  * If you want the file gone, use a `delete` action with a
+    descriptive `reason`. The audit log records every removal.
 
-### `delete` <span class="pill">Stage 9</span>
+The 0015 migration rewrites stored `type: "quarantine"`
+actions to `type: "delete"` automatically (the `reason` is
+preserved), so existing rules don't break on upgrade — but the
+behaviour change is significant: those rules now hard-delete
+instead of flagging. Review your rule set after upgrading.
+
+### `delete` <span class="pill">Stage 9 / updated Stage 05 (v1.7)</span>
 
 Move the file to the trash directory and remove its index row.
+**Unconditional** — Stage 05 retired the pre-v1.7 `confirm`
+flag that used to gate hard delete vs. soft delete (the soft
+path was quarantine, which is also gone).
 
 ```json
-{ "type": "delete", "confirm": true }
+{ "type": "delete", "reason": "Plex incompatible codec" }
 ```
 
-**The `confirm` flag is intentional defensiveness.** Without it
-(`confirm` omitted or false), the action falls back to a
-**soft delete**: the file is quarantined and flagged for review, but
-neither the file nor its row is removed. Only `confirm: true`
-triggers the destructive path.
+`reason` is optional but **strongly recommended** — it lands
+verbatim in the `file.deleted` audit-log entry that the rule
+service writes for every successful delete. Operators reading
+the audit trail see WHY a file was removed, not just WHEN.
 
-When `confirm: true`:
+When a `delete` action matches:
 
 1. The file is moved (`shutil.move`) to `data_dir/trash/{id}__{name}`.
    The numeric id prefix prevents same-name collisions across libraries.
-2. The `MediaFile` row is removed from the database.
-3. `media.deleted` is emitted.
+2. An audit-log entry is written (`action: "file.deleted"`,
+   `actor_label: "rules"`, `metadata: { path, reason, trash_path }`).
+3. The `MediaFile` row is removed from the database.
+4. `media.deleted` is emitted on the event bus with the reason.
 
-**Filesystem failures are non-fatal.** If the move fails (permission,
-disk full, target conflict), the failure is logged at `rules.hard_delete.failed`
-and the row is **preserved**. You never lose both the file and its
-index entry in the same operation.
+**Filesystem failures are non-fatal.** If the move fails
+(permission, disk full, target conflict), the failure is logged
+at `rules.hard_delete.failed` and the row is **preserved**. You
+never lose both the file and its index entry in the same
+operation.
 
-The trash directory accumulates files; emptying it is the operator's
-responsibility — Stage 14 will surface a UI affordance.
+**Audit-log failures are non-fatal at the file level** — if the
+audit write fails for some reason, the file has already moved to
+trash and the row gets removed regardless. The audit failure is
+logged loudly at `rules.hard_delete.audit_failed` so an operator
+notices the gap.
+
+The trash directory accumulates files; emptying it is the
+operator's responsibility — Stage 14 will surface a UI affordance.
 
 ## Visual rule builder
 
@@ -120,9 +137,10 @@ The visual builder at `/rules/{id}/edit` renders every action type
 the backend vocabulary publishes, so any new action added in a
 future stage shows up automatically without any frontend change.
 
-For the `delete` action specifically, the builder renders `confirm`
-as a labeled checkbox with the hint text visible inline — the
-hard-delete semantics is too consequential to bury in a placeholder.
+For the `delete` action specifically, the builder renders the
+optional `reason` as a labeled text input. Stage 05 retired the
+old `confirm` checkbox — the hard-delete semantics no longer
+have a gating flag to expose.
 
 ## Notes for plugin authors
 

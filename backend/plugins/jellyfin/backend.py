@@ -23,14 +23,21 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.integrations.path_mapping import PATH_MAPPINGS_SCHEMA_FRAGMENT
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
     IntegrationProvider,
+    JobSubmitResult,
+    LivePlaybackDTO,
     PlaybackEventDTO,
     TagSync,
+    TranscodeJobSpec,
+    TranscodeJobStatus,
+    TranscodeProfileSummary,
 )
 from app.plugins import Plugin, PluginContext
 
@@ -66,6 +73,20 @@ class JellyfinProvider(IntegrationProvider):
                 "maximum": 120,
             },
             "path_mappings": PATH_MAPPINGS_SCHEMA_FRAGMENT,
+            "source_whitelist": {
+                "type": "array",
+                "title": "Inbound webhook source whitelist",
+                "description": (
+                    "Stage 11 (v1.7) — optional. One entry per line: "
+                    "IP, CIDR range, or hostname. When set, the "
+                    "inbound webhook endpoint for this integration "
+                    "rejects requests from any source NOT in the "
+                    "list (HTTP 403). Leave blank for the default "
+                    "behaviour (no source check)."
+                ),
+                "items": {"type": "string"},
+                "default": [],
+            },
         },
     }
     secret_fields: tuple[str, ...] = ("api_key",)
@@ -80,7 +101,7 @@ class JellyfinProvider(IntegrationProvider):
         api_key = str(config.secrets.get("api_key", "")).strip()
         if not api_key:
             raise ValueError("Jellyfin integration is missing 'api_key'")
-        return httpx.AsyncClient(
+        return async_client(
             base_url=base_url,
             timeout=float(config.options.get("timeout_seconds", 15)),
             verify=bool(config.options.get("verify_ssl", True)),
@@ -208,6 +229,95 @@ class JellyfinProvider(IntegrationProvider):
                 events.append(event)
         return events
 
+    # ── Stage 09 (v1.7) — live (in-progress) playback ────────────
+    async def fetch_live_playbacks(
+        self, config: IntegrationConfig
+    ) -> list[LivePlaybackDTO]:
+        """Stage 09 (plan §483): return Jellyfin's currently-
+        active sessions via ``/Sessions``.
+
+        Jellyfin's design means "live" and "the source of
+        historical events" are the same surface — a session is
+        only visible while it's active. We poll with
+        ``activeWithinSeconds=60`` (tighter than the
+        15-minute historical poll) so the tile shows what's
+        playing *right now*, not what played a few minutes ago.
+        """
+        async with self._client(config) as client:
+            try:
+                response = await client.get(
+                    "/Sessions",
+                    params={"activeWithinSeconds": 60},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                self._log.warning(
+                    "jellyfin.live.fetch_failed", error=str(exc)
+                )
+                return []
+            try:
+                sessions = response.json() or []
+            except ValueError:
+                return []
+
+        live: list[LivePlaybackDTO] = []
+        for session in sessions:
+            dto = _jellyfin_session_to_live_dto(session)
+            if dto is not None:
+                live.append(dto)
+        return live
+
+    # ── Stage 08 (v1.7) — transcode hand-off shim ────────────────
+    # Plan §443: "Jellyfin's hand-off model is more limited;
+    # degrade to 'Auditarr cannot hand jobs to Jellyfin — please
+    # use Tdarr or in-process'." We expose the methods on the
+    # Protocol so the worker's hasattr() check doesn't fall back
+    # to the silent "unsupported" path, but each one returns the
+    # documented refusal so operators get a clear, actionable
+    # message in the UI rather than a transparent no-op.
+    _JELLYFIN_HANDOFF_REFUSAL = (
+        "Auditarr cannot hand transcode jobs to Jellyfin — "
+        "Jellyfin's API does not currently expose a job-submission "
+        "endpoint. Switch this profile's routing_target to "
+        "'tdarr' or 'in_process'."
+    )
+
+    async def submit_transcode_job(
+        self,
+        _config: IntegrationConfig,
+        _job_spec: TranscodeJobSpec,
+    ) -> JobSubmitResult:
+        """Refuse cleanly per plan §443."""
+        return JobSubmitResult(
+            status="rejected",
+            detail=self._JELLYFIN_HANDOFF_REFUSAL,
+        )
+
+    async def list_transcode_profiles(
+        self, _config: IntegrationConfig
+    ) -> list[TranscodeProfileSummary]:
+        """Empty list — no provider-side profiles to enumerate.
+        The Auditarr profile editor renders "(no profiles
+        available)" plus a small note pointing the operator at
+        the refusal message."""
+        return []
+
+    async def get_transcode_job_status(
+        self,
+        _config: IntegrationConfig,
+        _upstream_job_id: str,
+    ) -> TranscodeJobStatus:
+        """Failed terminal state — Jellyfin can't have queued
+        the job in the first place, so any poll for a Jellyfin
+        upstream_job_id is a misconfiguration on the Auditarr
+        side. Surface that explicitly so the worker can flip
+        the item to ``failed`` with the operator-actionable
+        detail rather than spinning on ``unknown`` forever."""
+        return TranscodeJobStatus(
+            status="failed",
+            detail=self._JELLYFIN_HANDOFF_REFUSAL,
+        )
+
 
 def _jellyfin_session_to_event(
     session: dict, cutoff: _dt.datetime
@@ -327,6 +437,127 @@ def _jellyfin_session_to_event(
         )
     except (AttributeError, TypeError, ValueError, KeyError):
         return None
+
+
+def _jellyfin_session_to_live_dto(session: dict) -> LivePlaybackDTO | None:
+    """Stage 09 (v1.7) — translate one Jellyfin ``/Sessions``
+    entry → :class:`LivePlaybackDTO`.
+
+    Differs from :func:`_jellyfin_session_to_event` in two ways:
+      1. Returns None when there's no ``NowPlayingItem`` (the
+         session is idle); the live tile only shows actively-
+         playing sessions, never just-connected clients.
+      2. Captures progress + state explicitly so the tile can
+         show "playing / paused / buffering" and a percent bar.
+    """
+    if not isinstance(session, dict):
+        return None
+    item = session.get("NowPlayingItem")
+    if not isinstance(item, dict):
+        return None
+    session_id = session.get("Id")
+    if not session_id:
+        return None
+    source_path = item.get("Path")
+    if not source_path or not isinstance(source_path, str):
+        return None
+
+    play_state = session.get("PlayState") or {}
+    if not isinstance(play_state, dict):
+        play_state = {}
+
+    # Decision: Jellyfin reports ``TranscodingInfo`` only when a
+    # transcode is in flight; the inner fields tell us whether
+    # video or audio is being re-encoded vs remuxed.
+    transcoding = session.get("TranscodingInfo") or {}
+    if isinstance(transcoding, dict) and transcoding:
+        if (
+            transcoding.get("IsVideoDirect") is False
+            or transcoding.get("IsAudioDirect") is False
+        ):
+            decision = "transcode"
+        else:
+            # TranscodingInfo present but both streams are
+            # direct → remux only.
+            decision = "direct_stream"
+    else:
+        decision = "direct_play"
+
+    # Started: PlayState doesn't track start time directly.
+    # Fall back to LastActivityDate, then "now".
+    started_at = (
+        _parse_jellyfin_ts(session.get("LastActivityDate"))
+        or _dt.datetime.now(_dt.UTC)
+    )
+
+    # State: PlayState.IsPaused → "paused"; otherwise default
+    # to "playing". Jellyfin doesn't expose a buffering state
+    # on this endpoint.
+    state = "paused" if play_state.get("IsPaused") else "playing"
+
+    # Progress: PlayState.PositionTicks vs Item.RunTimeTicks.
+    # Both are .NET ticks (100ns each). Watch out for zero
+    # runtime (live TV, music tracks that don't report it).
+    position_ticks = _safe_int(play_state.get("PositionTicks"))
+    runtime_ticks = _safe_int(item.get("RunTimeTicks"))
+    if (
+        position_ticks is not None
+        and runtime_ticks is not None
+        and runtime_ticks > 0
+    ):
+        progress_pct = max(
+            0.0,
+            min(100.0, round(position_ticks / runtime_ticks * 100, 1)),
+        )
+    else:
+        progress_pct = None
+
+    # Stream-detail extraction. Jellyfin nests source streams
+    # under MediaSources[0].MediaStreams. Pick the video stream
+    # for codec/dimensions; container is on the MediaSource.
+    media_sources = item.get("MediaSources") or []
+    first_source: dict = (
+        media_sources[0]
+        if media_sources and isinstance(media_sources[0], dict)
+        else {}
+    )
+    streams = first_source.get("MediaStreams") or []
+    video_stream: dict = {}
+    for s in streams:
+        if isinstance(s, dict) and s.get("Type") == "Video":
+            video_stream = s
+            break
+
+    return LivePlaybackDTO(
+        upstream_id=str(session_id),
+        source_path=source_path,
+        decision=decision,
+        started_at=started_at,
+        state=state,
+        progress_pct=progress_pct,
+        user=session.get("UserName") or None,
+        device_kind=session.get("Client") or None,
+        device_name=session.get("DeviceName") or None,
+        source_codec=video_stream.get("Codec"),
+        source_bitrate_kbps=_safe_int(
+            first_source.get("Bitrate") and first_source["Bitrate"] // 1000
+        )
+        if first_source.get("Bitrate")
+        else None,
+        source_width=_safe_int(video_stream.get("Width")),
+        source_height=_safe_int(video_stream.get("Height")),
+        source_container=first_source.get("Container"),
+        target_codec=transcoding.get("VideoCodec")
+        if isinstance(transcoding, dict)
+        else None,
+        target_bitrate_kbps=_safe_int(
+            transcoding.get("Bitrate")
+            and transcoding["Bitrate"] // 1000
+        )
+        if isinstance(transcoding, dict) and transcoding.get("Bitrate")
+        else None,
+        title=item.get("Name"),
+    )
 
 
 def _jellyfin_reason_to_code(raw: str) -> str:

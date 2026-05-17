@@ -130,6 +130,82 @@ async def _run_evaluate_library(
     }
 
 
+# ── Stage 10 (v1.7) — VirusTotal queue drain ──────────────────
+async def _run_drain_vt_queue(
+    session: AsyncSession,
+    args: dict[str, Any],
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Drain :data:`vt_queue` against the configured VT
+    integration.
+
+    Looks up the enabled VirusTotal integration row, decrypts
+    its API key, and delegates the per-row work to
+    :func:`plugins.virustotal.backend.drain_vt_queue`.
+
+    No-op (returns ``{"reason": "no_vt_integration"}``) when
+    no enabled VT integration is configured — the operator
+    can schedule this job pre-emptively without it failing
+    loudly.
+    """
+    from sqlalchemy import select
+
+    from app.models.integration import Integration
+    from plugins.virustotal.backend import (
+        VT_DAILY_CEILING_DEFAULT,
+        VT_DRAIN_DEFAULT_BATCH_SIZE,
+        VT_MONTHLY_CEILING_DEFAULT,
+        drain_vt_queue,
+    )
+
+    integration = (
+        await session.execute(
+            select(Integration)
+            .where(Integration.kind == "virustotal")
+            .where(Integration.enabled.is_(True))
+            .order_by(Integration.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if integration is None:
+        return {"reason": "no_vt_integration", "examined": 0}
+
+    manager = IntegrationManager(
+        session=session,
+        registry=ctx["registry"],
+        secret_box=get_secret_box(),
+        event_bus=ctx["bus"],
+    )
+    config = manager.build_config(integration)
+    api_key = str(config.secrets.get("api_key", "")).strip()
+    if not api_key:
+        return {"reason": "missing_api_key", "examined": 0}
+
+    options = config.options or {}
+    daily_quota = int(
+        options.get("daily_quota") or VT_DAILY_CEILING_DEFAULT
+    )
+    monthly_quota = int(
+        options.get("monthly_quota") or VT_MONTHLY_CEILING_DEFAULT
+    )
+    timeout = float(options.get("timeout_seconds") or 10)
+    batch_size = int(
+        args.get("batch_size") or VT_DRAIN_DEFAULT_BATCH_SIZE
+    )
+
+    counters = await drain_vt_queue(
+        session,
+        integration_id=integration.id,
+        api_key=api_key,
+        daily_quota=daily_quota,
+        monthly_quota=monthly_quota,
+        timeout=timeout,
+        batch_size=batch_size,
+        event_bus=ctx["bus"],
+    )
+    return counters
+
+
 # ── Registration ─────────────────────────────────────────────
 def register_builtin_jobs(catalogue: JobCatalogue) -> None:
     """Populate the catalogue with the jobs that ship in-box."""
@@ -243,5 +319,40 @@ def register_builtin_jobs(catalogue: JobCatalogue) -> None:
             required_args=("library_id",),
             timeout_seconds=600,
             runner=_run_evaluate_library,
+        )
+    )
+
+    # ── Stage 10 (v1.7) — VirusTotal queue drain ─────────────────
+    catalogue.register(
+        JobSpec(
+            key="drain_vt_queue",
+            label="Drain VirusTotal queue",
+            description=(
+                "Pull up to N entries from vt_queue, look each up "
+                "against VirusTotal, and persist the result onto "
+                "the matched MediaFile. Honours the 3-window quota "
+                "(per-minute / per-day / per-month)."
+            ),
+            args_schema={
+                "type": "object",
+                "properties": {
+                    "batch_size": {
+                        "type": "integer",
+                        "title": "Batch size",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 200,
+                        "description": (
+                            "How many queue entries to process per "
+                            "tick. The free-tier per-minute ceiling "
+                            "is 4 — 20 batches comfortably inside a "
+                            "5-minute schedule."
+                        ),
+                    },
+                },
+            },
+            required_args=(),
+            timeout_seconds=300,
+            runner=_run_drain_vt_queue,
         )
     )

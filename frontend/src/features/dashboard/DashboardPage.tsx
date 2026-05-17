@@ -61,6 +61,11 @@ import { useUiStore } from "@/stores/uiStore";
 import { PlaybackStatsCard } from "@/features/playback/PlaybackStatsCard";
 
 import { CategoriesCard } from "./CategoriesCard";
+import {
+  DashboardCardMenu,
+  DashboardDisabledRail,
+} from "./DashboardCardMenu";
+import { LiveNowCard } from "./LiveNowCard";
 import { RangeToggle, type RangeDays } from "./RangeToggle";
 import { SuggestionReviewModal } from "./SuggestionReviewModal";
 import { SuggestionsCard } from "./SuggestionsCard";
@@ -140,6 +145,10 @@ export function DashboardPage() {
   const toggleSection = useUiStore((s) => s.toggleDashboardSection);
   const resetLayout = useUiStore((s) => s.resetDashboardLayout);
   const isHidden = (key: string) => dashboardHidden.includes(key);
+  // Stage 13 (plan §606) — cards moved to the disabled rail
+  // are skipped from the active grid entirely.
+  const dashboardDisabled = useUiStore((s) => s.dashboardDisabled);
+  const isDisabled = (key: string) => dashboardDisabled.includes(key);
 
   // Stage 14.1: derive integrity score client-side from severity counts.
   const integrityScore = overview.data
@@ -355,7 +364,13 @@ export function DashboardPage() {
                 }
                 sparkSeries={series.data?.issues_opened}
                 tone={overview.data.issues_open > 0 ? "warn" : "ok"}
-                to="/files"
+                /* Stage 02 — pre-filter the Files page to the
+                   actionable severities so the click lands the
+                   operator on something useful. ``ok`` and ``info``
+                   are intentionally excluded — they're not what
+                   "open issues" means. The Stage 02 deep-link parser
+                   accepts a comma-separated list. */
+                to="/files?severity=warn,high,error,crit"
               />
             </div>
 
@@ -372,38 +387,46 @@ export function DashboardPage() {
             </div>
 
             {/* ── Severity heatmap ── */}
-            <Card>
-              <CardHead
-                title="Severity distribution"
-                subtitle={`${fmtNum(overview.data.severity_counts.total)} files across all libraries`}
-                actions={
-                  <CollapseChevron
-                    hidden={isHidden("severity")}
-                    onClick={() => toggleSection("severity")}
-                    label="Severity distribution"
-                  />
-                }
-              />
-              {!isHidden("severity") ? (
-                <CardBody className="py-3">
-                  {overview.data.severity_counts.total > 0 ? (
-                    <SeverityHeatmap
-                      data={severityData}
-                      onPick={(s) => navigate(`/files?severity=${s.key}`)}
-                    />
-                  ) : (
-                    <div className="text-[12.5px] text-muted-2">
-                      No files yet — add a library and run a scan.
-                    </div>
-                  )}
-                </CardBody>
-              ) : null}
-            </Card>
+            {!isDisabled("severity") ? (
+              <Card>
+                <CardHead
+                  title="Severity distribution"
+                  subtitle={`${fmtNum(overview.data.severity_counts.total)} files across all libraries`}
+                  actions={
+                    <>
+                      <CollapseChevron
+                        hidden={isHidden("severity")}
+                        onClick={() => toggleSection("severity")}
+                        label="Severity distribution"
+                      />
+                      <DashboardCardMenu cardKey="severity" />
+                    </>
+                  }
+                />
+                {!isHidden("severity") ? (
+                  <CardBody className="py-3">
+                    {overview.data.severity_counts.total > 0 ? (
+                      <SeverityHeatmap
+                        data={severityData}
+                        onPick={(s) => navigate(`/files?severity=${s.key}`)}
+                      />
+                    ) : (
+                      <div className="text-[12.5px] text-muted-2">
+                        No files yet — add a library and run a scan.
+                      </div>
+                    )}
+                  </CardBody>
+                ) : null}
+              </Card>
+            ) : null}
           </>
         ) : null}
 
         {/* ── Stage 26: library composition ── */}
         <CategoriesCard />
+
+        {/* ── Stage 09 (v1.7): live playback ── */}
+        <LiveNowCard />
 
         {/* ── Stage 12 (audit follow-up): playback insights ── */}
         <PlaybackStatsCard />
@@ -433,11 +456,14 @@ export function DashboardPage() {
                 libraries.data ? `${libraries.data.length} configured` : undefined
               }
               actions={
-                <CollapseChevron
+                <>
+                  <CollapseChevron
                   hidden={isHidden("libraries")}
                   onClick={() => toggleSection("libraries")}
                   label="Libraries"
                 />
+                  <DashboardCardMenu cardKey="libraries" />
+                </>
               }
             />
             {!isHidden("libraries") ? (
@@ -472,11 +498,14 @@ export function DashboardPage() {
                   : undefined
               }
               actions={
-                <CollapseChevron
+                <>
+                  <CollapseChevron
                   hidden={isHidden("integrations")}
                   onClick={() => toggleSection("integrations")}
                   label="Integrations"
                 />
+                  <DashboardCardMenu cardKey="integrations" />
+                </>
               }
             />
             {!isHidden("integrations") ? (
@@ -529,12 +558,15 @@ export function DashboardPage() {
           <CardHead
             title="Top rules by match count"
             actions={
-              <CollapseChevron
+                <>
+                  <CollapseChevron
                 hidden={isHidden("top-rules")}
                 onClick={() => toggleSection("top-rules")}
                 label="Top rules"
               />
-            }
+                  <DashboardCardMenu cardKey="top-rules" />
+                </>
+              }
           />
           {!isHidden("top-rules") ? (
             <CardBodyFlush>
@@ -598,6 +630,10 @@ export function DashboardPage() {
           />
         </div>
       </div>
+
+      {/* Stage 13 (plan §607) — disabled cards rail. Renders
+          nothing when no cards are disabled. */}
+      <DashboardDisabledRail />
 
       {reviewing ? (
         <SuggestionReviewModal

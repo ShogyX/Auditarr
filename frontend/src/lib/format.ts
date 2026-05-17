@@ -35,7 +35,17 @@ export const fmtDur = (s: number | null | undefined): string => {
   return `${sec}s`;
 };
 
-/** Map a severity key (or arbitrary string) to its CSS class. */
+/** Map a severity key (or arbitrary string) to its CSS class.
+ *
+ * Stage 02 — every entry in the canonical ``SEVERITY_KEYS`` set
+ * (``ok info warn high error crit``) must map to a ``sev-*`` class,
+ * so the Files-table severity Pill paints with the same colour as
+ * the matching swatch on the scope bar (which uses
+ * ``var(--sev-<key>)`` directly). Before this stage the bare
+ * ``crit`` key fell through to ``sev ?? sev`` and rendered the bare
+ * class string ``crit`` which doesn't exist — so the pill picked
+ * up no colour at all.
+ */
 export const sevToClass: Record<string, string> = {
   ok: "sev-ok",
   info: "sev-info",
@@ -49,6 +59,7 @@ export const sevToClass: Record<string, string> = {
   unplayable: "sev-error",
   error: "sev-error",
   corrupt: "sev-error",
+  crit: "sev-crit",
   critical: "sev-crit",
   possible_malicious: "sev-crit",
 };

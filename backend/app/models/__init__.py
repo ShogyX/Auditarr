@@ -21,6 +21,7 @@ from app.models.playback import IntegrationPollingCursor, PlaybackEvent
 from app.models.plugin_settings import PluginSettings
 from app.models.rule import Rule
 from app.models.rule_evaluation import RuleEvaluation
+from app.models.rule_notification_window import RuleNotificationWindow
 from app.models.rule_suggestion import RuleSuggestion
 from app.models.runtime_setting import (
     EncryptedSecret,
@@ -34,6 +35,7 @@ from app.models.tag import MediaTag
 from app.models.update_apply import UpdateApply
 from app.models.update_check import UpdateCheck
 from app.models.user import User
+from app.models.vt_queue import VtQueueItem
 
 __all__ = [
     "AuditLogEntry",
@@ -55,6 +57,7 @@ __all__ = [
     "RefreshSession",
     "Rule",
     "RuleEvaluation",
+    "RuleNotificationWindow",
     "RuleSuggestion",
     "RuntimeSettingChange",
     "RuntimeSettingOverride",
@@ -65,4 +68,5 @@ __all__ = [
     "UpdateApply",
     "UpdateCheck",
     "User",
+    "VtQueueItem",
 ]

@@ -52,6 +52,9 @@ export function CategoriesCard() {
   // owns its own key. Reading uiStore here keeps DashboardPage
   // from needing to pass props down to every card.
   const hidden = useUiStore((s) => s.dashboardHidden.includes("categories"));
+  // Stage 13 (plan §606) — when the operator moves this
+  // card to the disabled rail, skip the whole render.
+  const disabled = useUiStore((s) => s.dashboardDisabled.includes("categories"));
   const toggle = useUiStore((s) => s.toggleDashboardSection);
 
   // Partition rows by group so we can render section headers and
@@ -67,6 +70,10 @@ export function CategoriesCard() {
     }
     return out;
   }, [categories.data]);
+
+  // Early-return AFTER all hooks (react-hooks/rules-of-hooks
+  // requires the hook count to be stable across renders).
+  if (disabled) return null;
 
   return (
     <Card>
@@ -193,7 +200,18 @@ function CategoryRow({
   );
 
   if (isUnknown) {
-    return <li className="categories-row">{body}</li>;
+    // Stage 04 (v1.7) — wrap in a static div with the same grid
+    // template as ``.categories-row-link`` so the unknown row's
+    // bar, size and count line up visually with linked rows. Before
+    // this change, the outer ``<li>`` carried the grid and the
+    // unknown row's four children sat directly in the li grid,
+    // while linked rows packed their content into a single
+    // ``<a>`` child — different column origins, visible offset.
+    return (
+      <li className="categories-row">
+        <div className="categories-row-static">{body}</div>
+      </li>
+    );
   }
 
   const href = `/files?${row.group}=${encodeURIComponent(row.key)}`;

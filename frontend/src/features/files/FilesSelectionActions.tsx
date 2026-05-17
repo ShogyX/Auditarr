@@ -4,7 +4,8 @@
  * Extracted from the inline ``SelectionActions`` in ``FilesPage.tsx``.
  * Renders the contextual action row that appears in the toolbar when
  * one or more rows are selected: Re-evaluate · Optimize · Re-probe ·
- * Quarantine · Clear.
+ * Clear. Stage 27 originally added a Quarantine button here; Stage
+ * 05 (v1.7) retired it along with the quarantine workflow.
  *
  * The bulk mutation hooks are called directly from this component so
  * the page hook (``useFilesPageState``) doesn't need to know about
@@ -17,7 +18,6 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import {
-  useBulkQuarantine,
   useBulkReevaluate,
   useBulkReprobe,
 } from "@/hooks/useMedia";
@@ -37,9 +37,9 @@ export function FilesSelectionActions({
   onClear,
 }: FilesSelectionActionsProps) {
   const bulkReevaluate = useBulkReevaluate();
-  // Stage 27: re-probe + quarantine bulk mutations.
+  // Stage 27: re-probe bulk mutation. The quarantine bulk
+  // mutation that lived here pre-Stage-05 is gone (Section A.0).
   const bulkReprobe = useBulkReprobe();
-  const bulkQuarantine = useBulkQuarantine();
   // Keep a local ``running`` flag for the optimize picker so the
   // button can show a spinner while the picker's mutation is in flight.
   const [optimizing, setOptimizing] = useState(false);
@@ -100,43 +100,11 @@ export function FilesSelectionActions({
     }
   }
 
-  async function runQuarantine() {
-    // Prompt for an optional reason. Keep it light — a confirm dialog
-    // would gate the action on extra clicks the operator may not want;
-    // ``prompt`` lets them just hit Enter for "no reason given".
-    // Cancelling the prompt aborts the action entirely (window.prompt
-    // returns ``null`` on Cancel vs ``""`` on empty-Enter).
-    const reason = window.prompt(
-      `Quarantine ${selectedIds.size} file${selectedIds.size === 1 ? "" : "s"}? Optional reason:`,
-      "",
-    );
-    if (reason === null) return; // operator cancelled
-
-    try {
-      const result = await bulkQuarantine.mutateAsync({
-        mediaIds: Array.from(selectedIds),
-        reason: reason || undefined,
-      });
-      const missing = result.files_not_found.length;
-      toast(
-        missing > 0
-          ? `Quarantined ${result.files_quarantined} files (${missing} not found)`
-          : `Quarantined ${result.files_quarantined} file${
-              result.files_quarantined === 1 ? "" : "s"
-            }`,
-        missing > 0 ? "warn" : "ok",
-      );
-      onClear();
-    } catch (err) {
-      toast(
-        `Bulk quarantine failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-        "error",
-        5000,
-      );
-    }
-  }
+  // Stage 27's ``runQuarantine`` handler lived here. Stage 05
+  // (v1.7) retired the quarantine workflow (Section A.0 — "delete
+  // means delete"); the selection bar no longer offers a bulk
+  // quarantine button. Operators who want to remove a selection
+  // now write a rule with a Delete action.
 
   return (
     <div className="files-selection-bar">
@@ -161,7 +129,9 @@ export function FilesSelectionActions({
         isRunning={optimizing}
         onRunningChange={setOptimizing}
       />
-      {/* Stage 27: re-probe and quarantine are wired through. */}
+      {/* Stage 27: re-probe is wired through. The Stage 27
+          quarantine Button that sat here has been removed — see
+          ``runQuarantine`` comment above. */}
       <Button
         size="sm"
         onClick={runReprobe}
@@ -174,15 +144,6 @@ export function FilesSelectionActions({
           className={bulkReprobe.isPending ? "animate-spin" : undefined}
         />
         {bulkReprobe.isPending ? "Re-probing…" : "Re-probe"}
-      </Button>
-      <Button
-        size="sm"
-        variant="danger"
-        onClick={runQuarantine}
-        disabled={bulkQuarantine.isPending}
-        title="Mark selected files as quarantined. They're excluded from the default Files view but can be restored anytime."
-      >
-        <Icon name="trash" size={12} /> Quarantine
       </Button>
       <Button
         size="sm"

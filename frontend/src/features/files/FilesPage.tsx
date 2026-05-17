@@ -38,13 +38,19 @@ import { useHelpKey } from "@/hooks/useHelpKey";
 import { FileDetailDrawer } from "./FileDetailDrawer";
 import { FilesPager } from "./FilesPager";
 import { FilesRunScanButton } from "./FilesRunScanButton";
+import { FilesScanErrorBanner } from "./FilesScanErrorBanner";
 import { FilesScopeBar } from "./FilesScopeBar";
 import { FilesTable } from "./FilesTable";
 import { FilesToolbar } from "./FilesToolbar";
 import { useFilesPageState } from "./useFilesPageState";
 
 export function FilesPage() {
-  useHelpKey("rules.conditions");
+  // Stage 04 (v1.7) — was ``useHelpKey("rules.conditions")``,
+  // which made the in-app help drawer surface the rules-DSL
+  // condition reference when an operator hit "?" on the Files
+  // page. Files-page help should describe the Files page; this
+  // key resolves to ``docs/files/overview.md``.
+  useHelpKey("files.overview");
   const s = useFilesPageState();
 
   return (
@@ -52,7 +58,7 @@ export function FilesPage() {
       <PageHeader
         title="Files"
         sub="Browse, filter, and inspect every file Auditarr has indexed"
-        helpKey="rules.conditions"
+        helpKey="files.overview"
         actions={
           <>
             {/* Stage 8 (audit follow-up): the inline Pill was a
@@ -72,7 +78,14 @@ export function FilesPage() {
           </>
         }
       />
-      <div className="p-6 flex flex-col gap-4">
+      <div className="p-6 flex flex-col gap-4 files-page">
+        {/* v1.8.1: 409 banner with "Unstick library" action. */}
+        <FilesScanErrorBanner
+          error={s.triggerScan.error}
+          libraryId={s.libraryId}
+          resetting={s.resetLibraryScans.isPending}
+          onReset={(id) => s.resetLibraryScans.mutate(id)}
+        />
         <FilesScopeBar
           scope={s.scope}
           onScope={s.setScope}
@@ -100,8 +113,6 @@ export function FilesPage() {
               onLibrary={s.setLibraryId}
               category={s.category}
               onCategory={s.setCategory}
-              quarantineView={s.quarantineView}
-              onQuarantineView={s.setQuarantineView}
               search={s.search}
               onSearch={s.setSearch}
               activeCodecs={s.activeCodecs}
@@ -117,6 +128,10 @@ export function FilesPage() {
               selectionCount={s.selected.size}
               onClearSelection={s.clearSelection}
               selectedIds={s.selected}
+              showColumnFilters={s.showColumnFilters}
+              onToggleColumnFilters={() =>
+                s.setShowColumnFilters(!s.showColumnFilters)
+              }
             />
 
             <FilesTable
@@ -130,6 +145,11 @@ export function FilesPage() {
               allVisibleSelected={s.allVisibleSelected}
               someVisibleSelected={s.someVisibleSelected}
               onOpenDrawer={s.setDrawerFile}
+              columnWidths={s.columnWidths}
+              onColumnResize={s.setColumnWidth}
+              perColumnFilters={s.perColumnFilters}
+              onPerColumnFilterChange={s.setPerColumnFilter}
+              showColumnFilters={s.showColumnFilters}
             />
             {s.totalPages > 1 ? (
               <FilesPager

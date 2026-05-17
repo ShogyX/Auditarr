@@ -34,6 +34,8 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.core.logging import get_logger
 
 log = get_logger("auditarr.plugins.gallery", category="plugins")
@@ -91,7 +93,7 @@ def _coerce_plugin(item: dict[str, Any]) -> GalleryPlugin | None:
 async def fetch_gallery(url: str, *, timeout: float = 10.0) -> GalleryFeed:
     """Hit ``url`` and normalize the response."""
     try:
-        async with httpx.AsyncClient(
+        async with async_client(
             timeout=timeout,
             headers={"User-Agent": "auditarr-plugin-gallery"},
         ) as client:

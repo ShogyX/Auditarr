@@ -118,8 +118,15 @@ async def vocabulary(_user: CurrentUser) -> RuleVocabularyRead:
     # that lets the builder render a dropdown rather than a free-text
     # input. We hard-code the ones we know about; other strings stay
     # free-form.
+    #
+    # Stage 06 (v1.7) added ``vt_status`` to ``SUPPORTED_FIELDS`` with
+    # a fixed literal value set (per addendum B.4); surface those
+    # values here so the builder renders the right dropdown.
+    from app.rules.schema import VT_STATUS_VALUES
+
     enums: dict[str, list[str]] = {
         "category": ["media", "subtitle", "image", "metadata", "junk", "unknown"],
+        "vt_status": sorted(VT_STATUS_VALUES),
     }
 
     fields_out: list[RuleVocabularyField] = []
@@ -188,37 +195,59 @@ async def vocabulary(_user: CurrentUser) -> RuleVocabularyRead:
                     "maxLength": 512,
                     "required": False,
                 },
+                # Stage 06 (v1.7): optional notification throttle.
+                # Per plan §352 + the schema's ``NotifyThrottle``
+                # model: window_seconds >= 60, max_per_window >= 1.
+                # The builder renders this as a collapsed "Throttle"
+                # section that expands into two numeric inputs.
+                "throttle": {
+                    "type": "object",
+                    "required": False,
+                    "hint": (
+                        "Cap deliveries to N per rolling window. "
+                        "Beyond the cap, the rule emits "
+                        "``rule.throttled`` and audit-logs one "
+                        "summary entry per (rule, window)."
+                    ),
+                    "properties": {
+                        "window_seconds": {
+                            "type": "numeric",
+                            "minimum": 60,
+                            "required": True,
+                            "hint": "Window length (≥ 60 seconds)",
+                        },
+                        "max_per_window": {
+                            "type": "numeric",
+                            "minimum": 1,
+                            "required": True,
+                            "hint": (
+                                "Max notifications inside the window "
+                                "(≥ 1; use 0 by disabling the rule)"
+                            ),
+                        },
+                    },
+                },
             },
         ),
-        # Stage 9 (audit follow-up): quarantine + delete actions.
-        # Quarantine flags the row and emits ``media.quarantined``.
-        # Delete is intentionally gated by ``confirm=true`` — without
-        # it, the action soft-deletes (quarantine + flag). The UI
-        # must surface confirm prominently to operators.
+        # Stage 9 (audit follow-up), updated Stage 05 (v1.7): Stage
+        # 05 retired the Quarantine action entirely (Section A.0 —
+        # "delete means delete") and dropped Delete's ``confirm``
+        # flag. The Delete action is now unconditional; the
+        # operator-supplied ``reason`` flows to the audit log entry
+        # the service emits for every successful delete.
         RuleVocabularyAction(
-            type="quarantine",
-            label="Quarantine",
+            type="delete",
+            label="Delete",
             args_schema={
                 "reason": {
                     "type": "string",
                     "maxLength": 256,
                     "required": False,
-                    "hint": "Optional note persisted on the row (helpful for audit)",
-                },
-            },
-        ),
-        RuleVocabularyAction(
-            type="delete",
-            label="Delete",
-            args_schema={
-                "confirm": {
-                    "type": "boolean",
-                    "required": False,
                     "hint": (
-                        "Required for HARD delete (moves file to "
-                        "data_dir/trash/ and removes the row). Without "
-                        "this, the action soft-deletes (quarantine "
-                        "only). Set deliberately."
+                        "Optional human-readable reason recorded in "
+                        "the audit log when the rule deletes a file. "
+                        "Recommended so operators reviewing the audit "
+                        "trail see WHY a file was removed."
                     ),
                 },
             },
@@ -230,6 +259,24 @@ async def vocabulary(_user: CurrentUser) -> RuleVocabularyRead:
         ops=ops_by_type,
         severities=list(SEVERITY_LEVELS.keys()),
         actions=actions_out,
+        # Stage 06 (v1.7): rule-level flags the builder must
+        # surface. Today only the destructive-action ack flag
+        # (addendum A.0.1). Frontend renders it as a checkbox
+        # whose visibility is gated by whether any action in
+        # the rule's actions list is type=delete.
+        rule_flags={
+            "acknowledged_destructive": {
+                "type": "bool",
+                "label": "I understand this rule deletes files from disk.",
+                "required_when": {"any_action_type": "delete"},
+                "hint": (
+                    "Auditarr's defensive layer for destructive rules. "
+                    "A rule containing a 'delete' action will not save "
+                    "without this acknowledgement. The flag is forbidden "
+                    "on rules that don't contain a delete action."
+                ),
+            },
+        },
     )
 
 
@@ -390,6 +437,12 @@ async def run_analyzer(
         skipped_dismissed=outcome.skipped_dismissed,
         skipped_deployed=outcome.skipped_deployed,
         skipped_too_few_events=outcome.skipped_too_few_events,
+        # Stage 09 (plan §482) — surface the count split so the
+        # recommendation card shows the true total and a
+        # path-mapping hint when applicable.
+        examined_events_total=outcome.examined_events_total,
+        examined_events_resolved=outcome.examined_events_resolved,
+        examined_events_unresolved=outcome.examined_events_unresolved,
     )
 
 

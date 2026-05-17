@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
@@ -73,7 +75,7 @@ class BazarrProvider(IntegrationProvider):
         api_key = str(config.secrets.get("api_key", "")).strip()
         if not api_key:
             raise ValueError("Bazarr integration is missing 'api_key'")
-        return httpx.AsyncClient(
+        return async_client(
             base_url=base_url,
             timeout=float(config.options.get("timeout_seconds", 15)),
             verify=bool(config.options.get("verify_ssl", True)),

@@ -190,6 +190,19 @@ class Settings(BaseSettings):
     # other tools against the same account.
     virustotal_daily_quota: int = 250
 
+    # ── Optimization (Stage 07 v1.7) ──────────────────────────
+    # Master switch for the in-process ffmpeg worker. When False,
+    # the worker fails any item whose profile has
+    # ``routing_target='in_process'`` with a clear error. Profiles
+    # routed to plex/jellyfin/tdarr are unaffected. Override-able
+    # at runtime via the runtime-settings API.
+    optimization_in_process_runner_enabled: bool = True
+    # Stage 08 (v1.7): operator-controlled dismissal of the
+    # "no hardware acceleration detected" banner. False by default
+    # (banner shows). The dashboard reads this; the startup probe
+    # writes nothing to it.
+    optimization_hwaccel_warning_acknowledged: bool = False
+
     @field_validator("allowed_origins", mode="before")
     @classmethod
     def _split_origins(cls, v: object) -> object:

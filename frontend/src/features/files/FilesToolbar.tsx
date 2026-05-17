@@ -25,7 +25,7 @@ import {
   type FilesColumnKey,
 } from "@/stores/filesPrefsStore";
 
-import { CATEGORY_OPTIONS, type QuarantineView } from "./filesShared";
+import { CATEGORY_OPTIONS } from "./filesShared";
 import { CodecFilterMenu } from "./CodecFilterMenu";
 import { ColumnVisibilityMenu } from "./ColumnVisibilityMenu";
 import { FilesSelectionActions } from "./FilesSelectionActions";
@@ -36,8 +36,10 @@ export interface FilesToolbarProps {
   onLibrary: (v: string) => void;
   category: string;
   onCategory: (v: string) => void;
-  quarantineView: QuarantineView;
-  onQuarantineView: (v: QuarantineView) => void;
+  // Stage 27's ``quarantineView`` + ``onQuarantineView`` props
+  // lived here. Stage 05 (v1.7) retired the quarantine workflow
+  // (Section A.0 — "delete means delete"); the toolbar no longer
+  // exposes a quarantine select.
   search: string;
   onSearch: (v: string) => void;
   /** Stage 31: codec + container filter sets. The picker lives in its
@@ -56,6 +58,12 @@ export interface FilesToolbarProps {
   selectionCount: number;
   selectedIds: Set<string>;
   onClearSelection: () => void;
+  /** Stage 02 — per-column filter row toggle. When true, the
+   *  ``<FilesTable>`` renders a filter input beneath each
+   *  sortable column header. Defaults off so the toolbar shows
+   *  the same on a fresh install. */
+  showColumnFilters?: boolean;
+  onToggleColumnFilters?: () => void;
 }
 
 export function FilesToolbar(props: FilesToolbarProps) {
@@ -65,8 +73,6 @@ export function FilesToolbar(props: FilesToolbarProps) {
     onLibrary,
     category,
     onCategory,
-    quarantineView,
-    onQuarantineView,
     search,
     onSearch,
     activeCodecs,
@@ -82,6 +88,8 @@ export function FilesToolbar(props: FilesToolbarProps) {
     selectionCount,
     selectedIds,
     onClearSelection,
+    showColumnFilters = false,
+    onToggleColumnFilters,
   } = props;
 
   return (
@@ -129,22 +137,9 @@ export function FilesToolbar(props: FilesToolbarProps) {
         ))}
       </select>
 
-      {/* Stage 27: quarantine view mode. Tri-state because operators
-          want three different views: normal (hide), audit (only),
-          and "show me everything" (include). A boolean toggle
-          couldn't express the "only quarantined" case, which is the
-          most operationally useful — it's the dedicated review
-          surface where the operator decides what to release. */}
-      <select
-        className="settings-input"
-        value={quarantineView}
-        onChange={(e) => onQuarantineView(e.target.value as QuarantineView)}
-        aria-label="Quarantine view mode"
-      >
-        <option value="hide">Hide quarantined</option>
-        <option value="include">Include quarantined</option>
-        <option value="only">Quarantined only</option>
-      </select>
+      {/* Stage 27 rendered a tri-state quarantine view select here
+          (hide/include/only). Stage 05 (v1.7) removed it — the
+          quarantine workflow it served is gone. */}
 
       {/* Stage 31: codec + container picker. Lives between the
           built-in <select>s and the column-visibility menu — its
@@ -163,6 +158,33 @@ export function FilesToolbar(props: FilesToolbarProps) {
       <span className="text-[12px] text-muted whitespace-nowrap">
         {fmtNum(shown)} of {fmtNum(total)} files
       </span>
+
+      {/* Stage 02 — per-column filter toggle. Renders a small icon
+          button between the count and the column-visibility menu.
+          Off by default; pressing it surfaces the filter row in
+          the table header. Kept optional so existing test mounts
+          of FilesToolbar without these props still work. */}
+      {onToggleColumnFilters ? (
+        <button
+          type="button"
+          className="settings-input flex items-center gap-1 px-2"
+          aria-pressed={showColumnFilters}
+          aria-label={
+            showColumnFilters
+              ? "Hide per-column filters"
+              : "Show per-column filters"
+          }
+          onClick={onToggleColumnFilters}
+          title={
+            showColumnFilters
+              ? "Hide per-column filters"
+              : "Show per-column filters"
+          }
+        >
+          <Icon name="filter" size={14} />
+          <span className="text-[11.5px]">Filter</span>
+        </button>
+      ) : null}
 
       <ColumnVisibilityMenu
         columns={FILES_COLUMNS}

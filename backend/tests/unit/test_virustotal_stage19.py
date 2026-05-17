@@ -73,7 +73,16 @@ async def test_lookup_returns_not_found_status_on_404(
     result = await lookup_by_hash(
         api_key="key", sha256="b" * 64, daily_quota=100
     )
-    assert result == {"status": "not_found", "checked_at": result["checked_at"]}
+    # Stage 10 (addendum B.4): the not_found result carries
+    # ``vt_status="not_found"`` so the rule engine column
+    # picks it up, plus ``permalink`` for the Files page UI.
+    # Stage 19's stricter ``status="not_found"`` field is
+    # preserved for backwards compat.
+    assert result is not None
+    assert result["status"] == "not_found"
+    assert result["vt_status"] == "not_found"
+    assert "checked_at" in result
+    assert result["permalink"] == f"https://www.virustotal.com/gui/file/{'b' * 64}"
 
 
 @pytest.mark.asyncio

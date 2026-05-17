@@ -15,6 +15,16 @@
  *   - ``.rules-row-actions`` cell with stopPropagation
  *   - role="switch" + aria-checked on the toggle
  *
+ * Stage 03 (v1.7): the table now ships a ``<colgroup>`` with one
+ * ``<col data-col-key="...">`` per column, plus a Stage-02
+ * shared ``ResizableHeaderCell`` on every ``<th>``. Width state
+ * lives in ``rulesPrefsStore`` and persists across reloads —
+ * mirror of the Files-table primitive landed in Stage 02. CSS
+ * stays on the existing ``.files-table`` class because the
+ * styling is identical; Stage 02 set ``table-layout: fixed`` on
+ * it, which Stage 03 now relies on for the colgroup widths to
+ * apply.
+ *
  * As with FilesTable, adopting the Stage 1 ``DataGrid`` primitive
  * would invalidate ~10 test selectors and is deferred to a future
  * "Stage 4b — DataGrid adoption" gated on a visual baseline.
@@ -23,6 +33,7 @@
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import { Pill, Tag } from "@/components/ui/Pill";
+import { ResizableHeaderCell } from "@/components/ui/ResizableHeaderCell";
 import {
   EmptyState,
   ErrorState,
@@ -30,6 +41,13 @@ import {
 } from "@/components/ui/States";
 import type { Rule, useRules } from "@/hooks/useRules";
 import { cn } from "@/lib/cn";
+import {
+  RULES_COLUMNS,
+  RULES_COLUMN_MIN_WIDTH,
+  effectiveRulesColumnWidth,
+  useRulesPrefs,
+  type RulesColumnKey,
+} from "@/stores/rulesPrefsStore";
 
 import { deriveSeverity, uniqueActionTypes } from "./rulesShared";
 
@@ -59,6 +77,22 @@ export function RulesTable({
   onDuplicate,
   onDelete,
 }: RulesTableProps) {
+  // Stage 03 — column-width state lives in ``rulesPrefsStore``.
+  // Subscribed here (not threaded through props) because every
+  // consumer of ``<RulesTable>`` would otherwise have to pass
+  // the exact same wiring through. Subscribing inside the
+  // component keeps the call-sites unchanged and the test
+  // mounts simple.
+  //
+  // Bug fix (post-Stage 10 sweep): hooks MUST be called on
+  // every render, before any early-return branches. Calling
+  // them after the loading/error/empty branches below
+  // violates the rules of hooks — React's reconciler reads
+  // hooks positionally, so an early return shifts the index
+  // of subsequent hook calls and leaks state across renders.
+  const columnWidths = useRulesPrefs((s) => s.columnWidths);
+  const setColumnWidth = useRulesPrefs((s) => s.setColumnWidth);
+
   if (query.isLoading) {
     return (
       <div className="px-4 py-12">
@@ -128,18 +162,104 @@ export function RulesTable({
     );
   }
 
+  // Stage 03 — column-width state read above (hoisted out of
+  // post-early-return space to satisfy rules-of-hooks).
+
   return (
     <div className="files-table-wrap">
       <table className="files-table" role="grid">
+        <colgroup>
+          {RULES_COLUMNS.map((c) => {
+            const key = c.key as RulesColumnKey;
+            return (
+              <col
+                key={key}
+                style={{ width: effectiveRulesColumnWidth(key, columnWidths) }}
+                data-col-key={key}
+              />
+            );
+          })}
+        </colgroup>
         <thead>
           <tr>
-            <th className="rules-table-toggle">State</th>
-            <th>Name</th>
-            <th>Severity</th>
-            <th>Actions</th>
-            <th className="num">Priority</th>
-            <th className="num">Matches</th>
-            <th>Last eval</th>
+            <th className="rules-table-toggle">
+              State
+              <ResizableHeaderCell
+                columnKey="state"
+                currentWidth={effectiveRulesColumnWidth("state", columnWidths)}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th>
+              Name
+              <ResizableHeaderCell
+                columnKey="name"
+                currentWidth={effectiveRulesColumnWidth("name", columnWidths)}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th>
+              Severity
+              <ResizableHeaderCell
+                columnKey="severity"
+                currentWidth={effectiveRulesColumnWidth(
+                  "severity",
+                  columnWidths,
+                )}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th>
+              Actions
+              <ResizableHeaderCell
+                columnKey="actions"
+                currentWidth={effectiveRulesColumnWidth(
+                  "actions",
+                  columnWidths,
+                )}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th className="num">
+              Priority
+              <ResizableHeaderCell
+                columnKey="priority"
+                currentWidth={effectiveRulesColumnWidth(
+                  "priority",
+                  columnWidths,
+                )}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th className="num">
+              Matches
+              <ResizableHeaderCell
+                columnKey="matches"
+                currentWidth={effectiveRulesColumnWidth(
+                  "matches",
+                  columnWidths,
+                )}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
+            <th>
+              Last eval
+              <ResizableHeaderCell
+                columnKey="last_eval"
+                currentWidth={effectiveRulesColumnWidth(
+                  "last_eval",
+                  columnWidths,
+                )}
+                minWidth={RULES_COLUMN_MIN_WIDTH}
+                onCommit={(k, w) => setColumnWidth(k as RulesColumnKey, w)}
+              />
+            </th>
             <th aria-label="Row actions" />
           </tr>
         </thead>

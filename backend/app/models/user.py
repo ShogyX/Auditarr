@@ -37,6 +37,15 @@ class User(Base, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # Stage 12 (v1.7) — set True by ``confirm_password_reset``
+    # when the consumed token had ``must_change_on_use=True``.
+    # The terminal-OTP path issues such tokens; the login flow
+    # surfaces the flag in the response so the frontend can
+    # force a change-password before the user reaches the app.
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
     # Bumped to invalidate all outstanding tokens for this user atomically.
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 

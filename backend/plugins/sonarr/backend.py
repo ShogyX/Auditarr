@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
@@ -53,6 +55,20 @@ class SonarrProvider(IntegrationProvider):
                 "default": True,
                 "description": "When enabled, every file under a tagged series gets a TagSync entry.",
             },
+            "source_whitelist": {
+                "type": "array",
+                "title": "Inbound webhook source whitelist",
+                "description": (
+                    "Stage 11 (v1.7) — optional. One entry per line: "
+                    "IP, CIDR range, or hostname. When set, the "
+                    "inbound webhook endpoint for this integration "
+                    "rejects requests from any source NOT in the "
+                    "list (HTTP 403). Leave blank for the default "
+                    "behaviour (no source check)."
+                ),
+                "items": {"type": "string"},
+                "default": [],
+            },
         },
     }
     secret_fields: tuple[str, ...] = ("api_key",)
@@ -67,7 +83,7 @@ class SonarrProvider(IntegrationProvider):
         api_key = str(config.secrets.get("api_key", "")).strip()
         if not api_key:
             raise ValueError("Sonarr integration is missing 'api_key'")
-        return httpx.AsyncClient(
+        return async_client(
             base_url=base_url,
             timeout=float(config.options.get("timeout_seconds", 15)),
             verify=bool(config.options.get("verify_ssl", True)),

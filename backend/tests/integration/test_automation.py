@@ -34,7 +34,6 @@ async def _record_run(_session, _args, _ctx):  # type: ignore[no-untyped-def]
 def _install_test_catalogue() -> JobCatalogue:
     """Reset the global catalogue to one with predictable jobs for tests."""
     reset_catalogue()
-    from app.automation.jobs import register_builtin_jobs
 
     cat = get_catalogue()  # this populates with built-ins
     cat.register(
@@ -244,7 +243,6 @@ async def test_scheduler_tick_runs_due_schedules() -> None:
 
     _install_test_catalogue()
 
-    monkeypatch_db = None
     from app.core.settings import get_settings
     get_settings.cache_clear()
     # Use a fresh per-test sqlite for isolation.

@@ -41,6 +41,11 @@ Category = Literal[
     # tile order) are reasonable future additions under the same
     # category banner.
     "dashboard",
+    # Stage 07 (v1.7): optimization-worker tunables. Today the only
+    # setting under this category is the in-process runner
+    # kill-switch (per plan §401); Stage 08 / Stage 13 may add a
+    # concurrency limit + queue-pause toggle here.
+    "optimization",
 ]
 
 
@@ -437,6 +442,55 @@ RUNTIME_EDITABLE: tuple[RuntimeFieldSpec, ...] = (
         field_type=str,
         field_default="warn",
         field_constraints={"pattern": r"^(info|warn|high|error|crit)$"},
+        impact="immediate",
+    ),
+    # ── Optimization (Stage 07 v1.7) ────────────────────────────
+    RuntimeFieldSpec(
+        key="optimization_in_process_runner_enabled",
+        label="Run transcodes in-process",
+        description=(
+            "Master switch for the local ffmpeg worker. When ON "
+            "(the default), profiles whose routing_target is "
+            "'in_process' execute on this Auditarr host. When OFF, "
+            "in-process jobs fail with a clear error directing the "
+            "operator to reconfigure the profile to route to plex / "
+            "jellyfin / tdarr. Useful when you want Auditarr to "
+            "queue + coordinate transcodes but offload the actual "
+            "encoding to a beefier box that's running one of those "
+            "integrations."
+        ),
+        category="optimization",
+        field_type=bool,
+        field_default=True,
+        field_constraints={},
+        impact="next_tick",
+        requires_warning=(
+            "Disabling the in-process runner will fail any queued "
+            "in-process items on the next tick. Reconfigure those "
+            "profiles to a non-in_process routing_target first."
+        ),
+    ),
+    # Stage 08 (v1.7): hwaccel warning dismissal. The startup probe
+    # surfaces ``system.hwaccel_missing`` when ffmpeg reports no
+    # acceleration; the dashboard renders a banner unless this
+    # toggle is True. The operator clicks "Don't show again" to
+    # dismiss; the field exists so the dashboard can read the
+    # current state.
+    RuntimeFieldSpec(
+        key="optimization_hwaccel_warning_acknowledged",
+        label="Hide 'no hardware acceleration' banner",
+        description=(
+            "When ON, the dashboard hides the 'no hardware "
+            "acceleration detected' banner. The startup probe still "
+            "runs and the result is still logged; only the banner "
+            "is suppressed. Set this when you've intentionally "
+            "deployed Auditarr on a CPU-only host and don't want "
+            "the reminder."
+        ),
+        category="optimization",
+        field_type=bool,
+        field_default=False,
+        field_constraints={},
         impact="immediate",
     ),
 )

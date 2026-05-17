@@ -57,10 +57,132 @@ export function fmtBytes(bytes: number): string {
 
 /** Seed JSON for a fresh optimization profile. Operators usually
  *  customize only the video block + container; the rest stays at
- *  these defaults. */
+ *  these defaults.
+ *
+ *  Stage 07 (v1.7) — defaults include the four cross-cutting
+ *  fields: ``transcode_scope`` (both streams), ``tag_scope``
+ *  (empty list = no requirement), ``routing_target`` (in-process
+ *  ffmpeg runner), ``schedule_window`` (None = always allowed).
+ */
 export const DEFAULT_PROFILE_SETTINGS = {
   video: { codec: "libx265", crf: 22, preset: "medium" },
   audio: { codec: "copy" },
   subtitles: { handling: "copy" },
   output: { container: "mkv", replace_input: true, keep_backup: true },
+  transcode_scope: "video_and_audio",
+  tag_scope: [],
+  routing_target: "in_process",
 };
+
+// ── Stage 07 (v1.7) — routing-target option matrix ────────────
+// Per plan §409: the form only exposes options known to work for
+// the chosen routing target. The map's shape is intentionally
+// flat — one boolean per knob — so the dialog can do a simple
+// ``OPTIONS_BY_TARGET[routing_target][knob]`` check.
+//
+// in_process — local ffmpeg runner. Every knob applies.
+// plex      — Plex's transcoder accepts codec family + container
+//             + a quality level. Preset / CRF / max_bitrate /
+//             scale_height are NOT meaningful (Plex translates the
+//             "quality" level to its own internal staircase).
+// jellyfin  — same shape as plex; Jellyfin's transcoder API is
+//             close enough that the same set applies.
+// tdarr     — Tdarr accepts arbitrary ffmpeg argv via its plugin
+//             contract. We expose codec + container + scale; the
+//             rest gets driven by the Tdarr plugin's own
+//             configuration (CRF / preset live in Tdarr).
+//
+// Stage 08 wires the actual provider sides; Stage 07 just makes
+// the UI surface the right options to the right operator.
+export type RoutingTarget = "in_process" | "plex" | "jellyfin" | "tdarr";
+
+export interface RoutingTargetOptions {
+  video_codec: boolean;
+  audio_codec: boolean;
+  container: boolean;
+  crf: boolean;
+  preset: boolean;
+  max_bitrate_kbps: boolean;
+  scale_height: boolean;
+  subtitles: boolean;
+  /** Free-form ffmpeg extra args only meaningful for in-process. */
+  extra_args: boolean;
+}
+
+export const OPTIONS_BY_TARGET: Record<RoutingTarget, RoutingTargetOptions> = {
+  in_process: {
+    video_codec: true,
+    audio_codec: true,
+    container: true,
+    crf: true,
+    preset: true,
+    max_bitrate_kbps: true,
+    scale_height: true,
+    subtitles: true,
+    extra_args: true,
+  },
+  plex: {
+    video_codec: true,
+    audio_codec: true,
+    container: true,
+    crf: false,
+    preset: false,
+    max_bitrate_kbps: false,
+    scale_height: false,
+    subtitles: true,
+    extra_args: false,
+  },
+  jellyfin: {
+    video_codec: true,
+    audio_codec: true,
+    container: true,
+    crf: false,
+    preset: false,
+    max_bitrate_kbps: false,
+    scale_height: false,
+    subtitles: true,
+    extra_args: false,
+  },
+  tdarr: {
+    video_codec: true,
+    audio_codec: true,
+    container: true,
+    crf: false,
+    preset: false,
+    max_bitrate_kbps: false,
+    scale_height: true,
+    subtitles: true,
+    extra_args: false,
+  },
+};
+
+/** Stage 07 (v1.7) — the four routing-target options the dialog
+ *  exposes in its dropdown, with display labels. */
+export const ROUTING_TARGET_LABELS: { value: RoutingTarget; label: string }[] = [
+  { value: "in_process", label: "In-process ffmpeg (this host)" },
+  { value: "plex", label: "Plex transcoder" },
+  { value: "jellyfin", label: "Jellyfin transcoder" },
+  { value: "tdarr", label: "Tdarr" },
+];
+
+/** Stage 07 (v1.7) — the three transcode-scope options + labels. */
+export const TRANSCODE_SCOPE_LABELS: {
+  value: "video_and_audio" | "video_only" | "audio_only";
+  label: string;
+}[] = [
+  { value: "video_and_audio", label: "Video and audio" },
+  { value: "video_only", label: "Video only (passthrough audio)" },
+  { value: "audio_only", label: "Audio only (passthrough video)" },
+];
+
+/** Resolve the browser's IANA timezone. Used by the schedule-
+ *  window timezone control to default the field to whatever the
+ *  operator's clock says — typically the same as the server's,
+ *  but the dialog renders a small warning when they differ. */
+export function getBrowserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}

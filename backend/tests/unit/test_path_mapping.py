@@ -7,6 +7,7 @@ from app.integrations.path_mapping import (
     PathMapping,
     parse_mappings,
     remap_path,
+    remap_path_inverse,
 )
 
 
@@ -108,6 +109,66 @@ class TestRemapPath:
         assert remap_path("/data/tv/shows/a.mkv", mappings) == "/long/a.mkv"
         assert remap_path("/data/tv/movies/a.mkv", mappings) == "/med/movies/a.mkv"
         assert remap_path("/data/other/a.mkv", mappings) == "/short/other/a.mkv"
+
+
+class TestRemapPathInverse:
+    """Stage 08 (v1.7) — Auditarr-side → integration-side direction.
+
+    The :func:`remap_path_inverse` helper is used by the Plex
+    provider's auto-lookup so transcode hand-offs can find the
+    right Plex item without an operator pre-supplying the
+    ratingKey.
+    """
+
+    def test_no_mappings_returns_original(self) -> None:
+        assert (
+            remap_path_inverse("/home/me/media/x.mkv", []) == "/home/me/media/x.mkv"
+        )
+
+    def test_unmatched_path_returned_unchanged(self) -> None:
+        mappings = [PathMapping(src_prefix="/p/media", dst_prefix="/a/media")]
+        assert remap_path_inverse("/elsewhere/x.mkv", mappings) == "/elsewhere/x.mkv"
+
+    def test_simple_inverse_match(self) -> None:
+        mappings = [PathMapping(src_prefix="/p/media", dst_prefix="/a/media")]
+        assert (
+            remap_path_inverse("/a/media/Movies/x.mkv", mappings)
+            == "/p/media/Movies/x.mkv"
+        )
+
+    def test_directory_boundary_respected(self) -> None:
+        """``/a/media`` must NOT match ``/a/mediastore``."""
+        mappings = [PathMapping(src_prefix="/p/media", dst_prefix="/a/media")]
+        assert (
+            remap_path_inverse("/a/mediastore/x.mkv", mappings)
+            == "/a/mediastore/x.mkv"
+        )
+
+    def test_longest_dst_prefix_wins(self) -> None:
+        """The most specific match (longest dst) is applied."""
+        mappings = [
+            PathMapping(src_prefix="/p/movies", dst_prefix="/a/movies"),
+            PathMapping(src_prefix="/p/movies/4k", dst_prefix="/a/movies/4k"),
+        ]
+        assert (
+            remap_path_inverse("/a/movies/4k/x.mkv", mappings)
+            == "/p/movies/4k/x.mkv"
+        )
+
+    def test_exact_path_equality_matches(self) -> None:
+        """Edge case: when the path IS the dst_prefix exactly,
+        the inverse is the src_prefix exactly."""
+        mappings = [PathMapping(src_prefix="/p/media", dst_prefix="/a/media")]
+        assert remap_path_inverse("/a/media", mappings) == "/p/media"
+
+    def test_inverse_round_trips_with_remap_path(self) -> None:
+        """remap → remap_inverse is the identity for any path
+        in the mapped range."""
+        mappings = [PathMapping(src_prefix="/p/x", dst_prefix="/a/x")]
+        original = "/p/x/sub/file.mkv"
+        auditarr_side = remap_path(original, mappings)
+        back = remap_path_inverse(auditarr_side, mappings)
+        assert back == original
 
 
 class TestDriftReport:

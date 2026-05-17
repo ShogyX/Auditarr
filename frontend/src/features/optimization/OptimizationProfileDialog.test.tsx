@@ -262,10 +262,14 @@ describe("Stage 7 — OptimizationProfileDialog (structured form)", () => {
     fireEvent.change(await screen.findByLabelText(/^name$/i), {
       target: { value: "Routed profile" },
     });
-    // Wait for integrations to load.
+    // Wait for integrations to load. Stage 07 added a "Routing
+    // target" select with options including "Tdarr"; the test
+    // disambiguates by looking for the integration's full
+    // ``"Tdarr (tdarr)"`` label, which the routing-target
+    // dropdown's bare ``"Tdarr"`` doesn't match.
     await waitFor(() => {
       expect(
-        screen.getByRole("option", { name: /tdarr/i }),
+        screen.getByRole("option", { name: /tdarr \(tdarr\)/i }),
       ).toBeInTheDocument();
     });
     const integrationSelect = screen.getByLabelText(/routing integration/i);

@@ -254,8 +254,10 @@ async def test_severities_empty_true_returns_zero_rows(
 async def test_severities_empty_absent_is_no_filter(
     media_client: AsyncClient,
 ) -> None:
-    """Sanity: without the sentinel the endpoint still returns the
-    full set (modulo the default quarantine exclusion)."""
+    """Sanity: without the sentinel the endpoint still returns
+    the full set. (Pre-Stage-05 this comment also mentioned a
+    "default quarantine exclusion" — Stage 05 retired that
+    workflow, so the set is now genuinely complete.)"""
     headers = await _admin_headers(media_client)
     await _seed_files()
 

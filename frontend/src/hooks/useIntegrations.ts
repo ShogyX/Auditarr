@@ -19,6 +19,13 @@ export interface IntegrationKind {
         default?: unknown;
         minimum?: number;
         maximum?: number;
+        /** Stage 11 (v1.7) — present on ``type: "array"``
+         *  fields like ``source_whitelist`` describing the
+         *  array element type. The dynamic input only reads
+         *  the array's outer ``type`` to pick its renderer,
+         *  but typing ``items`` lets test fixtures declare
+         *  shape-accurate metadata. */
+        items?: { type?: string };
       }
     >;
   };
@@ -96,6 +103,34 @@ export function useIntegrations() {
     queryKey: ["integrations", "list"],
     queryFn: () => apiClient.get<Integration[]>("/integrations"),
     staleTime: 15_000,
+  });
+}
+
+// ── Stage 08 (v1.7) — transcode profile picker ────────────────
+export interface TranscodeProfileSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** Stage 08 (v1.7) — fetch the provider-side transcode profiles
+ *  for an integration. Used by the optimization profile editor's
+ *  picker when ``routing_target !== "in_process"``. Returns ``[]``
+ *  for providers that don't implement the listing surface
+ *  (Jellyfin shim, future providers without hand-off support).
+ *
+ *  When ``integrationId`` is null / empty the query is disabled,
+ *  so callers can pass the operator's picked id reactively. */
+export function useIntegrationTranscodeProfiles(integrationId: string | null) {
+  return useQuery({
+    queryKey: ["integrations", integrationId, "transcode-profiles"],
+    queryFn: () =>
+      apiClient.get<TranscodeProfileSummary[]>(
+        `/integrations/${integrationId}/transcode-profiles`,
+      ),
+    enabled: Boolean(integrationId),
+    staleTime: 60_000,
   });
 }
 
@@ -205,5 +240,50 @@ export function useGenerateWebhookSecret() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["integrations"] });
     },
+  });
+}
+
+// ── Stage 10 (v1.7) — VirusTotal status ────────────────────────
+
+/** Response shape from ``GET /api/v1/integrations/virustotal/status``.
+ *  Surfaces the three-window quota state (addendum B.7) plus
+ *  queue size + configuration state for the VT card on the
+ *  Integrations page. */
+export interface VirusTotalStatus {
+  // Three-window quota state.
+  minute_used: number;
+  minute_cap: number;
+  minute_remaining: number;
+  day_used: number;
+  day_cap: number;
+  day_remaining: number;
+  month_used: number;
+  month_cap: number;
+  month_remaining: number;
+  // Plan §516 legacy aliases — what the original spec
+  // mandated. ``quota_used_today === day_used``; kept here
+  // for whatever downstream callers depend on the plan-spec
+  // names.
+  quota_used_today: number;
+  quota_limit: number;
+  // Queue + last-check timestamps.
+  queue_size: number;
+  last_check_at: string | null;
+  // Configuration state.
+  enabled: boolean;
+  configured: boolean;
+}
+
+/** Poll the VT status endpoint. The card refreshes every 30s
+ *  — quota counters tick at a human pace, and the queue size
+ *  changes only on scan runs, so a tight poll cadence wastes
+ *  requests for no operator-visible benefit. */
+export function useVirustotalStatus() {
+  return useQuery({
+    queryKey: ["integrations", "virustotal", "status"],
+    queryFn: () =>
+      apiClient.get<VirusTotalStatus>("/integrations/virustotal/status"),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
   });
 }

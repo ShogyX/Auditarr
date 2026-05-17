@@ -1,9 +1,31 @@
 /**
  * Stage 3 — Files table.
  *
- * Extracted from the inline ``FilesTable``, ``FileRow``, ``Checkbox``,
- * and ``renderCell`` in ``FilesPage.tsx``. Preserves the exact DOM and
- * CSS contract:
+ * Stage 02 (v1.7) extends this with:
+ *
+ *   - A ``<colgroup>`` element with one ``<col>`` per visible column.
+ *     The table is now ``table-layout: fixed`` (set in
+ *     components.css), so widths come exclusively from the colgroup.
+ *     This is what makes the resize math behave: auto-layout tables
+ *     re-flow on every cell, fixed-layout tables honour explicit
+ *     column widths.
+ *
+ *   - A drag-to-resize handle on every ``<th>``. Implementation is
+ *     inline (no new library) using pointer events — one path that
+ *     covers mouse, touch, and pen alike (per plan addendum C.2).
+ *     The handle uses ``setPointerCapture`` so the operator can
+ *     drag past the column edge without the gesture jumping.
+ *
+ *   - An optional per-column quick-filter row, rendered when the
+ *     toolbar's filter toggle is on. The store carries the values
+ *     under ``perColumnFilters``; the parent (useFilesPageState)
+ *     pipes them into ``useMediaList`` as new query params.
+ *
+ *   - Severity column: the Pill now resolves through
+ *     ``sevToClass`` (which now includes ``crit``), giving the cell
+ *     the same colour as the scope-bar swatch.
+ *
+ * Pre-Stage-02 invariants preserved exactly:
  *
  *   - ``<table class="files-table" role="grid">``
  *   - ``<th class="is-sortable is-sorted num">`` with aria-sort
@@ -11,18 +33,14 @@
  *   - ``<td class="num">`` for numeric columns
  *   - ``.files-table-sort-ind`` arrows ``↑ / ↓ / ↕``
  *
- * The Stage-1 ``DataGrid`` primitive is intentionally not adopted here.
- * Migrating the table to ``DataGrid`` would change the rendered DOM
- * (different sort indicator, different selection model) in ways that
- * would require updating 30+ test cases across four files. That
- * migration is queued as "Stage 3b — DataGrid adoption" and will land
- * after a Playwright visual-diff baseline is captured.
+ * So the 30+ existing FilesPage/FilesTable tests keep passing.
  */
 
 import type { InputHTMLAttributes } from "react";
 
 import { Icon } from "@/components/ui/Icon";
 import { Pill, Tag } from "@/components/ui/Pill";
+import { ResizableHeaderCell } from "@/components/ui/ResizableHeaderCell";
 import {
   EmptyState,
   ErrorState,
@@ -38,8 +56,26 @@ import { cn } from "@/lib/cn";
 import { fmtBytes } from "@/lib/format";
 import {
   FILES_COLUMNS,
+  FILES_COLUMN_MIN_WIDTH,
+  effectiveColumnWidth,
   type FilesColumnKey,
 } from "@/stores/filesPrefsStore";
+
+/** Columns whose per-column filter input is wired to the backend. */
+const FILTERABLE_COLUMN_KEYS: ReadonlySet<FilesColumnKey> = new Set<FilesColumnKey>([
+  "filename",
+  "codec",
+  "container",
+  "extension",
+]);
+
+/** Placeholder text shown in the per-column filter input. */
+const FILTER_PLACEHOLDERS: Partial<Record<FilesColumnKey, string>> = {
+  filename: "filter by path…",
+  codec: "e.g. hevc",
+  container: "e.g. matroska",
+  extension: "e.g. .mkv",
+};
 
 export interface FilesTableProps {
   list: ReturnType<typeof useMediaList>;
@@ -52,6 +88,16 @@ export interface FilesTableProps {
   allVisibleSelected: boolean;
   someVisibleSelected: boolean;
   onOpenDrawer: (file: MediaFileSummary) => void;
+  /** Stage 02 — resolved column widths (px). */
+  columnWidths: Partial<Record<FilesColumnKey, number>>;
+  /** Stage 02 — commit a new width on resize-end. */
+  onColumnResize: (key: FilesColumnKey, width: number) => void;
+  /** Stage 02 — per-column filter inputs. Empty/absent → no filter. */
+  perColumnFilters: Partial<Record<FilesColumnKey, string>>;
+  /** Stage 02 — write a per-column filter value. */
+  onPerColumnFilterChange: (key: FilesColumnKey, value: string) => void;
+  /** Stage 02 — whether to render the per-column filter row at all. */
+  showColumnFilters: boolean;
 }
 
 export function FilesTable({
@@ -65,6 +111,11 @@ export function FilesTable({
   allVisibleSelected,
   someVisibleSelected,
   onOpenDrawer,
+  columnWidths,
+  onColumnResize,
+  perColumnFilters,
+  onPerColumnFilterChange,
+  showColumnFilters,
 }: FilesTableProps) {
   const cols = FILES_COLUMNS.filter((c) =>
     visibleColumns.includes(c.key as FilesColumnKey),
@@ -108,6 +159,17 @@ export function FilesTable({
   return (
     <div className="files-table-wrap">
       <table className="files-table" role="grid">
+        <colgroup>
+          {/* Stage 02 — the leading checkbox col is fixed-width so
+              its visual weight stays constant regardless of how the
+              operator resized other columns. */}
+          <col className="files-table-check-col" style={{ width: 36 }} />
+          {cols.map((c) => {
+            const key = c.key as FilesColumnKey;
+            const width = effectiveColumnWidth(key, columnWidths);
+            return <col key={key} style={{ width }} data-col-key={key} />;
+          })}
+        </colgroup>
         <thead>
           <tr>
             <th className="files-table-check">
@@ -123,17 +185,33 @@ export function FilesTable({
               />
             </th>
             {cols.map((c) => {
+              const key = c.key as FilesColumnKey;
               const sortKey = "sortKey" in c ? c.sortKey : undefined;
               const isSorted = !!sortKey && sort.key === sortKey;
               return (
                 <th
-                  key={c.key}
+                  key={key}
                   className={cn(
                     sortKey && "is-sortable",
                     isSorted && "is-sorted",
                     "num" in c && c.num && "num",
                   )}
-                  onClick={sortKey ? () => onSort(sortKey) : undefined}
+                  onClick={
+                    sortKey
+                      ? (e) => {
+                          // Don't fire sort when the click originated
+                          // from the resize handle (pointer-up bubbles).
+                          const cls = (e.target as HTMLElement).classList;
+                          if (
+                            cls.contains("ui-th-resizer") ||
+                            cls.contains("files-th-resizer")
+                          ) {
+                            return;
+                          }
+                          onSort(sortKey);
+                        }
+                      : undefined
+                  }
                   aria-sort={
                     isSorted
                       ? sort.dir === "asc"
@@ -150,10 +228,44 @@ export function FilesTable({
                       {isSorted ? (sort.dir === "asc" ? "↑" : "↓") : "↕"}
                     </span>
                   ) : null}
+                  <ResizableHeaderCell
+                    columnKey={key}
+                    currentWidth={effectiveColumnWidth(key, columnWidths)}
+                    minWidth={FILES_COLUMN_MIN_WIDTH}
+                    onCommit={(k, w) =>
+                      onColumnResize(k as FilesColumnKey, w)
+                    }
+                  />
                 </th>
               );
             })}
           </tr>
+          {showColumnFilters ? (
+            <tr className="files-table-filter-row">
+              <th className="files-table-check" aria-hidden="true" />
+              {cols.map((c) => {
+                const key = c.key as FilesColumnKey;
+                if (!FILTERABLE_COLUMN_KEYS.has(key)) {
+                  return <th key={key} aria-hidden="true" />;
+                }
+                const value = perColumnFilters[key] ?? "";
+                return (
+                  <th key={key}>
+                    <input
+                      type="text"
+                      className="files-th-filter"
+                      placeholder={FILTER_PLACEHOLDERS[key] ?? "filter…"}
+                      value={value}
+                      aria-label={`Filter ${c.label}`}
+                      onChange={(e) =>
+                        onPerColumnFilterChange(key, e.target.value)
+                      }
+                    />
+                  </th>
+                );
+              })}
+            </tr>
+          ) : null}
         </thead>
         <tbody>
           {list.data.items.map((item) => (
@@ -172,6 +284,15 @@ export function FilesTable({
   );
 }
 
+/**
+ * Stage 02 — pointer-event-based resize handle.
+ *
+ * Stage 03 — extracted to ``@/components/ui/ResizableHeaderCell``
+ * and shared between FilesTable and RulesTable. The Stage 02
+ * implementation lived inline here; the new home preserves the
+ * same contract (pointer events, ``setPointerCapture``,
+ * data-col-key lookup against the closest table).
+ */
 function FilesTableRow({
   item,
   cols,
@@ -193,8 +314,6 @@ function FilesTableRow({
       <td
         className="files-table-check"
         onClick={(e) => {
-          // Don't open the drawer when the operator clicks the
-          // checkbox cell.
           e.stopPropagation();
         }}
       >
@@ -227,17 +346,8 @@ function renderCell(key: FilesColumnKey, item: MediaFileSummary) {
                 aria-label="Orphaned"
               />
             ) : null}
-            {item.quarantined ? (
-              // Stage 27: quarantined files get an inline badge so the
-              // operator can tell at a glance — useful when in the
-              // "Include quarantined" view mode where they're mixed in.
-              <Pill
-                className="text-[10px] text-muted-2 border-border bg-surface-sunk shrink-0"
-                aria-label="Quarantined"
-              >
-                Quarantined
-              </Pill>
-            ) : null}
+            {/* Stage 27 rendered a "Quarantined" Pill here; Stage 05
+                (v1.7) removed it along with the quarantine workflow. */}
             <span className="font-mono text-text truncate">{item.filename}</span>
           </div>
           <div className="font-mono text-[11px] text-muted-2 truncate">
@@ -284,11 +394,6 @@ function renderCell(key: FilesColumnKey, item: MediaFileSummary) {
     case "extension":
       return <Tag>{item.extension || "—"}</Tag>;
     case "matched_rules": {
-      // Stage 3 (audit follow-up): show up to three matched-rule
-      // names as chips, with a ``+N`` overflow indicator when more
-      // exist. The list comes back ordered by severity_rank desc
-      // (highest-impact rule first), so the cap surfaces the rules
-      // most likely to matter to the operator.
       const rules = item.matched_rules ?? [];
       if (rules.length === 0) {
         return <span className="text-muted-2">—</span>;
@@ -311,12 +416,6 @@ function renderCell(key: FilesColumnKey, item: MediaFileSummary) {
       );
     }
     case "tags": {
-      // Stage 13 (audit follow-up): first three tag names as
-      // chips with a ``+N`` overflow indicator. Tags come back
-      // sorted alphabetically (the backend ORDER BYs name); the
-      // first three are arbitrary-but-deterministic. The drawer
-      // surfaces the full source-grouped view when an operator
-      // wants the detail.
       const tags = item.tags ?? [];
       if (tags.length === 0) {
         return <span className="text-muted-2">—</span>;

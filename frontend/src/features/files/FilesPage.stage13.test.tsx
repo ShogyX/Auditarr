@@ -91,7 +91,6 @@ const FILE_TAGGY = {
   height: 1080,
   has_subtitles: false,
   is_orphaned: false,
-  quarantined: false,
   // Five tags so the overflow is exercised.
   tags: ["4K", "archive", "needs-review", "rare", "watched"],
 };

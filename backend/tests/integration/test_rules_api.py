@@ -302,14 +302,16 @@ async def test_vocabulary_endpoint_returns_fields_ops_severities_actions(
     assert body["severities"] == ["ok", "info", "warn", "high", "error", "crit"]
 
     # Actions: pre-Stage-9 the visual builder exposed four;
-    # Stage 9 adds ``quarantine`` and ``delete``.
+    # Stage 9 added ``quarantine`` and ``delete``; Stage 05 (v1.7)
+    # retired ``quarantine`` again (Section A.0 — "delete means
+    # delete"). The vocabulary now exposes the original four plus
+    # ``delete``.
     action_types = {a["type"] for a in body["actions"]}
     assert action_types == {
         "set_severity",
         "add_tag",
         "queue_optimization",
         "notify",
-        "quarantine",
         "delete",
     }
 

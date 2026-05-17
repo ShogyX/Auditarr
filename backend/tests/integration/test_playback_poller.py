@@ -27,7 +27,6 @@ from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
-    IntegrationProvider,
     PlaybackEventDTO,
     TagSync,
 )
@@ -138,7 +137,6 @@ async def seeded_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Register the stub provider on the registry under the capability
     # key the manager looks up: ``integration.<kind>``.
     from app.core.registry import get_registry
-    from app.events.bus import get_event_bus
 
     registry = get_registry()
     bus = get_event_bus()
@@ -377,6 +375,12 @@ async def test_poller_advances_cursor(seeded_env) -> None:
                 )
             )
         ).scalar_one()
-    # The cursor should equal the latest started_at across the batch.
+    # Stage 09 (v1.7): the cursor advances to
+    # ``max(started_at) − CURSOR_SAFETY_SKEW`` (60s) rather
+    # than ``max(started_at)`` itself, so slightly-out-of-order
+    # events arriving on the next poll aren't dropped. Replays
+    # are harmless via the unique constraint dedup.
     parsed = _dt.datetime.fromisoformat(cursor.cursor_value)
-    assert parsed == now - _dt.timedelta(minutes=2)
+    from app.services.playback.poller import CURSOR_SAFETY_SKEW
+
+    assert parsed == (now - _dt.timedelta(minutes=2)) - CURSOR_SAFETY_SKEW

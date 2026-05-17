@@ -13,6 +13,18 @@ What ships in this version:
   enumerates configured Tdarr libraries (the on-disk roots Tdarr watches).
 * ``sync_tags`` — Tdarr's file index is large and stream-oriented; mirroring
   per-file status into tags is deferred. Returns ``[]`` for now.
+
+Stage 08 (v1.7) added the third-party transcode hand-off surface:
+* ``submit_transcode_job`` — POST ``/api/v2/cruddb`` against
+  ``FileJSONDB`` with ``mode=insert`` to add a file to Tdarr's
+  queue, referencing a Tdarr plugin id the operator picked. The
+  upstream job id is the returned document's ``_id``.
+* ``list_transcode_profiles`` — POST ``/api/v2/cruddb`` against
+  ``PluginsJSONDB`` to enumerate available Tdarr plugins; the
+  Auditarr profile editor renders them in a picker.
+* ``get_transcode_job_status`` — POST ``/api/v2/cruddb`` to look
+  up the file's current ``transcodeStage`` field. Tdarr's state
+  vocabulary maps to Auditarr's enum via ``_TDARR_STATE_TO_AUDITARR``.
 """
 
 from __future__ import annotations
@@ -21,14 +33,40 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
     IntegrationProvider,
+    JobSubmitResult,
     TagSync,
+    TranscodeJobSpec,
+    TranscodeJobStatus,
+    TranscodeProfileSummary,
 )
 from app.plugins import Plugin, PluginContext
+
+
+# Stage 08 (v1.7) — Tdarr's per-file ``transcodeStage`` values
+# mapped to Auditarr's job-status enum. Tdarr documents these in
+# its source; the most common ones are:
+#
+#   * ``""`` / missing  — new file, not yet picked up.
+#   * ``"Currently processing"`` — running.
+#   * ``"Transcode success"`` — completed.
+#   * ``"Transcode error"`` — failed.
+#
+# Anything not in the map flows through as ``"unknown"`` so the
+# worker keeps polling rather than guessing.
+_TDARR_STATE_TO_AUDITARR: dict[str, str] = {
+    "": "pending",
+    "queued": "pending",
+    "currently processing": "running",
+    "transcode success": "completed",
+    "transcode error": "failed",
+}
 
 
 class TdarrProvider(IntegrationProvider):
@@ -69,7 +107,7 @@ class TdarrProvider(IntegrationProvider):
         token = str(config.secrets.get("token", "")).strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        return httpx.AsyncClient(
+        return async_client(
             base_url=base_url,
             timeout=float(config.options.get("timeout_seconds", 20)),
             verify=bool(config.options.get("verify_ssl", True)),
@@ -154,6 +192,250 @@ class TdarrProvider(IntegrationProvider):
 
     async def sync_tags(self, _config: IntegrationConfig) -> list[TagSync]:
         return []
+
+    # ── Stage 08 (v1.7) — transcode hand-off ─────────────────────
+    async def submit_transcode_job(
+        self,
+        config: IntegrationConfig,
+        job_spec: TranscodeJobSpec,
+    ) -> JobSubmitResult:
+        """Queue a file in Tdarr referencing a Tdarr-side plugin.
+
+        Plan §437. The job spec's ``metadata.provider_profile_id``
+        carries the Tdarr plugin id the operator picked in the
+        Auditarr profile editor (e.g.
+        ``"Tdarr_Plugin_henk_h265"``). When missing, we fail with
+        a clear error pointing the operator to pick one — we don't
+        guess a plugin because Tdarr's plugin set is operator-
+        specific.
+
+        The Tdarr endpoint is ``POST /api/v2/cruddb`` against
+        ``FileJSONDB`` with ``mode=insert`` — the same write the
+        Tdarr UI uses when an operator drags a file into a flow.
+        """
+        provider_profile_id = job_spec.metadata.get("provider_profile_id")
+        if not provider_profile_id or not isinstance(provider_profile_id, str):
+            return JobSubmitResult(
+                status="rejected",
+                detail=(
+                    "Tdarr requires a provider profile id (the Tdarr "
+                    "plugin name). Edit the Auditarr profile and pick "
+                    "one from the plugin list."
+                ),
+            )
+
+        try:
+            async with self._client(config) as client:
+                response = await client.post(
+                    "/api/v2/cruddb",
+                    json={
+                        "data": {
+                            "collection": "FileJSONDB",
+                            "mode": "insert",
+                            "docs": [
+                                {
+                                    # Tdarr's file row carries the
+                                    # absolute path on the node's view
+                                    # of the filesystem.
+                                    "file": job_spec.input_path,
+                                    # Reference the operator-picked
+                                    # plugin / flow.
+                                    "DB": "FileJSONDB",
+                                    "transcodeChosenPlugin":
+                                        provider_profile_id,
+                                    # Auditarr correlation metadata —
+                                    # Tdarr ignores unknown keys.
+                                    "auditarr_item_id": job_spec.item_id,
+                                    "auditarr_transcode_scope":
+                                        job_spec.transcode_scope,
+                                }
+                            ],
+                        }
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            return JobSubmitResult(
+                status="error",
+                detail=f"Tdarr HTTP error: {exc!s}",
+            )
+        except ValueError as exc:
+            return JobSubmitResult(status="error", detail=str(exc))
+
+        # Tdarr returns the inserted document(s). We accept either
+        # ``[doc]`` or ``{docs:[doc]}`` shapes defensively — both
+        # have been observed across versions.
+        doc: dict[str, Any] | None = None
+        if isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, dict):
+                doc = first
+        elif isinstance(payload, dict):
+            if isinstance(payload.get("docs"), list) and payload["docs"]:
+                first = payload["docs"][0]
+                if isinstance(first, dict):
+                    doc = first
+            else:
+                doc = payload
+
+        upstream_id = (
+            str(doc.get("_id") or doc.get("id") or "")
+            if doc is not None
+            else ""
+        )
+        if not upstream_id:
+            return JobSubmitResult(
+                status="error",
+                detail=(
+                    "Tdarr accepted the request but did not return a "
+                    "job id; cannot correlate completion. Body: "
+                    f"{payload!r}"
+                ),
+            )
+        return JobSubmitResult(
+            status="accepted",
+            upstream_job_id=upstream_id,
+            detail=f"queued in Tdarr as {upstream_id}",
+        )
+
+    async def list_transcode_profiles(
+        self, config: IntegrationConfig
+    ) -> list[TranscodeProfileSummary]:
+        """Enumerate Tdarr's available transcode plugins.
+
+        Plan §438. Each plugin is one of:
+          * a built-in Tdarr plugin (e.g. ``Tdarr_Plugin_MC93_Migz1``).
+          * a community plugin (Tdarr ships a community pack).
+          * a custom plugin the operator wrote.
+
+        We treat all three the same: each is a row in
+        ``PluginsJSONDB`` with an ``id`` + a ``name`` + a
+        description. The Auditarr profile editor renders the list
+        and stores the chosen id in the profile's settings.
+        """
+        try:
+            async with self._client(config) as client:
+                response = await client.post(
+                    "/api/v2/cruddb",
+                    json={
+                        "data": {
+                            "collection": "PluginsJSONDB",
+                            "mode": "getAll",
+                        }
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json() or []
+        except httpx.HTTPError:
+            # Tolerant: empty list means the picker shows "(no
+            # plugins discovered)". The error is logged by the
+            # caller via the manager's healthcheck pipeline.
+            return []
+        except ValueError:
+            return []
+
+        out: list[TranscodeProfileSummary] = []
+        for plugin in payload if isinstance(payload, list) else []:
+            if not isinstance(plugin, dict):
+                continue
+            plugin_id = plugin.get("id") or plugin.get("_id")
+            if not plugin_id:
+                continue
+            name = plugin.get("Name") or plugin.get("name") or str(plugin_id)
+            description = plugin.get("Description") or plugin.get("description")
+            out.append(
+                TranscodeProfileSummary(
+                    id=str(plugin_id),
+                    name=str(name),
+                    description=str(description) if description else None,
+                    metadata={
+                        "Type": plugin.get("Type"),
+                        "Stage": plugin.get("Stage"),
+                    },
+                )
+            )
+        return out
+
+    async def get_transcode_job_status(
+        self,
+        config: IntegrationConfig,
+        upstream_job_id: str,
+    ) -> TranscodeJobStatus:
+        """Poll Tdarr for one file's current transcode state.
+
+        Plan §444. Tdarr exposes per-file state via
+        ``FileJSONDB.<id>.transcodeStage``. We map Tdarr's strings
+        to Auditarr's status enum via ``_TDARR_STATE_TO_AUDITARR``;
+        unknown values flow through as ``"unknown"`` so the
+        worker keeps polling rather than committing to a wrong
+        terminal state.
+        """
+        try:
+            async with self._client(config) as client:
+                response = await client.post(
+                    "/api/v2/cruddb",
+                    json={
+                        "data": {
+                            "collection": "FileJSONDB",
+                            "mode": "getById",
+                            "docID": upstream_job_id,
+                        }
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            return TranscodeJobStatus(
+                status="unknown",
+                detail=f"Tdarr HTTP error: {exc!s}",
+            )
+        except ValueError as exc:
+            return TranscodeJobStatus(status="unknown", detail=str(exc))
+
+        # Tdarr may return the doc directly or wrapped in {docs:[doc]}.
+        doc: dict[str, Any] | None = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get("docs"), list) and payload["docs"]:
+                first = payload["docs"][0]
+                if isinstance(first, dict):
+                    doc = first
+            else:
+                doc = payload
+        elif isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, dict):
+                doc = first
+
+        if doc is None:
+            return TranscodeJobStatus(
+                status="unknown",
+                detail="Tdarr returned an empty/unparseable payload",
+            )
+
+        raw_stage = str(doc.get("transcodeStage") or "").strip().lower()
+        mapped = _TDARR_STATE_TO_AUDITARR.get(raw_stage, "unknown")
+
+        # Tdarr emits a per-file ``transcodePercent`` (0..100) when
+        # actively running; surface it through so the optimization
+        # API can pass through real-time progress.
+        progress: int | None = None
+        try:
+            pct = doc.get("transcodePercent")
+            if pct is not None:
+                progress = max(0, min(100, int(pct)))
+        except (TypeError, ValueError):
+            progress = None
+
+        return TranscodeJobStatus(
+            status=mapped,
+            detail=raw_stage or None,
+            progress_pct=progress,
+            metadata={
+                "transcodeStage": raw_stage,
+                "_id": doc.get("_id") or doc.get("id"),
+            },
+        )
 
 
 def register(context: PluginContext) -> Plugin:

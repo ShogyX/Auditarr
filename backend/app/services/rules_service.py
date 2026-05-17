@@ -116,6 +116,12 @@ class RulesService:
             subtitle_languages=list(media_file.subtitle_languages or []),
             audio_languages=list(media_file.audio_languages or []),
             tags=tags,
+            # Stage 06 (v1.7) — rule engine extensions. ``probe_failed``
+            # is a non-nullable bool; ``vt_status`` is the nullable
+            # VT result column (NULL means "never looked up", which
+            # is distinct from the literal ``not_found``).
+            probe_failed=bool(media_file.probe_failed),
+            vt_status=media_file.vt_status,
         )
 
     # ── Per-file evaluation ──────────────────────────────────────
@@ -172,14 +178,67 @@ class RulesService:
                 # so the (file, profile) unique constraint can dedupe
                 # across multiple rules that happen to queue the same
                 # profile.
+                #
+                # Stage 07 (v1.7): when a profile has a non-empty
+                # ``tag_scope``, the file must carry EVERY listed
+                # tag to be eligible (plan §398). Files that
+                # don't satisfy the scope are not queued; the
+                # rule still records its match (severity/tags)
+                # but the queue action is a no-op for that file.
+                # This is a soft reject — the rules pipeline
+                # doesn't crash, and the operator sees the skip
+                # in the structured log.
                 if result.queue_optimizations:
+                    from app.models.optimization_profile import (
+                        OptimizationProfile,
+                    )
+                    from app.optimization.profile_schema import (
+                        ProfileDefinition,
+                    )
                     from app.services.repositories import OptimizationRepository
 
                     opt_repo = OptimizationRepository(self._session)
-                    for profile in result.queue_optimizations:
+                    # File's current tag set — read once per rule
+                    # rather than once per profile.
+                    file_tag_set = set(eval_input.tags)
+                    for profile_name in result.queue_optimizations:
+                        # Stage 07 tag_scope gate. We look up the
+                        # profile to read its schema; if the
+                        # profile doesn't exist, fall through to
+                        # the legacy upsert (the worker will fail
+                        # the item cleanly with "profile not
+                        # found", which preserves the pre-Stage-07
+                        # behaviour).
+                        profile_row_q = await self._session.execute(
+                            select(OptimizationProfile).where(
+                                OptimizationProfile.name == profile_name
+                            )
+                        )
+                        profile_row = profile_row_q.scalar_one_or_none()
+                        if profile_row is not None:
+                            try:
+                                pdef = ProfileDefinition.model_validate(
+                                    profile_row.settings
+                                )
+                            except Exception:  # noqa: BLE001
+                                pdef = None
+                            if pdef is not None and pdef.tag_scope:
+                                missing = [
+                                    t for t in pdef.tag_scope
+                                    if t not in file_tag_set
+                                ]
+                                if missing:
+                                    log.info(
+                                        "rules.queue_skipped_tag_scope",
+                                        rule_id=rule.id,
+                                        profile=profile_name,
+                                        media_file_id=media_file.id,
+                                        missing_tags=missing,
+                                    )
+                                    continue
                         await opt_repo.upsert_queued(
                             media_file_id=media_file.id,
-                            profile=profile,
+                            profile=profile_name,
                             rule_id=rule.id,
                             queued_at=now,
                         )
@@ -187,6 +246,21 @@ class RulesService:
                 # Fan ``notify`` actions out to notification channels.
                 # We dispatch one-per-rule so the audit log can attribute
                 # each delivery to the rule that triggered it.
+                #
+                # Stage 06 (v1.7):
+                #   * If the Notify action carries a ``throttle``
+                #     config, gate the dispatch through
+                #     ``_throttle_gate`` which atomically increments
+                #     the per-(rule, window) counter and decides
+                #     send-vs-suppress. Suppressed sends emit
+                #     ``rule.throttled`` and write ONE summary
+                #     audit-log entry per (rule, window) per the
+                #     addendum A.2 §125 contract.
+                #   * When the SAME rule's actions include both a
+                #     ``delete`` and a ``notify``, the dispatcher's
+                #     context gets ``auto_delete: True`` so the
+                #     email template can render "No action required
+                #     — the file is being deleted" (plan §359).
                 if result.notifications and self._registry is not None:
                     from app.notifications.dispatcher import NotificationDispatcher
 
@@ -195,7 +269,26 @@ class RulesService:
                         registry=self._registry,
                         event_bus=self._bus,
                     )
+                    # Stage 06: rule-level auto_delete signal —
+                    # any Delete action on the same rule.
+                    auto_delete = any(
+                        getattr(a, "type", None) == "delete"
+                        for a in definition.actions
+                    )
                     for notif in result.notifications:
+                        # Stage 06 — apply throttle gate.
+                        throttle = notif.get("throttle")
+                        if throttle is not None:
+                            allow = await self._throttle_gate(
+                                rule_id=rule.id,
+                                rule_name=rule.name,
+                                window_seconds=int(throttle["window_seconds"]),
+                                max_per_window=int(throttle["max_per_window"]),
+                                now=now,
+                            )
+                            if not allow:
+                                # Suppressed by throttle — skip dispatch.
+                                continue
                         try:
                             await dispatcher.dispatch(
                                 severity=result.severity or aggregate.severity or "info",
@@ -209,6 +302,12 @@ class RulesService:
                                     # extra query per file; skip for now
                                     # and let templates fall back to "".
                                     "channel": notif.get("channel"),
+                                    # Stage 06: signals the email
+                                    # template to render the "auto-
+                                    # deleting; no action required"
+                                    # badge when this rule also
+                                    # deletes the file.
+                                    "auto_delete": auto_delete,
                                 },
                                 message_override=notif.get("message"),
                             )
@@ -237,40 +336,22 @@ class RulesService:
             for tag in aggregate.add_tags:
                 await self._upsert_tag(media_file.id, tag)
 
-            # Stage 9 (audit follow-up): apply quarantine action.
-            # The aggregate carries quarantine=True if at least one
-            # matched rule had a Quarantine or Delete action. We set
-            # the row flag, stamp the timestamp, persist the reason,
-            # and emit ``media.quarantined`` for any listening
-            # consumers (the dashboard/files page invalidate via the
-            # event bus). Quarantine is idempotent — re-evaluating
-            # a row that's already quarantined doesn't bounce the
-            # timestamp or re-emit.
-            if aggregate.quarantine and not media_file.quarantined:
-                media_file.quarantined = True
-                media_file.quarantined_at = utcnow()
-                media_file.quarantined_reason = aggregate.quarantine_reason
-                if self._bus is not None:
-                    await self._bus.emit(
-                        "media.quarantined",
-                        {
-                            "id": media_file.id,
-                            "path": media_file.path,
-                            "reason": aggregate.quarantine_reason,
-                        },
-                        source="rules",
-                    )
-
-            # Stage 9 (audit follow-up): apply confirmed delete.
-            # ``delete_paths`` is populated by ``Delete(confirm=True)``
-            # actions. The default ``confirm=False`` falls through to
-            # the quarantine branch above (soft-delete). When confirm
-            # is true, move the file to ``data_dir/trash/`` and remove
-            # the row. Filesystem failures here are logged but do NOT
-            # crash the evaluation pipeline — the rule's other effects
-            # (severity, tags, notifications) have already landed.
+            # Stage 05 (v1.7) — "delete means delete" (Section A.0).
+            # The pre-Stage-05 quarantine branch is gone; every
+            # ``Delete`` action surfaced in ``aggregate.delete_paths``
+            # is applied unconditionally. ``aggregate.delete_reasons``
+            # carries the operator-supplied reason (or a synthesized
+            # one if none was provided). The audit-log entry picks
+            # ``reasons[0]`` because one file produces one delete
+            # entry regardless of how many rules matched (the row
+            # disappears either way).
             if aggregate.delete_paths:
-                await self._hard_delete_media(media_file)
+                reason = (
+                    aggregate.delete_reasons[0]
+                    if aggregate.delete_reasons
+                    else "Deleted by rule"
+                )
+                await self._hard_delete_media(media_file, reason=reason)
 
             await self._session.flush()
 
@@ -282,20 +363,164 @@ class RulesService:
             matched_rule_ids=matched_rule_ids,
         )
 
-    async def _hard_delete_media(self, media_file: MediaFile) -> None:
+    async def _throttle_gate(
+        self,
+        *,
+        rule_id: str,
+        rule_name: str,
+        window_seconds: int,
+        max_per_window: int,
+        now,
+    ) -> bool:
+        """Stage 06 (v1.7) — notification throttle gate.
+
+        Per plan §358, throttle survives restart via a DB-backed
+        counter (``rule_notification_windows``). One row per
+        ``(rule_id, window_start)`` pair.
+
+        Returns ``True`` if the dispatcher should proceed (counter
+        was below ``max_per_window`` and has been incremented);
+        ``False`` if the dispatch is suppressed.
+
+        On suppression:
+          1. Emits a ``rule.throttled`` bus event so the dashboard
+             can surface "X notifications suppressed by throttle"
+             (addendum A.1 §113).
+          2. Writes ONE summary audit-log entry per (rule_id,
+             window_start) — addendum A.2 §125 explicitly: "every
+             throttle-suppressed notification → one summary entry
+             per window per rule (not per suppressed event)". The
+             once-per-window guard is the
+             ``suppressed_audit_logged`` flag on the row.
+
+        Concurrent calls inside the same evaluation pass are not a
+        concern (rules service runs single-threaded per session);
+        the once-per-window contract still holds because the row's
+        boolean flag is the source of truth and SQLite's row-level
+        write lock serialises the UPDATE.
+        """
+        from datetime import datetime, timedelta
+
+        from app.models.rule_notification_window import (
+            RuleNotificationWindow,
+        )
+        from app.services.audit_service import AuditService
+
+        # Floor ``now`` to the window-seconds boundary so all matches
+        # in the same window land on the same row. Using integer
+        # seconds since epoch keeps the math obvious and
+        # tz-correct (utcnow returns aware datetimes).
+        epoch = int(now.timestamp())
+        bucket = epoch - (epoch % window_seconds)
+        window_start = datetime.fromtimestamp(
+            bucket, tz=now.tzinfo
+        )
+        window_end = window_start + timedelta(seconds=window_seconds)
+
+        # Look up the existing row (if any) for this (rule, window).
+        existing_q = await self._session.execute(
+            select(RuleNotificationWindow).where(
+                RuleNotificationWindow.rule_id == rule_id,
+                RuleNotificationWindow.window_start == window_start,
+            )
+        )
+        row = existing_q.scalar_one_or_none()
+        if row is None:
+            # First match in this window — create the row at
+            # count=1 (we're about to deliver) and allow.
+            row = RuleNotificationWindow(
+                rule_id=rule_id,
+                window_start=window_start,
+                window_end=window_end,
+                count=1,
+            )
+            self._session.add(row)
+            await self._session.flush()
+            return True
+
+        if row.count < max_per_window:
+            # Under the cap — increment and allow.
+            row.count += 1
+            await self._session.flush()
+            return True
+
+        # ── Throttled ──
+        # Suppress this dispatch. Emit the bus event always (the
+        # dashboard subscriber can count its own occurrences). The
+        # audit log entry, however, is once per (rule, window) per
+        # addendum A.2 §125; we use the ``count == max_per_window``
+        # transition as the marker — but that's exactly the point
+        # we just crossed, and any subsequent suppressed event in
+        # the same window will see ``count > max_per_window``.
+        if self._bus is not None:
+            await self._bus.emit(
+                "rule.throttled",
+                {
+                    "rule_id": rule_id,
+                    "rule_name": rule_name,
+                    "window_start": window_start.isoformat(),
+                    "window_end": window_end.isoformat(),
+                    "max_per_window": max_per_window,
+                },
+                source="rules",
+            )
+
+        # Audit-log once per (rule, window). The row's count is the
+        # natural signal: exactly when we cross from ``count ==
+        # max_per_window`` to ``count == max_per_window + 1`` we
+        # write the audit entry; further suppressions in the same
+        # window just bump count without re-logging.
+        already_logged = row.count > max_per_window
+        row.count += 1
+        await self._session.flush()
+        if not already_logged:
+            try:
+                audit = AuditService(self._session)
+                await audit.record(
+                    action="rule.throttled",
+                    actor_id=None,
+                    actor_label="rules",
+                    target_type="rule",
+                    target_id=rule_id,
+                    metadata={
+                        "rule_name": rule_name,
+                        "window_start": window_start.isoformat(),
+                        "window_end": window_end.isoformat(),
+                        "max_per_window": max_per_window,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "rules.throttle_audit_failed",
+                    rule_id=rule_id,
+                    error=str(exc),
+                )
+        return False
+
+    async def _hard_delete_media(
+        self, media_file: MediaFile, *, reason: str
+    ) -> None:
         """Move ``media_file`` to the trash directory and remove the
         ``MediaFile`` row. Filesystem failures are logged but do not
-        crash the rules pipeline."""
+        crash the rules pipeline.
+
+        Stage 05 (v1.7): every successful delete records an audit
+        log entry tagged ``file.deleted`` with the operator-supplied
+        reason. The entry persists even if the bus event later
+        fails to dispatch — the audit trail is the source of truth.
+        """
         import shutil
         from pathlib import Path
 
         from app.core.settings import get_settings
+        from app.services.audit_service import AuditService
 
         settings = get_settings()
         # ``data_dir`` is the configured runtime data path. We carve a
         # ``trash`` subdirectory there so a misconfigured rule is
         # always recoverable — the operator can move the file back.
         trash_root = Path(settings.data_dir) / "trash"
+        dst_path: Path | None = None
         try:
             trash_root.mkdir(parents=True, exist_ok=True)
             src = Path(media_file.path)
@@ -305,6 +530,7 @@ class RulesService:
                 # in different libraries don't overwrite each other.
                 dst = trash_root / f"{media_file.id}__{src.name}"
                 shutil.move(str(src), str(dst))
+                dst_path = dst
                 log.info(
                     "rules.hard_delete.moved_to_trash",
                     media_file_id=media_file.id,
@@ -328,10 +554,44 @@ class RulesService:
             # record of it.
             return
 
+        # Stage 05 (v1.7) — audit-log every delete. ``actor_id`` is
+        # null here because the rules pipeline runs as the system,
+        # not as a specific user; ``actor_label="rules"`` keeps the
+        # entry readable. The original path is preserved in metadata
+        # so a forensic reader can correlate the trash entry back
+        # to the source location even after the row is gone.
+        try:
+            audit = AuditService(self._session)
+            await audit.record(
+                action="file.deleted",
+                actor_id=None,
+                actor_label="rules",
+                target_type="media_file",
+                target_id=media_file.id,
+                metadata={
+                    "path": media_file.path,
+                    "reason": reason,
+                    "trash_path": str(dst_path) if dst_path else None,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            # An audit-log write failure shouldn't tank the delete —
+            # the file has already been moved to trash. Log loudly
+            # so the operator notices the audit gap.
+            log.error(
+                "rules.hard_delete.audit_failed",
+                media_file_id=media_file.id,
+                error=str(exc),
+            )
+
         if self._bus is not None:
             await self._bus.emit(
                 "media.deleted",
-                {"id": media_file.id, "path": media_file.path},
+                {
+                    "id": media_file.id,
+                    "path": media_file.path,
+                    "reason": reason,
+                },
                 source="rules",
             )
         await self._session.delete(media_file)

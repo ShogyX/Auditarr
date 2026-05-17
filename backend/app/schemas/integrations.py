@@ -74,3 +74,15 @@ class DiscoveredLibraryRead(BaseModel):
     kind: str
     root_path: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TranscodeProfileSummaryRead(BaseModel):
+    """Stage 08 (v1.7) — provider-side transcode profile, as
+    returned by ``list_transcode_profiles``. Surfaces to the
+    optimization profile editor so operators pick a target by
+    name."""
+
+    id: str
+    name: str
+    description: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)

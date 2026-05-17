@@ -45,7 +45,8 @@ vi.mock("@/lib/invalidate", () => ({
   invalidateRelated: vi.fn(),
 }));
 
-import { useScanProgress } from "@/hooks/useScanProgress";
+import { useScanProgress, useScanProgressWs } from "@/hooks/useScanProgress";
+import { useScanProgressStore } from "@/stores/scanProgressStore";
 import { ScanProgressBar } from "@/components/ui/ScanProgressBar";
 
 function Wrapper({ children }: { children: ReactNode }) {
@@ -61,6 +62,9 @@ function fire(name: string, payload: unknown): void {
 
 beforeEach(() => {
   capturedHandler = null;
+  // Stage 13 — the store is module-level; reset its state
+  // between tests so leftovers don't leak.
+  useScanProgressStore.getState().reset();
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -69,16 +73,26 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * Stage 13 — mount both hooks. ``useScanProgressWs`` wires
+ * the WS callback so ``fire()`` works; ``useScanProgress``
+ * returns the snapshot the test asserts against.
+ */
+function useScanProgressForTest() {
+  useScanProgressWs();
+  return useScanProgress();
+}
+
 describe("Stage 8 — useScanProgress", () => {
   it("starts at idle state (no runId, null percent)", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     expect(result.current.runId).toBeNull();
     expect(result.current.percent).toBeNull();
     expect(result.current.filesTotalEstimate).toBeNull();
   });
 
   it("scan.started resets to seen=0 with no total estimate yet", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
     });
@@ -90,7 +104,7 @@ describe("Stage 8 — useScanProgress", () => {
   });
 
   it("scan.progress with total estimate computes a percent", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -111,7 +125,7 @@ describe("Stage 8 — useScanProgress", () => {
     // files_total_estimate before the completed event arrives.
     // Hitting 100% before completion would deceive the operator —
     // the bar should plateau at 99% until the run is finalized.
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -125,7 +139,7 @@ describe("Stage 8 — useScanProgress", () => {
   });
 
   it("scan.completed snaps percent to 100 and flips recentlyCompleted", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.completed", {
@@ -140,7 +154,7 @@ describe("Stage 8 — useScanProgress", () => {
   });
 
   it("recentlyCompleted fades after 5 seconds", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.completed", {
         run_id: "r1",
@@ -160,7 +174,7 @@ describe("Stage 8 — useScanProgress", () => {
   });
 
   it("scan.failed resets the entire progress state", () => {
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -180,7 +194,7 @@ describe("Stage 8 — useScanProgress", () => {
     // The scanner emits an initial scan.progress with files_seen=0
     // and a total estimate, but a misconfigured or older scanner
     // might not include the total. Make sure we don't crash.
-    const { result } = renderHook(() => useScanProgress(), { wrapper: Wrapper });
+    const { result } = renderHook(() => useScanProgressForTest(), { wrapper: Wrapper });
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -196,14 +210,23 @@ describe("Stage 8 — useScanProgress", () => {
 });
 
 describe("Stage 8 — ScanProgressBar", () => {
+  // Stage 13 — the bar reads state from the store; tests need
+  // the WS subscription mounted so ``fire()`` reaches the store.
+  // A small wrapper renders both the bar and an invisible
+  // ``useScanProgressWs`` consumer.
+  function BarTestHarness() {
+    useScanProgressWs();
+    return <ScanProgressBar />;
+  }
+
   it("renders nothing when idle (no run + no recent completion)", () => {
-    const { container } = render(<Wrapper><ScanProgressBar /></Wrapper>);
+    const { container } = render(<Wrapper><BarTestHarness /></Wrapper>);
     // Component returns null in idle state.
     expect(container.firstChild).toBeNull();
   });
 
   it("renders an indeterminate state while the scanner is enumerating", () => {
-    const { container } = render(<Wrapper><ScanProgressBar /></Wrapper>);
+    const { container } = render(<Wrapper><BarTestHarness /></Wrapper>);
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
     });
@@ -214,7 +237,7 @@ describe("Stage 8 — ScanProgressBar", () => {
   });
 
   it("renders a determinate state once progress events arrive", () => {
-    const { container } = render(<Wrapper><ScanProgressBar /></Wrapper>);
+    const { container } = render(<Wrapper><BarTestHarness /></Wrapper>);
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -230,7 +253,7 @@ describe("Stage 8 — ScanProgressBar", () => {
   });
 
   it("shows the file count when total is known", () => {
-    const { getByText } = render(<Wrapper><ScanProgressBar /></Wrapper>);
+    const { getByText } = render(<Wrapper><BarTestHarness /></Wrapper>);
     act(() => {
       fire("scan.started", { run_id: "r1", library_id: "lib-1" });
       fire("scan.progress", {
@@ -244,7 +267,7 @@ describe("Stage 8 — ScanProgressBar", () => {
   });
 
   it("shows 'Scan complete' label briefly after completion", () => {
-    const { getByText } = render(<Wrapper><ScanProgressBar /></Wrapper>);
+    const { getByText } = render(<Wrapper><BarTestHarness /></Wrapper>);
     act(() => {
       fire("scan.completed", {
         run_id: "r1",

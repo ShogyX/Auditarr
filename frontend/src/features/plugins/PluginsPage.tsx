@@ -169,7 +169,7 @@ export function PluginsPage() {
         sub="Discover, configure, and reload backend plugins without restarting the host"
         helpKey="plugins.overview"
       />
-      <div className="p-6 flex flex-col gap-4 max-w-5xl">
+      <div className="p-6 flex flex-col gap-4 plugins-page">
         <Card>
           <PluginsToolbar
             tab={tab}

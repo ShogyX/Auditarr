@@ -87,6 +87,26 @@ class _StubProvider:
     ) -> list:
         return []
 
+    # Stage 07 / Stage 08 protocol additions — required so the
+    # ``runtime_checkable`` isinstance check below passes. The
+    # stub doesn't exercise these surfaces; inert defaults.
+    async def submit_transcode_job(self, _config, _job_spec):  # noqa: ANN001, ANN202
+        from app.integrations.types import JobSubmitResult
+
+        return JobSubmitResult(status="rejected", detail="stub")
+
+    async def list_transcode_profiles(self, _config):  # noqa: ANN001, ANN202
+        return []
+
+    async def get_transcode_job_status(self, _config, _upstream_job_id):  # noqa: ANN001, ANN202
+        from app.integrations.types import TranscodeJobStatus
+
+        return TranscodeJobStatus(status="unknown")
+
+    # Stage 09 (v1.7) — return [] so runtime_checkable passes.
+    async def fetch_live_playbacks(self, _config):  # noqa: ANN001, ANN202
+        return []
+
 
 assert isinstance(_StubProvider(), IntegrationProvider)
 

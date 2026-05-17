@@ -20,6 +20,12 @@ Variables available to templates:
   * ``library_name``   — library the file belongs to
   * ``message``        — the rule's ``notify.message`` if set
   * ``time``           — ISO-8601 UTC timestamp
+  * ``auto_delete``    — Stage 06 (v1.7): True when the rule that
+                         fired this notification ALSO contains a
+                         ``delete`` action. The default body
+                         template renders a "No action required —
+                         the file is being deleted" badge when
+                         this is truthy (plan §359-360).
 """
 
 from __future__ import annotations
@@ -39,11 +45,21 @@ _env = Environment(
 )
 
 DEFAULT_SUBJECT = "[Auditarr] {{ severity|upper }} · {{ rule_name }}"
+# Stage 06 (v1.7) — when the same rule that fired the notification
+# also has a ``delete`` action attached, the dispatcher passes
+# ``auto_delete: True`` in the variables. The body template
+# inserts a clearly-visible badge so the operator's eye doesn't
+# slide off thinking "I need to go investigate this" when in fact
+# the file has already been moved to trash.
 DEFAULT_BODY = """\
 {{ rule_name }} matched {{ filename }} (severity {{ severity }}).
 
 File: {{ path }}
 Library: {{ library_name }}
+{% if auto_delete %}
+
+[Auto-delete] No action required — the file is being deleted by this rule.
+{% endif %}
 {% if message %}
 
 {{ message }}

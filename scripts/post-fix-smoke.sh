@@ -108,8 +108,137 @@ check "/notifications/kinds" --require '[.[].kind] | (contains(["email"]) and co
 echo
 if (( FAIL == 0 )); then
     echo "PASS  all checks succeeded"
+else
+    echo "FAIL  ${FAIL} API check(s) failed"
+fi
+
+# ── Stage 16 (v1.7 release gate) — source-tree validation ─────
+#
+# Plan §681 — beyond API smoke, the release gate validates the
+# shipped source tree itself for the v1.7 fingerprints. These
+# checks run against the repo working copy ($REPO_ROOT,
+# defaulting to the script's parent directory). They don't
+# require AUDITARR_BASE — they're filesystem-only.
+
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+declare -i SRC_FAIL=0
+
+src_check() {
+    local label="$1"
+    local result="$2"
+    if [[ "$result" == "ok" ]]; then
+        echo "OK    src: ${label}"
+    else
+        echo "FAIL  src: ${label} → ${result}"
+        SRC_FAIL=$((SRC_FAIL + 1))
+    fi
+}
+
+echo
+echo "== Stage 16 v1.7 source-tree validation against ${REPO_ROOT} =="
+
+# Stage 01 — installer rename. install-docker.sh + install-bare-metal.sh
+# exist; install.sh is the stub.
+if [[ -f "${REPO_ROOT}/install-docker.sh" && -f "${REPO_ROOT}/install-bare-metal.sh" ]]; then
+    if grep -q "has been renamed" "${REPO_ROOT}/install.sh" 2>/dev/null; then
+        src_check "installer rename (Stage 01)" "ok"
+    else
+        src_check "installer rename (Stage 01)" "install.sh exists but isn't the rename stub"
+    fi
+else
+    src_check "installer rename (Stage 01)" "missing install-docker.sh or install-bare-metal.sh"
+fi
+
+# Stage 02 — Files page resize wiring. Look for the column-width
+# state on the frontend.
+if grep -rq "columnWidth\|column_width\|pointerup.*width" \
+   "${REPO_ROOT}/frontend/src/features/files/" 2>/dev/null; then
+    src_check "files-page resize wiring (Stage 02)" "ok"
+else
+    src_check "files-page resize wiring (Stage 02)" "no resize handler found"
+fi
+
+# Stage 05 — no ACTIVE ``quarantine`` references in shipped
+# frontend sources. The Stage 05 removal is documented in
+# many comments throughout the codebase (e.g. "Stage 27's
+# quarantine workflow was retired"); those historical
+# explanations are intentional and not regressions.
+#
+# We look for ACTIVE refs only — patterns that would indicate
+# live code: an identifier (``quarantine``, ``quarantined``,
+# ``unquarantine``) used as a function name, property access,
+# import, type, or string literal that the JS runtime would
+# actually evaluate. The signature is "quarantine followed by
+# ``(``, ``:``, ``.``, ``=``, or matching quotes" — comments
+# don't satisfy any of those grammatically.
+QUARANTINE_HITS=$(grep -rln --include='*.ts' --include='*.tsx' \
+    --exclude='*.test.tsx' --exclude='*.test.ts' \
+    -E 'quarantin[a-zA-Z]*\s*[\(:=\.]|["'\''"]quarantin' \
+    "${REPO_ROOT}/frontend/src/" 2>/dev/null | \
+    grep -v "node_modules" | grep -v "/docs/" | \
+    while read -r f; do
+        # Re-check: keep only files where the active-ref
+        # regex matches a NON-comment line. Comments in
+        # TS/TSX include ``//``, ``/* */``, and ``{/* */}``.
+        remaining=$(grep -nE 'quarantin[a-zA-Z]*\s*[\(:=\.]|["'\''"]quarantin' "$f" 2>/dev/null | \
+            grep -vE '^\s*[0-9]+:\s*(//|\*|/\*|\{/\*)' || true)
+        if [[ -n "$remaining" ]]; then
+            echo "$f"
+        fi
+    done || true)
+if [[ -z "$QUARANTINE_HITS" ]]; then
+    src_check "no active quarantine refs in frontend sources (Stage 05)" "ok"
+else
+    echo "$QUARANTINE_HITS" >&2
+    src_check "no active quarantine refs in frontend sources (Stage 05)" "found active refs (see above)"
+fi
+
+# Stage 10 — VT integration registered (VT module lives in
+# app/services/, not app/integrations/).
+if [[ -f "${REPO_ROOT}/backend/app/services/virustotal.py" ]] || \
+   grep -rq "VirusTotal\|vt_status" \
+   "${REPO_ROOT}/backend/app/" 2>/dev/null; then
+    src_check "VT integration registered (Stage 10)" "ok"
+else
+    src_check "VT integration registered (Stage 10)" "no VT module found"
+fi
+
+# Stage 07-08 — optimization routing targets present (in_process,
+# tdarr at minimum). The optimization module lives at
+# app/optimization/, not under app/services/.
+if grep -rq 'routing_target\|in_process\|"tdarr"' \
+   "${REPO_ROOT}/backend/app/optimization/" 2>/dev/null; then
+    src_check "optimization routing targets (Stage 07-08)" "ok"
+else
+    src_check "optimization routing targets (Stage 07-08)" "no routing_target references found"
+fi
+
+# Stage 15 — /media/vocabulary endpoint registered.
+if grep -q '/vocabulary\b\|MediaVocabulary' \
+   "${REPO_ROOT}/backend/app/api/v1/media.py" 2>/dev/null; then
+    src_check "media vocabulary endpoint (Stage 15)" "ok"
+else
+    src_check "media vocabulary endpoint (Stage 15)" "endpoint not registered"
+fi
+
+# Version stamp — Stage 16 bumped to 1.7.0.
+if grep -q '__version__ = "1.8.1"' "${REPO_ROOT}/backend/app/__init__.py" 2>/dev/null; then
+    src_check "backend __version__ == 1.8.1 (Stage 16)" "ok"
+else
+    src_check "backend __version__ == 1.8.1 (Stage 16)" "version mismatch"
+fi
+if grep -q '"version": "1.8.1"' "${REPO_ROOT}/frontend/package.json" 2>/dev/null; then
+    src_check "frontend package.json version == 1.8.1 (Stage 16)" "ok"
+else
+    src_check "frontend package.json version == 1.8.1 (Stage 16)" "version mismatch"
+fi
+
+echo
+TOTAL=$((FAIL + SRC_FAIL))
+if (( TOTAL == 0 )); then
+    echo "PASS  all checks (API + source-tree) succeeded"
     exit 0
 else
-    echo "FAIL  ${FAIL} check(s) failed"
+    echo "FAIL  ${TOTAL} check(s) failed (${FAIL} API, ${SRC_FAIL} src)"
     exit 1
 fi

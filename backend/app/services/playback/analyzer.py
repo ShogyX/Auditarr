@@ -35,7 +35,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -80,6 +80,13 @@ class SuggestionCandidate:
 # ── Analyzer ─────────────────────────────────────────────────
 @dataclass(slots=True)
 class AnalysisOutcome:
+    # ``examined_events`` is the count the analyzer actually
+    # iterated over: events with a resolved ``media_file_id``
+    # (the heuristics read MediaFile attributes, so unresolved
+    # events have nothing to match). Kept as the original
+    # field name for backwards compatibility with downstream
+    # callers (the rule deployment audit log, log messages,
+    # etc.).
     examined_events: int = 0
     candidates_generated: int = 0
     suggestions_created: int = 0
@@ -87,6 +94,21 @@ class AnalysisOutcome:
     skipped_dismissed: int = 0
     skipped_deployed: int = 0
     skipped_too_few_events: bool = False
+    # ── Stage 09 (v1.7) — playback-count fix per plan §482 ──
+    # The recommendation card's "N playbacks in the last 30
+    # days" empty-state copy must show the *true* count, not
+    # just the resolved-only count. With broken path mappings,
+    # an operator can see "0 playbacks" even when 25 actual
+    # playbacks happened — they just don't resolve to library
+    # files. We surface the split so the operator sees the
+    # path-mapping gap directly in the UI.
+    #
+    # ``examined_events_total``     = all events in window
+    # ``examined_events_resolved``  = events with media_file_id
+    # ``examined_events_unresolved`` = total − resolved
+    examined_events_total: int = 0
+    examined_events_resolved: int = 0
+    examined_events_unresolved: int = 0
 
 
 class PlaybackAnalyzer:
@@ -102,6 +124,22 @@ class PlaybackAnalyzer:
     async def analyze(self) -> AnalysisOutcome:
         outcome = AnalysisOutcome()
         cutoff = utcnow() - _dt.timedelta(days=ANALYSIS_WINDOW_DAYS)
+
+        # Stage 09 (plan §482) — total event count in the
+        # window, regardless of resolution. This is what the
+        # dashboard's recommendation card shows in its empty-
+        # state copy: operators need to see the true count
+        # (not just resolved) so a path-mapping problem doesn't
+        # look like "no playbacks happened at all".
+        total_in_window = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(PlaybackEvent)
+                .where(PlaybackEvent.started_at >= cutoff)
+            )
+        ).scalar_one()
+        outcome.examined_events_total = int(total_in_window or 0)
+
         rows = (
             await self._session.execute(
                 select(PlaybackEvent)
@@ -115,12 +153,18 @@ class PlaybackAnalyzer:
         ).scalars().all()
 
         outcome.examined_events = len(rows)
+        outcome.examined_events_resolved = len(rows)
+        outcome.examined_events_unresolved = max(
+            0, outcome.examined_events_total - outcome.examined_events_resolved
+        )
         if len(rows) < MIN_EVENTS_TOTAL:
             outcome.skipped_too_few_events = True
             log.info(
                 "playback.analyzer.skipped",
                 reason="too_few_events",
                 examined=len(rows),
+                examined_total=outcome.examined_events_total,
+                examined_unresolved=outcome.examined_events_unresolved,
                 floor=MIN_EVENTS_TOTAL,
             )
             return outcome

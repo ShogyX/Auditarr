@@ -99,7 +99,6 @@ const FILE_A = {
   height: 1080,
   has_subtitles: false,
   is_orphaned: false,
-  quarantined: false,
 };
 
 const PROFILE_ENABLED = {

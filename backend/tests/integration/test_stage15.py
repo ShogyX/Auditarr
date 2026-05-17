@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any

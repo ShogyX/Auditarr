@@ -219,7 +219,6 @@ describe("Stage 14b — Files page ?file_id= deep-link", () => {
           height: 1080,
           has_subtitles: false,
           is_orphaned: false,
-          quarantined: false,
         };
       }
       if (path === "/libraries") return [];

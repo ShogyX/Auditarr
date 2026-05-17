@@ -89,7 +89,6 @@ const SUMMARY = {
   height: 1080,
   has_subtitles: false,
   is_orphaned: false,
-  quarantined: false,
 };
 
 const DETAIL = {
@@ -105,8 +104,6 @@ const DETAIL = {
   probe_error: null,
   last_scan_id: "scan-1",
   seen_at: "2026-05-10T12:00:00Z",
-  quarantined_at: null,
-  quarantined_reason: null,
   created_at: "2026-05-01T00:00:00Z",
   updated_at: "2026-05-10T12:00:00Z",
 };

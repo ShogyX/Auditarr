@@ -13,12 +13,23 @@ this prevents upstreams from retrying on quirks they can't fix
 
 The body is read raw (``await request.body()``) so signature
 verification operates on the exact bytes the upstream signed.
+
+Stage 11 (v1.7, plan §540-546 + addendum B.8) — per-Integration
+source whitelist. When ``Integration.config["source_whitelist"]``
+contains one or more CIDR ranges or hostnames, requests from
+addresses NOT in the list are rejected with 403 BEFORE signature
+verification runs. Per addendum B.8 the whitelist is per-Integration
+(per webhook endpoint), not per-channel — each Integration row IS
+an endpoint, so an operator wanting two upstreams with different
+whitelists configures two Integration rows.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
+import socket
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -72,6 +83,38 @@ async def receive_webhook(
                 f"{integration.kind!r}, not {kind!r}"
             ),
         )
+
+    # Stage 11 (plan §540-546 + addendum B.8) — per-Integration
+    # source whitelist. When the integration's config carries a
+    # non-empty ``source_whitelist``, the request source IP must
+    # be in the list. Rejection is a 403 (auth-adjacent) so
+    # upstreams know to stop retrying rather than waiting for a
+    # 401 retry-with-credentials.
+    #
+    # We check whitelist BEFORE signature verification because:
+    # (a) it's cheaper (no HMAC compute on rejected requests),
+    # (b) it's the operator's first line of defence and shouldn't
+    #     depend on a correctly-configured secret.
+    whitelist_raw = (integration.config or {}).get("source_whitelist")
+    if whitelist_raw:
+        client_host = (
+            request.client.host
+            if request.client is not None
+            else ""
+        )
+        if not _matches_source_whitelist(client_host, whitelist_raw):
+            log.warning(
+                "webhook.source_rejected",
+                integration_id=integration_id,
+                kind=kind,
+                client_host=client_host,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Source not in this integration's whitelist."
+                ),
+            )
 
     if not integration.webhook_secret_ciphertext:
         raise HTTPException(
@@ -154,3 +197,88 @@ def _verify_signature(
         secret.encode("utf-8"), raw_body, hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(received, expected)
+
+
+# ── Stage 11 (v1.7) — source-whitelist matcher ──────────────────
+
+
+def _matches_source_whitelist(
+    client_host: str, whitelist: Any
+) -> bool:
+    """Check whether ``client_host`` matches any entry in the
+    integration's whitelist.
+
+    Entries may be:
+      * An exact IPv4/IPv6 address (e.g. ``"192.168.1.10"``).
+      * A CIDR range (e.g. ``"192.168.1.0/24"``, ``"::1/128"``).
+      * A hostname (e.g. ``"sonarr.local"``). Hostnames are
+        resolved at check time via :func:`socket.gethostbyname`
+        — operators with DNS-driven whitelists pay the lookup
+        cost per request but get the dynamic-IP-tolerant
+        behaviour they're asking for.
+
+    Returns False on:
+      * Empty / non-list ``whitelist``.
+      * Empty ``client_host``.
+      * No entry matching.
+
+    Hostname resolution errors are treated as a non-match for
+    the entry (we don't fail the whole request on one bad
+    hostname entry).
+    """
+    if not whitelist or not client_host:
+        return False
+    if not isinstance(whitelist, list):
+        return False
+
+    # Pre-parse the client address once — most entries we
+    # compare against are IP/CIDR so we avoid re-parsing.
+    try:
+        client_ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        client_ip = None
+
+    for raw_entry in whitelist:
+        entry = str(raw_entry or "").strip()
+        if not entry:
+            continue
+
+        # CIDR range — contains "/".
+        if "/" in entry:
+            try:
+                network = ipaddress.ip_network(entry, strict=False)
+            except ValueError:
+                continue
+            if client_ip is not None and client_ip in network:
+                return True
+            continue
+
+        # Exact IP — try to parse as one.
+        try:
+            entry_ip = ipaddress.ip_address(entry)
+            if client_ip is not None and entry_ip == client_ip:
+                return True
+            continue
+        except ValueError:
+            pass
+
+        # Hostname — resolve to IP and compare. We use
+        # ``getaddrinfo`` rather than ``gethostbyname`` so
+        # IPv6 lookups work too.
+        try:
+            for info in socket.getaddrinfo(entry, None):
+                resolved = info[4][0]
+                try:
+                    resolved_ip = ipaddress.ip_address(resolved)
+                except ValueError:
+                    continue
+                if client_ip is not None and resolved_ip == client_ip:
+                    return True
+        except (socket.gaierror, UnicodeError, OSError):
+            # Bad hostname or DNS unavailable — this entry
+            # contributes nothing to the match decision, but
+            # other entries may still match. Don't crash the
+            # whole request on one bad entry.
+            continue
+
+    return False

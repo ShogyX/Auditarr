@@ -30,7 +30,8 @@ export const SEVERITY_KEYS = [
 
 export type SeverityKey = (typeof SEVERITY_KEYS)[number];
 export type ScopeMode = "all" | "media" | "non-media";
-export type QuarantineView = "hide" | "include" | "only";
+// ``QuarantineView`` lived here pre-Stage-05; the quarantine
+// workflow is gone (Section A.0 of the v1.7 addendum).
 
 export const SEVERITY_META: Record<
   SeverityKey,

@@ -1,4 +1,4 @@
-"""Playback telemetry poller (Stage 16).
+"""Playback telemetry poller (Stage 16; cursor audit Stage 09).
 
 For each enabled Plex/Jellyfin integration:
 
@@ -9,10 +9,13 @@ For each enabled Plex/Jellyfin integration:
    :class:`MediaFile` row; record null when unresolved
 5. Insert new ``PlaybackEvent`` rows (deduplicated by
    ``(integration_id, upstream_id)`` via the unique constraint)
-6. Update the cursor to the latest ``started_at`` we saw
-7. Compute drift over the batch and, if the result is concerning,
-   stash a short health-detail update on the integration so the UI
-   can prompt the operator to configure path mappings
+6. Update the cursor to ``max(started_at) − safety_skew`` so
+   slightly-out-of-order events on the next poll aren't dropped
+   (Stage 09; see ``CURSOR_SAFETY_SKEW`` below)
+7. Stash a short "last poll" health-detail line on the integration
+   so the dashboard can surface "Last poll: N events ingested at T"
+8. Compute drift over the batch and, if the result is concerning,
+   replace the health-detail with a path-mappings hint instead
 
 The poller is conservative: failures for one integration don't
 propagate to others, and the cursor only advances if we successfully
@@ -47,6 +50,24 @@ from app.utils.datetime import utcnow
 log = get_logger("auditarr.playback.poller", category="playback")
 
 CURSOR_KIND = "playback_events"
+
+# Stage 09 (v1.7) — the cursor advances to ``max(started_at) −
+# CURSOR_SAFETY_SKEW`` rather than ``max(started_at)`` itself.
+# Plex (and to a lesser extent Jellyfin) can return events with
+# slightly-out-of-order ``started_at`` timestamps — a session
+# that was being held in cache for transcoding decision data,
+# for example, may write its started_at to the history page a
+# few seconds after a session that started later. Without a
+# safety skew, the cursor advances past the late-arriving
+# event's started_at and the next poll's `since` filter drops it
+# silently.
+#
+# 60 seconds covers all real-world cases we've seen. Replays are
+# harmless thanks to the unique constraint on
+# ``(integration_id, upstream_id)`` — the savepoint pattern
+# below rolls back duplicates without disturbing the rest of
+# the batch.
+CURSOR_SAFETY_SKEW = _dt.timedelta(seconds=60)
 
 
 @dataclass(slots=True)
@@ -200,11 +221,39 @@ class PlaybackPoller:
                 # rolled the bad insert back; carry on with the rest.
                 pass
 
+            # ── v1.8.0 (Stage 17) reconciliation hook ──────────
+            # If the SSE listener also captured this session (it
+            # will have, when SSE is connected), mark the
+            # PlaybackSession row as reconciled so the analyzer
+            # knows the history backup matches our live data.
+            # Plex's history ``upstream_id`` is the historyKey,
+            # not the sessionKey — so a strict match is unlikely.
+            # We instead match on the (integration_id, started_at)
+            # tuple, which is unique enough for our purposes.
+            # Failure here is silent; reconciliation is best-effort.
+            try:
+                await self._mark_session_reconciled(
+                    integration.id, dto.started_at
+                )
+            except Exception:  # noqa: BLE001
+                # Best-effort. Reconciliation is a nice-to-have
+                # for the analyzer; missing it doesn't break
+                # the history scrape.
+                pass
+
         outcome.inserted = inserted
 
-        # Advance cursor if we made progress.
+        # Stage 09 — advance cursor to ``latest_started_at −
+        # CURSOR_SAFETY_SKEW`` so slightly-out-of-order events
+        # arriving on the next poll aren't dropped. Dedup is
+        # handled by the unique constraint above; replays are
+        # harmless. We only advance when something was inserted
+        # (preserves the previous "no progress → no advance"
+        # contract that protects against a transient empty
+        # provider response stomping a known-good cursor).
         if latest_started_at is not None:
-            await self._upsert_cursor(integration.id, latest_started_at)
+            cursor_value = latest_started_at - CURSOR_SAFETY_SKEW
+            await self._upsert_cursor(integration.id, cursor_value)
 
         # Drift detection.
         # Stage 5 (audit follow-up): "mappings configured" now means
@@ -234,6 +283,26 @@ class PlaybackPoller:
                         },
                     )
                 )
+        else:
+            # Stage 09 (plan §481) — surface last-poll counts on
+            # the integration so the dashboard can render "Last
+            # poll: N events ingested at T". Only written when
+            # there's no drift to surface; drift detail is
+            # operator-actionable and wins the slot.
+            #
+            # We don't downgrade an existing ``healthy``/``ok``
+            # status here — just refresh the detail string + the
+            # checked_at timestamp. The operator's existing
+            # healthcheck cron owns the status field.
+            now = utcnow()
+            integration.health_detail = _format_last_poll_detail(
+                fetched=outcome.fetched,
+                inserted=outcome.inserted,
+                resolved=outcome.resolved,
+                unresolved=outcome.unresolved,
+                at=now,
+            )
+            integration.health_checked_at = now
 
         await self._session.commit()
         log.info(
@@ -275,6 +344,37 @@ class PlaybackPoller:
             existing.cursor_value = iso
             existing.updated_at = utcnow()
 
+    async def _mark_session_reconciled(
+        self, integration_id: str, started_at: _dt.datetime
+    ) -> None:
+        """v1.8.0 (Stage 17) reconciliation hook.
+
+        When the history scrape ingests an event for a session
+        the SSE listener also recorded (matched by
+        ``(integration_id, started_at within ±60s)``), mark the
+        PlaybackSession row's ``reconciled_with_history`` flag.
+
+        Best-effort: failure is silent.
+        """
+        # Avoid circular import.
+        from app.models.playback import PlaybackSession
+
+        # Match within ±60 seconds because Plex's history
+        # ``viewedAt`` timestamp may round to the nearest second
+        # while our SSE-driven ``started_at`` is sub-second.
+        window = _dt.timedelta(seconds=60)
+        result = await self._session.execute(
+            select(PlaybackSession).where(
+                PlaybackSession.integration_id == integration_id,
+                PlaybackSession.started_at >= started_at - window,
+                PlaybackSession.started_at <= started_at + window,
+                PlaybackSession.reconciled_with_history.is_(False),
+            )
+        )
+        row = result.scalars().first()
+        if row is not None:
+            row.reconciled_with_history = True
+
     def _parse_cursor(self, value: str) -> _dt.datetime | None:
         try:
             return _dt.datetime.fromisoformat(value)
@@ -295,3 +395,40 @@ class PlaybackPoller:
 # Silence linters when sqlite_insert is unused — kept for future
 # bulk-insert optimization.
 _ = sqlite_insert
+
+
+def _format_last_poll_detail(
+    *,
+    fetched: int,
+    inserted: int,
+    resolved: int,
+    unresolved: int,
+    at: _dt.datetime,
+) -> str:
+    """Stage 09 (plan §481) — short, operator-readable summary
+    written to ``Integration.health_detail`` after a successful
+    poll. Format keeps both the count and the resolved/unresolved
+    split visible so an operator with a path-mapping problem
+    sees the symptom without opening the path-mappings panel.
+
+    Truncates to a reasonable length so the dashboard tooltip
+    doesn't blow up.
+    """
+    # Render time as ISO seconds (no microseconds) for stable
+    # display.
+    when = at.replace(microsecond=0).isoformat()
+    if fetched == 0:
+        return f"Last poll: no events at {when}"
+    if unresolved == 0:
+        return (
+            f"Last poll: {inserted} of {fetched} event"
+            f"{'s' if fetched != 1 else ''} ingested at {when}"
+        )
+    # When some events couldn't be resolved, surface the split
+    # so the operator sees the path-mappings gap.
+    return (
+        f"Last poll: {inserted} of {fetched} event"
+        f"{'s' if fetched != 1 else ''} ingested at {when} "
+        f"({resolved} resolved, {unresolved} unresolved — "
+        f"check path mappings)"
+    )

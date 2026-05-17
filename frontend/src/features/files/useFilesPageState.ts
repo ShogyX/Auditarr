@@ -5,8 +5,8 @@
  * ``useState`` / ``useMemo`` / ``useEffect`` declarations in
  * ``FilesPage.tsx``:
  *
- *   - filter values (library, category, search, scope, quarantine,
- *     active severities, active codecs, active containers)
+ *   - filter values (library, category, search, scope, active
+ *     severities, active codecs, active containers)
  *   - pagination (current page)
  *   - row selection
  *   - drawer file
@@ -14,7 +14,11 @@
  *   - filter → React-Query params memoisation
  *   - selection-reset side effect when filters change
  *
- * Behaviour is preserved exactly so the four FilesPage test files
+ * Stage 05 (v1.7) removed the quarantine view state that lived
+ * here pre-stage; the Files page no longer exposes a quarantine
+ * select.
+ *
+ * Behaviour is otherwise preserved so the four FilesPage test files
  * continue to pass without modification. The hook returns one big
  * object because the page itself is the only consumer; splitting into
  * sub-hooks would just relocate the boilerplate.
@@ -25,6 +29,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   useLibraries,
   useMediaList,
+  useResetLibraryScans,
   useTriggerScan,
   useTriggerScanAll,
   type MediaFileSummary,
@@ -37,7 +42,6 @@ import { useFilesPrefs } from "@/stores/filesPrefsStore";
 
 import {
   SEVERITY_KEYS,
-  type QuarantineView,
   type ScopeMode,
   type SeverityKey,
 } from "./filesShared";
@@ -52,6 +56,11 @@ export interface UseFilesPageState {
    * for every enabled library via POST /scans/all.
    */
   triggerScanAll: ReturnType<typeof useTriggerScanAll>;
+  /**
+   * v1.8.1: reset stuck scans for a library. Surfaced via the
+   * FilesPage error banner when a scan trigger returns 409.
+   */
+  resetLibraryScans: ReturnType<typeof useResetLibraryScans>;
   /** Live scan progress (websocket-backed). */
   scanProgress: ReturnType<typeof useScanProgress>;
 
@@ -61,6 +70,20 @@ export interface UseFilesPageState {
   visibleColumns: ReturnType<typeof useFilesPrefs.getState>["visibleColumns"];
   toggleColumn: ReturnType<typeof useFilesPrefs.getState>["toggleColumn"];
   resetColumns: ReturnType<typeof useFilesPrefs.getState>["resetColumns"];
+  /* Stage 02 — column widths + per-column filters. */
+  columnWidths: ReturnType<typeof useFilesPrefs.getState>["columnWidths"];
+  setColumnWidth: ReturnType<typeof useFilesPrefs.getState>["setColumnWidth"];
+  perColumnFilters: ReturnType<
+    typeof useFilesPrefs.getState
+  >["perColumnFilters"];
+  setPerColumnFilter: ReturnType<
+    typeof useFilesPrefs.getState
+  >["setPerColumnFilter"];
+  /* Stage 02 — visibility of the per-column filter row. Transient
+   * (not persisted) so the row collapses on reload — operators
+   * who want it back hit the toolbar toggle. */
+  showColumnFilters: boolean;
+  setShowColumnFilters: (v: boolean) => void;
 
   /* ── transient page state ──────────────────────────────── */
   libraryId: string;
@@ -71,8 +94,8 @@ export interface UseFilesPageState {
   setSearch: (s: string) => void;
   scope: ScopeMode;
   setScope: (s: ScopeMode) => void;
-  quarantineView: QuarantineView;
-  setQuarantineView: (v: QuarantineView) => void;
+  // Stage 27's quarantineView state and setter were removed in
+  // Stage 05 (v1.7) along with the quarantine workflow they served.
   activeSevs: Set<string>;
   toggleSev: (key: SeverityKey) => void;
   allSevs: () => void;
@@ -105,6 +128,7 @@ export function useFilesPageState(): UseFilesPageState {
   const libraries = useLibraries();
   const triggerScan = useTriggerScan();
   const triggerScanAll = useTriggerScanAll();
+  const resetLibraryScans = useResetLibraryScans();
   const scanProgress = useScanProgress();
 
   const pageSize = useFilesPrefs((s) => s.pageSize);
@@ -113,16 +137,20 @@ export function useFilesPageState(): UseFilesPageState {
   const visibleColumns = useFilesPrefs((s) => s.visibleColumns);
   const toggleColumn = useFilesPrefs((s) => s.toggleColumn);
   const resetColumns = useFilesPrefs((s) => s.resetColumns);
+  // Stage 02 — column resize + per-column filter prefs.
+  const columnWidths = useFilesPrefs((s) => s.columnWidths);
+  const setColumnWidth = useFilesPrefs((s) => s.setColumnWidth);
+  const perColumnFilters = useFilesPrefs((s) => s.perColumnFilters);
+  const setPerColumnFilter = useFilesPrefs((s) => s.setPerColumnFilter);
+  const [showColumnFilters, setShowColumnFilters] = useState<boolean>(false);
 
   const [libraryId, setLibraryId] = useState<string>("");
   const [category, setCategory] = useState<string>("");
   const [search, setSearch] = useState<string>("");
   const [scope, setScope] = useState<ScopeMode>("all");
-  // Stage 27: quarantine view mode.
-  //   - "hide"     → exclude quarantined files (default; server already does this)
-  //   - "include"  → mix quarantined and non-quarantined
-  //   - "only"     → show only quarantined (the "audit the quarantine list" view)
-  const [quarantineView, setQuarantineView] = useState<QuarantineView>("hide");
+  // Stage 27 carried a ``quarantineView`` state field here. Stage
+  // 05 (v1.7) retired it (Section A.0 — "delete means delete");
+  // the page no longer offers a quarantine view toggle.
   const [activeSevs, setActiveSevs] = useState<Set<string>>(
     () => new Set(SEVERITY_KEYS),
   );
@@ -143,11 +171,21 @@ export function useFilesPageState(): UseFilesPageState {
   // library cards can drill down into a filtered Files view.
   // Stage 31: deep-link from the dashboard's Categories card
   // via ``?video_codec=hevc`` / ``?container=matroska``.
+  // Stage 02 (v1.7): ``?severity=`` accepts a comma-separated set
+  // (``?severity=warn,high,error,crit``) so the dashboard's
+  // Open-issues card can pre-filter to "everything actionable" in
+  // one click, not just one severity at a time.
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     const sev = sp.get("severity");
-    if (sev && (SEVERITY_KEYS as readonly string[]).includes(sev)) {
-      setActiveSevs(new Set([sev]));
+    if (sev) {
+      const parts = sev
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => (SEVERITY_KEYS as readonly string[]).includes(s));
+      if (parts.length > 0) {
+        setActiveSevs(new Set(parts));
+      }
     }
     const lib = sp.get("library_id");
     if (lib) {
@@ -250,13 +288,9 @@ export function useFilesPageState(): UseFilesPageState {
         activeContainers.size > 0
           ? Array.from(activeContainers).sort().join(",")
           : undefined,
-      // Stage 27: translate the view-mode tri-state to the two
-      // server params. "hide" is the server default; we pass
-      // nothing. "include" sends include_quarantined=true.
-      // "only" sends quarantined=true (wins over include).
-      quarantined: quarantineView === "only" ? true : undefined,
-      include_quarantined:
-        quarantineView === "include" ? true : undefined,
+      // Stage 27's quarantined / include_quarantined params were
+      // removed in Stage 05 (v1.7) — the workflow is gone; the
+      // server no longer accepts them.
       // Stage 3 (audit follow-up): scope tri-state.
       // Send "media" / "non-media" verbatim; "all" is the
       // default-no-filter state so we omit the param to keep the
@@ -277,6 +311,27 @@ export function useFilesPageState(): UseFilesPageState {
       include_tags: visibleColumns.includes("tags") ? true : undefined,
       sort: sort.key,
       sort_dir: sort.dir,
+      // Stage 02 — per-column quick filters. Translate the
+      // store's ``perColumnFilters`` map into the new backend
+      // params. Empty / missing entries become undefined ⇒ no
+      // param sent ⇒ no filter. Trim is applied so a stray space
+      // doesn't fire a query.
+      path_contains:
+        perColumnFilters.filename && perColumnFilters.filename.trim()
+          ? perColumnFilters.filename.trim()
+          : undefined,
+      codec_contains:
+        perColumnFilters.codec && perColumnFilters.codec.trim()
+          ? perColumnFilters.codec.trim()
+          : undefined,
+      container_eq:
+        perColumnFilters.container && perColumnFilters.container.trim()
+          ? perColumnFilters.container.trim()
+          : undefined,
+      extension_eq:
+        perColumnFilters.extension && perColumnFilters.extension.trim()
+          ? perColumnFilters.extension.trim()
+          : undefined,
     }),
     [
       libraryId,
@@ -285,10 +340,10 @@ export function useFilesPageState(): UseFilesPageState {
       activeSevs,
       activeCodecs,
       activeContainers,
-      quarantineView,
       scope,
       sort,
       visibleColumns,
+      perColumnFilters,
     ],
   );
 
@@ -309,7 +364,6 @@ export function useFilesPageState(): UseFilesPageState {
     activeSevs,
     activeCodecs,
     activeContainers,
-    quarantineView,
     scope,
     sort,
     page,
@@ -379,10 +433,6 @@ export function useFilesPageState(): UseFilesPageState {
     setScope(v);
     setPage(0);
   }
-  function setQuarantineAndReset(v: QuarantineView) {
-    setQuarantineView(v);
-    setPage(0);
-  }
   function toggleSev(key: SeverityKey) {
     const next = new Set(activeSevs);
     if (next.has(key)) next.delete(key);
@@ -426,12 +476,20 @@ export function useFilesPageState(): UseFilesPageState {
     libraries,
     triggerScan,
     triggerScanAll,
+    resetLibraryScans,
     scanProgress,
     pageSize,
     sort,
     visibleColumns,
     toggleColumn,
     resetColumns,
+    // Stage 02 — column resize + per-column filter.
+    columnWidths,
+    setColumnWidth,
+    perColumnFilters,
+    setPerColumnFilter,
+    showColumnFilters,
+    setShowColumnFilters,
     libraryId,
     setLibraryId: setLibraryAndReset,
     category,
@@ -440,8 +498,6 @@ export function useFilesPageState(): UseFilesPageState {
     setSearch: setSearchAndReset,
     scope,
     setScope: setScopeAndReset,
-    quarantineView,
-    setQuarantineView: setQuarantineAndReset,
     activeSevs,
     toggleSev,
     allSevs,

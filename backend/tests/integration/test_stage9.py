@@ -1,17 +1,23 @@
-"""Stage 9 (audit follow-up) — quarantine + delete actions + extension rules.
+"""Stage 9 (audit follow-up) — delete actions + extension rules.
 
-Three behavioural surfaces pinned:
+Stage 05 (v1.7) updated the surface this file tests. The Stage 9
+contract originally covered ``Quarantine`` actions + a soft-delete
+mode (``Delete(confirm=False)``); Stage 05 retired both
+(Section A.0 — "delete means delete"). The file now pins the
+Stage 05 contract:
 
-  1. Rule actions: ``Quarantine`` sets ``quarantined=True`` + emits;
-     ``Delete(confirm=False)`` soft-deletes (quarantine + flag);
-     ``Delete(confirm=True)`` moves the file to ``data_dir/trash/``
-     and removes the row.
-  2. ``/api/v1/system/extension-rules`` CRUD (admin-gated; conflict
-     detection on unique extension).
+  1. Rule actions: ``Delete`` is unconditional. It records the
+     file's path + a reason in the evaluator result, and the
+     service layer moves the file to ``data_dir/trash/``, drops
+     the row, and writes a ``file.deleted`` audit-log entry.
+     ``Quarantine`` action and the ``confirm`` flag are gone from
+     the schema; this file's validation tests pin those rejections.
+  2. ``/api/v1/system/extension-rules`` CRUD (admin-gated;
+     conflict detection on unique extension) — unchanged.
   3. Scanner honours the four dispositions: ``ignore`` skips the
-     file entirely; ``malicious`` sets severity=crit + quarantined;
-     ``accepted`` caps severity at ok; ``stats_only`` indexes at
-     severity=info.
+     file entirely; ``malicious`` sets severity=crit (no longer
+     quarantines — that column is gone); ``accepted`` caps
+     severity at ok; ``stats_only`` indexes at severity=info.
 """
 
 from __future__ import annotations
@@ -71,7 +77,10 @@ def _input(path: str = "/lib/a.mkv") -> EvaluationInput:
     )
 
 
-def test_quarantine_action_sets_flag_and_reason() -> None:
+def test_delete_action_records_path_and_reason() -> None:
+    """Stage 05 (v1.7) — a Delete action surfaces the file's path
+    in ``delete_paths`` and the operator-supplied reason in
+    ``delete_reasons``. The lists stay paired by index."""
     definition = RuleDefinition.model_validate(
         {
             "match": {
@@ -80,70 +89,96 @@ def test_quarantine_action_sets_flag_and_reason() -> None:
                 "value": "mkv",
             },
             "actions": [
-                {"type": "quarantine", "reason": "test-quarantine"},
+                {"type": "delete", "reason": "Plex incompat"},
             ],
+            "acknowledged_destructive": True,
         }
     )
-    result = evaluate(definition, _input())
+    result = evaluate(definition, _input("/lib/x.mkv"))
     assert result.matched is True
-    assert result.quarantine is True
-    assert result.quarantine_reason == "test-quarantine"
-    assert result.delete_paths == []
+    assert result.delete_paths == ["/lib/x.mkv"]
+    assert result.delete_reasons == ["Plex incompat"]
 
 
-def test_delete_confirm_false_falls_back_to_soft_delete() -> None:
-    """Defensive default: without ``confirm=True`` the action
-    quarantines + flags but does NOT enqueue a hard-delete path."""
+def test_delete_action_without_reason_synthesizes_one() -> None:
+    """Stage 05 — when no ``reason`` is supplied, the evaluator
+    fills in a generic "Deleted by rule" so the audit log entry
+    is never blank."""
     definition = RuleDefinition.model_validate(
         {
             "match": {"field": "extension", "op": "eq", "value": "mkv"},
             "actions": [{"type": "delete"}],
-        }
-    )
-    result = evaluate(definition, _input())
-    assert result.quarantine is True
-    assert result.quarantine_reason == "Soft-delete via rule (confirm=false)"
-    assert result.delete_paths == []
-
-
-def test_delete_confirm_true_records_path_for_hard_delete() -> None:
-    definition = RuleDefinition.model_validate(
-        {
-            "match": {"field": "extension", "op": "eq", "value": "mkv"},
-            "actions": [{"type": "delete", "confirm": True}],
+            "acknowledged_destructive": True,
         }
     )
     result = evaluate(definition, _input("/lib/x.mkv"))
-    assert result.quarantine is True
     assert result.delete_paths == ["/lib/x.mkv"]
+    assert result.delete_reasons == ["Deleted by rule"]
 
 
-def test_quarantine_merge_is_one_way_escalation() -> None:
-    """Once any rule quarantines, the aggregate stays quarantined
-    even if a later rule doesn't quarantine."""
-    quarantining = evaluate(
+def test_quarantine_action_is_rejected_at_validation() -> None:
+    """Stage 05 (v1.7) — ``type: "quarantine"`` is no longer a
+    valid action; ``RuleDefinition.model_validate`` rejects it.
+    Operators who had quarantine actions stored have their bodies
+    rewritten by the 0015 migration."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
         RuleDefinition.model_validate(
             {
                 "match": {"field": "extension", "op": "eq", "value": "mkv"},
-                "actions": [{"type": "quarantine", "reason": "first"}],
+                "actions": [{"type": "quarantine", "reason": "irrelevant"}],
             }
-        ),
-        _input(),
-    )
-    benign = evaluate(
+        )
+
+
+def test_delete_action_rejects_confirm_flag() -> None:
+    """Stage 05 — the pre-Stage-05 ``confirm`` flag on Delete is
+    gone (delete is unconditional). With Pydantic ``extra="forbid"``,
+    any persisted body still carrying ``confirm`` is rejected; the
+    migration scrubs the flag before it gets here."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
         RuleDefinition.model_validate(
             {
                 "match": {"field": "extension", "op": "eq", "value": "mkv"},
-                "actions": [{"type": "set_severity", "severity": "info"}],
+                "actions": [{"type": "delete", "confirm": True}],
+            }
+        )
+
+
+def test_delete_merge_concatenates_paths_and_reasons_pairwise() -> None:
+    """Stage 05 — when ``merge_into`` reduces two evaluator
+    results down, the (path, reason) pairs stay aligned by
+    index so the service layer can pick any one of them and
+    keep the audit entry coherent."""
+    first = evaluate(
+        RuleDefinition.model_validate(
+            {
+                "match": {"field": "extension", "op": "eq", "value": "mkv"},
+                "actions": [{"type": "delete", "reason": "first"}],
+                "acknowledged_destructive": True,
             }
         ),
-        _input(),
+        _input("/lib/a.mkv"),
     )
-    # Aggregate starts as benign, then merge quarantining in.
-    benign.merge_into(quarantining)  # noqa: F841 (mutates quarantining)
-    # ``merge_into`` mutates `other` — so look at quarantining (target).
-    assert quarantining.quarantine is True
-    assert quarantining.quarantine_reason == "first"
+    second = evaluate(
+        RuleDefinition.model_validate(
+            {
+                "match": {"field": "extension", "op": "eq", "value": "mkv"},
+                "actions": [{"type": "delete", "reason": "second"}],
+                "acknowledged_destructive": True,
+            }
+        ),
+        _input("/lib/a.mkv"),
+    )
+    second.merge_into(first)
+    # Two delete actions matched the same file — both paths and
+    # both reasons are present, paired by position. The service
+    # layer picks ``reasons[0]`` for the audit entry.
+    assert first.delete_paths == ["/lib/a.mkv", "/lib/a.mkv"]
+    assert first.delete_reasons == ["first", "second"]
 
 
 # ── Service-layer tests (filesystem effects) ───────────────────
@@ -182,120 +217,13 @@ async def session(
 
 
 @pytest.mark.asyncio
-async def test_service_quarantine_action_sets_row_flag(
+async def test_service_delete_action_hard_deletes_to_trash_and_audit_logs(
     session: AsyncSession, tmp_path: Path
 ) -> None:
-    """A rule with a quarantine action makes ``media_file.quarantined``
-    transition False → True after evaluation."""
-    library_root = tmp_path / "lib"
-    library_root.mkdir()
-    target = library_root / "junk.mkv"
-    target.write_bytes(b"x" * 10)
-
-    library = Library(name="movies", root_path=str(library_root), kind="movies")
-    await LibraryRepository(session).add(library)
-    media = MediaFile(
-        library_id=library.id,
-        path=str(target),
-        filename="junk.mkv",
-        extension="mkv",
-        category="media",
-        size_bytes=10,
-        mtime=datetime(2026, 1, 1, tzinfo=UTC),
-        relative_path="junk.mkv",
-        severity="ok",
-        severity_rank=0,
-    )
-    await MediaRepository(session).upsert_by_path(media)
-    await session.commit()
-
-    rule = Rule(
-        name="quarantine-junk",
-        description="",
-        enabled=True,
-        definition={
-            "match": {"field": "extension", "op": "eq", "value": "mkv"},
-            "actions": [{"type": "quarantine", "reason": "rule-driven"}],
-        },
-    )
-    await RuleRepository(session).add(rule)
-    await session.commit()
-
-    bus = EventBus()
-    bus.clear()
-    quarantined_events: list[dict[str, object]] = []
-    bus.subscribe(
-        "media.quarantined",
-        lambda e: quarantined_events.append(dict(getattr(e, "payload", {}))),
-    )
-
-    service = RulesService(session=session, event_bus=bus)
-    await service.evaluate_library(library.id)
-
-    await session.refresh(media)
-    assert media.quarantined is True
-    assert media.quarantined_reason == "rule-driven"
-    assert len(quarantined_events) == 1
-    assert quarantined_events[0]["id"] == media.id
-
-
-@pytest.mark.asyncio
-async def test_service_delete_confirm_false_soft_delete_only(
-    session: AsyncSession, tmp_path: Path
-) -> None:
-    """Without ``confirm=True``, the row stays + the file stays on
-    disk; only the quarantine flag flips."""
-    library_root = tmp_path / "lib"
-    library_root.mkdir()
-    target = library_root / "junk.mkv"
-    target.write_bytes(b"x" * 10)
-
-    library = Library(name="movies", root_path=str(library_root), kind="movies")
-    await LibraryRepository(session).add(library)
-    media = MediaFile(
-        library_id=library.id,
-        path=str(target),
-        filename="junk.mkv",
-        extension="mkv",
-        category="media",
-        size_bytes=10,
-        mtime=datetime(2026, 1, 1, tzinfo=UTC),
-        relative_path="junk.mkv",
-        severity="ok",
-        severity_rank=0,
-    )
-    await MediaRepository(session).upsert_by_path(media)
-    await session.commit()
-
-    rule = Rule(
-        name="soft-delete-junk",
-        description="",
-        enabled=True,
-        definition={
-            "match": {"field": "extension", "op": "eq", "value": "mkv"},
-            "actions": [{"type": "delete"}],  # confirm omitted → false
-        },
-    )
-    await RuleRepository(session).add(rule)
-    await session.commit()
-
-    service = RulesService(session=session, event_bus=EventBus())
-    await service.evaluate_library(library.id)
-
-    # Row still exists, but quarantined.
-    fresh = await MediaRepository(session).get(media.id)
-    assert fresh is not None
-    assert fresh.quarantined is True
-    # File still on disk.
-    assert target.exists()
-
-
-@pytest.mark.asyncio
-async def test_service_delete_confirm_true_hard_deletes_to_trash(
-    session: AsyncSession, tmp_path: Path
-) -> None:
-    """With ``confirm=True`` the file is moved to ``data_dir/trash/``
-    and the row is removed."""
+    """Stage 05 (v1.7) — a rule with a Delete action moves the
+    file to ``data_dir/trash/``, removes the row, and writes an
+    audit log entry tagged ``file.deleted`` with the rule's
+    reason in the metadata."""
     library_root = tmp_path / "lib"
     library_root.mkdir()
     target = library_root / "junk.mkv"
@@ -320,21 +248,33 @@ async def test_service_delete_confirm_true_hard_deletes_to_trash(
     media_id = media.id
 
     rule = Rule(
-        name="hard-delete-junk",
+        name="delete-junk",
         description="",
         enabled=True,
         definition={
             "match": {"field": "extension", "op": "eq", "value": "mkv"},
-            "actions": [{"type": "delete", "confirm": True}],
+            "actions": [
+                {"type": "delete", "reason": "junk extension"},
+            ],
+            "acknowledged_destructive": True,
         },
     )
     await RuleRepository(session).add(rule)
     await session.commit()
 
-    service = RulesService(session=session, event_bus=EventBus())
-    await service.evaluate_library(library.id)
+    bus = EventBus()
+    bus.clear()
+    deleted_events: list[dict[str, object]] = []
+    bus.subscribe(
+        "media.deleted",
+        lambda e: deleted_events.append(dict(getattr(e, "payload", {}))),
+    )
 
-    # Source file is gone from the library.
+    service = RulesService(session=session, event_bus=bus)
+    await service.evaluate_library(library.id)
+    await session.commit()
+
+    # Source is gone from the library.
     assert not target.exists()
     # File is in the trash directory under data_dir.
     from app.core.settings import get_settings
@@ -346,6 +286,146 @@ async def test_service_delete_confirm_true_hard_deletes_to_trash(
     # Row is gone from the DB.
     fresh = await MediaRepository(session).get(media_id)
     assert fresh is None
+    # Audit log carries the reason + path.
+    from app.models.audit_log import AuditLogEntry
+    from sqlalchemy import select
+
+    rows = (await session.execute(select(AuditLogEntry))).scalars().all()
+    delete_entries = [r for r in rows if r.action == "file.deleted"]
+    assert len(delete_entries) == 1, (
+        f"expected one file.deleted audit entry, got {len(delete_entries)}"
+    )
+    entry = delete_entries[0]
+    assert entry.target_id == media_id
+    assert entry.target_type == "media_file"
+    assert entry.actor_label == "rules"
+    md = entry.metadata_ or {}
+    assert md.get("reason") == "junk extension"
+    assert md.get("path") == str(target)
+    # Bus event also fired with the reason.
+    assert len(deleted_events) == 1
+    assert deleted_events[0]["reason"] == "junk extension"
+
+
+@pytest.mark.asyncio
+async def test_service_delete_action_without_reason_synthesizes_audit_text(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Stage 05 — when a Delete action carries no reason, the
+    audit entry still records a non-empty reason ("Deleted by
+    rule") so the trail isn't blank."""
+    library_root = tmp_path / "lib"
+    library_root.mkdir()
+    target = library_root / "junk.mkv"
+    target.write_bytes(b"x" * 10)
+    library = Library(name="movies", root_path=str(library_root), kind="movies")
+    await LibraryRepository(session).add(library)
+    media = MediaFile(
+        library_id=library.id,
+        path=str(target),
+        filename="junk.mkv",
+        extension="mkv",
+        category="media",
+        size_bytes=10,
+        mtime=datetime(2026, 1, 1, tzinfo=UTC),
+        relative_path="junk.mkv",
+        severity="ok",
+        severity_rank=0,
+    )
+    await MediaRepository(session).upsert_by_path(media)
+    await session.commit()
+
+    rule = Rule(
+        name="delete-junk-no-reason",
+        description="",
+        enabled=True,
+        definition={
+            "match": {"field": "extension", "op": "eq", "value": "mkv"},
+            "actions": [{"type": "delete"}],
+            "acknowledged_destructive": True,
+        },
+    )
+    await RuleRepository(session).add(rule)
+    await session.commit()
+
+    service = RulesService(session=session, event_bus=EventBus())
+    await service.evaluate_library(library.id)
+    await session.commit()
+
+    from app.models.audit_log import AuditLogEntry
+    from sqlalchemy import select
+
+    rows = (await session.execute(select(AuditLogEntry))).scalars().all()
+    delete_entries = [r for r in rows if r.action == "file.deleted"]
+    assert len(delete_entries) == 1
+    md = delete_entries[0].metadata_ or {}
+    assert md.get("reason") == "Deleted by rule"
+
+
+@pytest.mark.asyncio
+async def test_service_delete_action_preserves_row_when_file_already_gone(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Stage 05 — if the source file has already vanished from
+    disk (operator deleted it manually), the rule pipeline logs
+    a warning but still proceeds to remove the row + audit-log,
+    because the operator's intent ("don't track this file") is
+    served either way. The trash-path field is None in that
+    case so a forensic reader knows nothing was moved."""
+    library_root = tmp_path / "lib"
+    library_root.mkdir()
+    # Deliberately do NOT create the file on disk.
+    target_path = library_root / "ghost.mkv"
+
+    library = Library(name="movies", root_path=str(library_root), kind="movies")
+    await LibraryRepository(session).add(library)
+    media = MediaFile(
+        library_id=library.id,
+        path=str(target_path),
+        filename="ghost.mkv",
+        extension="mkv",
+        category="media",
+        size_bytes=10,
+        mtime=datetime(2026, 1, 1, tzinfo=UTC),
+        relative_path="ghost.mkv",
+        severity="ok",
+        severity_rank=0,
+    )
+    await MediaRepository(session).upsert_by_path(media)
+    await session.commit()
+    media_id = media.id
+
+    rule = Rule(
+        name="delete-ghost",
+        description="",
+        enabled=True,
+        definition={
+            "match": {"field": "extension", "op": "eq", "value": "mkv"},
+            "actions": [{"type": "delete", "reason": "ghost cleanup"}],
+            "acknowledged_destructive": True,
+        },
+    )
+    await RuleRepository(session).add(rule)
+    await session.commit()
+
+    service = RulesService(session=session, event_bus=EventBus())
+    await service.evaluate_library(library.id)
+    await session.commit()
+
+    # Row is gone (clean delete in service).
+    fresh = await MediaRepository(session).get(media_id)
+    assert fresh is None
+    # Audit entry still recorded; trash_path is None because the
+    # file was never there to move.
+    from app.models.audit_log import AuditLogEntry
+    from sqlalchemy import select
+
+    rows = (await session.execute(select(AuditLogEntry))).scalars().all()
+    delete_entries = [r for r in rows if r.action == "file.deleted"]
+    assert len(delete_entries) == 1
+    md = delete_entries[0].metadata_ or {}
+    assert md.get("trash_path") is None
+    assert md.get("reason") == "ghost cleanup"
 
 
 # ── Scanner honours extension dispositions ─────────────────────
@@ -387,9 +467,14 @@ async def test_scanner_ignore_disposition_skips_file(
 
 
 @pytest.mark.asyncio
-async def test_scanner_malicious_disposition_quarantines(
+async def test_scanner_malicious_disposition_marks_severity_crit(
     session: AsyncSession, tmp_path: Path
 ) -> None:
+    """Stage 05 (v1.7) — the malicious disposition retains the
+    ``crit`` severity but no longer sets quarantine columns
+    (those columns are gone). Operators who want auto-delete on
+    malicious extensions write a rule that matches ``severity eq
+    crit`` and applies a Delete action."""
     library_root = tmp_path / "library"
     library_root.mkdir()
     (library_root / "danger.exe").write_bytes(b"x" * 10)
@@ -410,8 +495,12 @@ async def test_scanner_malicious_disposition_quarantines(
     assert len(page.items) == 1
     mf = page.items[0]
     assert mf.severity == "crit"
-    assert mf.quarantined is True
-    assert "malicious" in (mf.quarantined_reason or "")
+    # Stage 05: the quarantine columns are gone — confirm at the
+    # attribute level so a future re-introduction (which would be
+    # a regression) trips this test immediately.
+    assert not hasattr(mf, "quarantined"), (
+        "MediaFile.quarantined should be gone (Stage 05)"
+    )
 
 
 @pytest.mark.asyncio

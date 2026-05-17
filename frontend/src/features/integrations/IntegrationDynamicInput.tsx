@@ -52,6 +52,35 @@ export function IntegrationDynamicInput({
       />
     );
   }
+  // Stage 11 (plan §549) — string-array fields like
+  // ``source_whitelist``. Rendered as a textarea with one
+  // entry per line — matches how operators think about IP /
+  // CIDR / hostname lists and avoids the need for a more
+  // elaborate tag-pill editor. The value sent back to the
+  // server is a list of trimmed non-empty lines.
+  if (meta.type === "array") {
+    const lines = Array.isArray(value)
+      ? value.map((v) => String(v))
+      : [];
+    return (
+      <textarea
+        className="min-h-[72px] w-full resize-y rounded-md border border-border bg-surface px-2 py-1 text-[13px] font-mono"
+        value={lines.join("\n")}
+        onChange={(e) =>
+          onChange(
+            e.target.value
+              .split("\n")
+              .map((s) => s.trim())
+              .filter(Boolean),
+          )
+        }
+        placeholder={
+          "192.168.1.0/24\nsonarr.local\n10.0.0.5"
+        }
+        data-testid="integration-array-input"
+      />
+    );
+  }
   return (
     <Input
       type="text"

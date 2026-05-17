@@ -28,7 +28,7 @@ import pytest
 import pytest_asyncio
 
 from app.core.runtime_settings_schema import RuntimeSettingValidationError
-from app.core.settings import Settings, get_settings
+from app.core.settings import get_settings
 from app.models.runtime_setting import RuntimeSettingOverride
 from app.services.runtime_settings import (
     RuntimeSettingsService,

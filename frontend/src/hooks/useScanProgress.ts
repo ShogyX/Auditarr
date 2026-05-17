@@ -1,64 +1,48 @@
+/**
+ * Stage 8 (audit follow-up) + Stage 13 (plan §605, §616) —
+ * scan progress hooks.
+ *
+ * Two hooks:
+ *   1. ``useScanProgressWs()`` — subscribes to the WS bus and
+ *      mutates the central :mod:`scanProgressStore` as
+ *      ``scan.*`` events fire. Mount this ONCE at the
+ *      app-shell level so the store is always being fed
+ *      regardless of which page the user is on.
+ *   2. ``useScanProgress()`` — reads the current snapshot
+ *      from the store. Drop-in replacement for the pre-
+ *      Stage-13 version that held local state. Returns the
+ *      same ``ScanProgress`` shape so existing consumers
+ *      don't need to change.
+ *
+ * The split fixes the plan §616 "scan progress bar doesn't
+ * disappear when navigating to Files and back" requirement:
+ * pre-Stage-13 the bar's state lived inside the badge
+ * component, so navigating away unmounted it and reset
+ * progress to zero. Now the WS subscription lives at the shell
+ * level (above route mounts) and the store outlives any
+ * individual route.
+ */
+
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
 
 import { useWebSocketEvents } from "@/hooks/useWebSocketEvents";
 import { invalidateRelated } from "@/lib/invalidate";
+import {
+  type ScanProgressState,
+  useScanProgressStore,
+} from "@/stores/scanProgressStore";
 
-interface ScanProgress {
-  /** ID of the currently-running scan, if any. */
-  runId: string | null;
-  /** Library the running scan belongs to. */
-  libraryId: string | null;
-  /** Latest counter snapshot. Updates from both ``scan.progress`` and
-   *  ``scan.completed`` events. */
-  filesSeen: number;
-  /**
-   * Stage 8 (audit follow-up): upper-bound count from
-   * ``scan.progress`` events. Used by the progress bar to compute a
-   * percent. ``null`` when the scanner hasn't enumerated yet — the
-   * bar shows an indeterminate state in that case.
-   */
-  filesTotalEstimate: number | null;
-  /**
-   * Stage 8 (audit follow-up): integer 0..100 derived from
-   * ``filesSeen`` / ``filesTotalEstimate``. ``null`` when no scan
-   * is running or no total estimate is known. The progress bar
-   * component uses this to set width.
-   */
-  percent: number | null;
-  /** Whether a scan finished within the last few seconds. */
-  recentlyCompleted: boolean;
-}
-
-const INITIAL: ScanProgress = {
-  runId: null,
-  libraryId: null,
-  filesSeen: 0,
-  filesTotalEstimate: null,
-  percent: null,
-  recentlyCompleted: false,
-};
+/** Pre-Stage-13 public type — re-exported for compatibility. */
+export type ScanProgress = ScanProgressState;
 
 /**
- * Listen to scanner events on the WS bus.
- *
- * - Refreshes the libraries / media / scans queries when relevant events fire.
- * - Surfaces lightweight progress state for any UI that wants to show a
- *   "scan running" badge without subscribing to the WS client itself.
- *
- * Stage 8 (audit follow-up): now handles ``scan.progress`` events with
- * ``files_total_estimate`` so the UI can show a real percent bar
- * rather than just a "scanning…" pill.
- *
- * Uses the central ``invalidateRelated`` helper (see
- * ``frontend/src/lib/invalidate.ts``) so a scan completion refreshes
- * the full dependency graph — dashboard tiles, sidebar badges,
- * notifications — not just the few query keys this file used to list
- * by hand.
+ * App-shell-level subscription: pumps scan events from the WS
+ * bus into the central :mod:`scanProgressStore`. Mount ONCE.
  */
-export function useScanProgress(): ScanProgress {
+export function useScanProgressWs(): void {
   const queryClient = useQueryClient();
-  const [progress, setProgress] = useState<ScanProgress>(INITIAL);
+  const setProgress = useScanProgressStore((s) => s.set);
+  const patchProgress = useScanProgressStore((s) => s.patch);
 
   useWebSocketEvents((event) => {
     switch (event.name) {
@@ -76,21 +60,16 @@ export function useScanProgress(): ScanProgress {
         return;
       }
       case "scan.progress": {
-        // Stage 8 (audit follow-up): periodic snapshot from the
-        // scanner. Update both seen + total so the bar advances.
         const data = event.payload as {
           run_id?: string;
           library_id?: string;
           files_seen?: number;
           files_total_estimate?: number;
         };
-        setProgress((prev) => {
+        patchProgress((prev) => {
           const seen = data.files_seen ?? prev.filesSeen;
           const total =
             data.files_total_estimate ?? prev.filesTotalEstimate ?? null;
-          // Percent is integer-rounded; cap at 99 until we get the
-          // scan.completed event, so the bar never hits 100% before
-          // the run is finalized.
           let percent: number | null;
           if (total && total > 0) {
             const raw = Math.floor((seen / total) * 100);
@@ -124,40 +103,68 @@ export function useScanProgress(): ScanProgress {
           recentlyCompleted: true,
         });
         invalidateRelated(queryClient, "scan");
-        // Drop the "recently completed" flag after a beat so badges fade.
-        setTimeout(
-          () =>
-            setProgress((p) => ({
-              ...p,
-              recentlyCompleted: false,
-              // Also reset progress fields so the next mount/scan
-              // starts from a clean state rather than showing 100%.
-              percent: null,
-              filesTotalEstimate: null,
-            })),
-          5000,
-        );
+        // Drop the "recently completed" flag after a beat
+        // so badges fade. Direct timer is fine; the store
+        // outlives the component so this can't fire after
+        // an unmount.
+        setTimeout(() => {
+          patchProgress((p) => ({
+            ...p,
+            recentlyCompleted: false,
+            percent: null,
+            filesTotalEstimate: null,
+          }));
+        }, 5000);
         return;
       }
       case "scan.failed": {
-        setProgress(INITIAL);
+        useScanProgressStore.getState().reset();
         invalidateRelated(queryClient, "scan");
         return;
       }
       case "media.added":
       case "media.updated":
       case "media.deleted":
-        // Server-pushed media changes — refresh everything that
-        // reads from the media namespace.
         invalidateRelated(queryClient, "media");
         return;
       default:
         return;
     }
   });
+}
 
-  // Reset progress on unmount so leftovers don't leak into the next mount.
-  useEffect(() => () => setProgress(INITIAL), []);
-
-  return progress;
+/**
+ * Read-only access to the current scan progress snapshot.
+ * Pure selector — does NOT subscribe to the WS bus; the
+ * subscription happens once in :func:`useScanProgressWs`
+ * mounted at the app shell.
+ *
+ * Implementation note: each call selects the individual
+ * fields rather than constructing an object inside the
+ * selector. A naive ``s => ({ ...subset })`` selector
+ * returns a new reference every render, which Zustand
+ * interprets as a state change and triggers an infinite
+ * re-render loop. Reading scalars directly avoids that
+ * trap; React's bail-out skips re-render when each scalar
+ * is unchanged.
+ */
+export function useScanProgress(): ScanProgress {
+  const runId = useScanProgressStore((s) => s.runId);
+  const libraryId = useScanProgressStore((s) => s.libraryId);
+  const filesSeen = useScanProgressStore((s) => s.filesSeen);
+  const filesTotalEstimate = useScanProgressStore(
+    (s) => s.filesTotalEstimate,
+  );
+  const percent = useScanProgressStore((s) => s.percent);
+  const recentlyCompleted = useScanProgressStore(
+    (s) => s.recentlyCompleted,
+  );
+  return {
+    runId,
+    libraryId,
+    filesSeen,
+    filesTotalEstimate,
+    percent,
+    recentlyCompleted,
+  };
 }

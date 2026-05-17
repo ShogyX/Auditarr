@@ -254,6 +254,17 @@ async def startup(ctx: dict[str, Any]) -> None:
     settings = get_settings()
     configure_logging(settings)
 
+    # ── SSL sanity check (v1.7.2) ──────────────────────────
+    # See app/main.py for the why. Same check, same non-fatal
+    # behaviour: the worker process is where playback polling
+    # and integration healthchecks run, so a missing CA bundle
+    # hurts the worker most. Probing here makes the
+    # misconfiguration loud at boot rather than letting
+    # every poll-tick log the same cryptic FileNotFoundError.
+    from app.core.ssl_bundle import startup_sanity_check
+
+    startup_sanity_check(fatal=False)
+
     db = get_database()
     await db.connect()
 
@@ -289,11 +300,40 @@ async def startup(ctx: dict[str, Any]) -> None:
         reload_listener(settings),
         name="worker-settings-reload-listener",
     )
+
+    # ── v1.8.0 / Stage 17: Plex SSE listener tasks ─────────────
+    # Spawn one long-running listener per enabled Plex integration.
+    # Each task is supervised: if it dies (e.g. token rotated, Plex
+    # disappeared from the network for an extended period), the
+    # supervisor logs and respawns after backoff. New / removed
+    # integrations between worker restarts are reconciled on the
+    # next worker restart — that's an acceptable tradeoff for v1.8.0
+    # since integration churn is rare in practice.
+    from app.worker_sse import spawn_plex_listeners
+
+    ctx["plex_listener_tasks"] = await spawn_plex_listeners(db, ctx["registry"])
+    log.info(
+        "worker.plex_listeners_spawned",
+        count=len(ctx["plex_listener_tasks"]),
+    )
+
     # ``ctx["redis"]`` is provided by ARQ itself.
     log.info("worker.started")
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
+    # Cancel the SSE listeners first — they're the longest-running
+    # tasks and their reconnect loop will keep the connection alive
+    # until we cancel.
+    plex_tasks = ctx.get("plex_listener_tasks") or []
+    for task in plex_tasks:
+        task.cancel()
+    for task in plex_tasks:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
     # Cancel the settings reload listener before tearing down Redis
     # so it doesn't spam the log with "connection lost" exceptions.
     reload_task = ctx.get("settings_reload_task")
@@ -342,12 +382,29 @@ async def optimization_tick(ctx: dict[str, Any]) -> dict[str, Any]:
     take minutes to hours; serialising them keeps the box from turning
     into a heater and keeps CPU contention predictable. Stage 13 polish
     may add a configurable parallelism cap if real deployments need it.
+
+    Stage 08 (v1.7) — pass an :class:`IntegrationManager` so the
+    worker can call ``submit_transcode_job`` on non-in_process
+    routing targets. The manager wraps the session, registry,
+    secret box, and event bus.
     """
     db = ctx["db"]
+    registry = get_registry()
+    bus = ctx["bus"]
     async with db.session() as session:
         from app.optimization import OptimizationWorker
 
-        worker = OptimizationWorker(session=session, event_bus=ctx["bus"])
+        manager = IntegrationManager(
+            session=session,
+            registry=registry,
+            secret_box=get_secret_box(),
+            event_bus=bus,
+        )
+        worker = OptimizationWorker(
+            session=session,
+            event_bus=bus,
+            integration_manager=manager,
+        )
         report = await worker.run_one()
     log.info(
         "worker.optimization_tick",
@@ -359,6 +416,51 @@ async def optimization_tick(ctx: dict[str, Any]) -> dict[str, Any]:
         "item_id": report.item_id,
         "status": report.status,
         "detail": report.detail,
+    }
+
+
+async def routed_transcode_poll_tick(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Stage 08 (v1.7) — poll non-in_process transcode jobs.
+
+    Plan §444. Every 5 minutes, walk every ``OptimizationItem``
+    in ``routed`` status and ask its integration provider
+    whether the upstream job finished. Items that complete
+    upstream advance to ``completed``; items that fail upstream
+    advance to ``failed``; items still running stay routed.
+
+    See :mod:`app.optimization.poller` for the per-item logic.
+    """
+    db = ctx["db"]
+    registry = get_registry()
+    bus = ctx["bus"]
+    async with db.session() as session:
+        from app.optimization.poller import poll_routed_transcodes
+
+        manager = IntegrationManager(
+            session=session,
+            registry=registry,
+            secret_box=get_secret_box(),
+            event_bus=bus,
+        )
+        report = await poll_routed_transcodes(
+            session=session,
+            integration_manager=manager,
+            event_bus=bus,
+        )
+    log.info(
+        "worker.routed_transcode_poll",
+        checked=report.checked,
+        completed=report.completed,
+        failed=report.failed,
+        still_running=report.still_running,
+        errored=report.errored,
+    )
+    return {
+        "checked": report.checked,
+        "completed": report.completed,
+        "failed": report.failed,
+        "still_running": report.still_running,
+        "errored": report.errored,
     }
 
 
@@ -450,6 +552,146 @@ async def housekeeping_tick(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── v1.8.1: stale-scan reaper ────────────────────────────────
+async def reap_stale_scans(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Mark stuck ``queued``/``running`` ScanRun rows as ``failed``.
+
+    Background: if the worker process is killed mid-scan (OOM,
+    SIGKILL from systemd, container restart, host reboot), the
+    ScanRun row never gets its ``status=running`` → ``failed``
+    transition because no exception handler runs. That row then
+    blocks every future ``POST /scans/libraries/{id}`` call —
+    the API's single-flight check returns 409 "A scan is already
+    running" and the operator can't kick off a new scan without
+    manually editing the DB.
+
+    This tick runs every 5 minutes and marks any
+    ``queued``/``running`` row whose ``started_at`` (or
+    ``created_at`` for queued rows that never started) is older
+    than 1 hour as ``failed`` with a clear diagnostic message.
+
+    One hour is the right threshold for the auditarr workload:
+    even a 100k-file library completes in well under that on
+    typical hardware. Scans that legitimately run longer are
+    rare; operators with truly massive libraries can override
+    via runtime settings (future). False-positive cost is low —
+    a wrongly-reaped scan just means the operator clicks
+    "Run scan" again, which they would have done anyway.
+    """
+    from app.utils.datetime import utcnow
+
+    db = ctx["db"]
+    bus = ctx["bus"]
+
+    # ``STALE_THRESHOLD_SECONDS`` — 1 hour. Magic number is fine
+    # here; making it a runtime setting buys nothing for the
+    # near term and we can lift it later if anyone complains.
+    STALE_THRESHOLD_SECONDS = 3600
+
+    now = utcnow()
+    cutoff = now - timedelta(seconds=STALE_THRESHOLD_SECONDS)
+
+    reaped: list[str] = []
+    async with db.session() as session:
+        from sqlalchemy import or_, select
+
+        from app.models.library import Library
+        from app.models.scan_run import ScanRun
+
+        # Pick the timestamp we measure staleness against: prefer
+        # ``started_at`` (when the worker actually started), fall
+        # back to ``created_at`` (when the API enqueued the row).
+        # Queued-but-never-started rows have started_at=NULL so
+        # we need the OR clause.
+        result = await session.execute(
+            select(ScanRun).where(
+                ScanRun.status.in_(("queued", "running")),
+                or_(
+                    ScanRun.started_at < cutoff,
+                    ScanRun.started_at.is_(None) & (ScanRun.created_at < cutoff),
+                ),
+            )
+        )
+        stuck = list(result.scalars().all())
+
+        def _aware(ts):
+            """SQLite returns naive datetimes for DateTime(timezone=True)
+            columns even though Postgres returns aware. Coerce to UTC-aware
+            so timedelta arithmetic against ``now`` works in both.
+            """
+            import datetime as _dt_local
+
+            if ts is None:
+                return None
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=_dt_local.timezone.utc)
+            return ts
+
+        for run in stuck:
+            # Mark the row failed. Use a distinctive error message
+            # so the operator (and us, debugging) can tell this was
+            # the reaper not an actual scan failure.
+            previous_status = run.status
+            reference_ts = _aware(run.started_at) or _aware(run.created_at)
+            if reference_ts is None:
+                # Defensive: both timestamps missing. Use threshold +
+                # 1s so the age is at least the threshold.
+                age_seconds = STALE_THRESHOLD_SECONDS + 1
+            else:
+                age_seconds = int((now - reference_ts).total_seconds())
+            run.status = "failed"
+            run.finished_at = now
+            run.error = (
+                f"Reaped by stale-scan watchdog: row was stuck at "
+                f"'{previous_status}' for {age_seconds}s "
+                f"(threshold {STALE_THRESHOLD_SECONDS}s). The worker "
+                "likely crashed mid-scan; check journalctl for "
+                "OOM-killer or SIGKILL events around that time. The "
+                "library is now unblocked for new scans."
+            )
+            # Also refresh the library's last_scan_status so the
+            # files page doesn't show a stale "running" indicator.
+            library = (
+                await session.execute(
+                    select(Library).where(Library.id == run.library_id)
+                )
+            ).scalar_one_or_none()
+            if library is not None:
+                library.last_scan_status = "failed"
+
+            reaped.append(run.id)
+
+        if stuck:
+            await session.commit()
+            # Emit one event per reaped run so any WS subscribers
+            # (the dashboard, the files page) refresh.
+            for run in stuck:
+                emit_ref = _aware(run.started_at) or _aware(run.created_at)
+                emit_age = (
+                    int((now - emit_ref).total_seconds())
+                    if emit_ref is not None
+                    else STALE_THRESHOLD_SECONDS + 1
+                )
+                await bus.emit(
+                    "scan.reaped",
+                    {
+                        "run_id": run.id,
+                        "library_id": run.library_id,
+                        "previous_status": "queued",  # may be running too
+                        "age_seconds": emit_age,
+                    },
+                    source="worker.reap_stale_scans",
+                )
+
+    if reaped:
+        log.warning(
+            "worker.reap_stale_scans.reaped",
+            count=len(reaped),
+            run_ids=reaped[:10],  # log up to 10; avoid log spam
+        )
+    return {"reaped": len(reaped), "run_ids": reaped}
+
+
 # ── ARQ entrypoint ───────────────────────────────────────────
 class WorkerSettings:
     """Configuration consumed by ``arq app.worker.WorkerSettings``."""
@@ -462,8 +704,10 @@ class WorkerSettings:
         analyze_playback,
         automation_tick,
         optimization_tick,
+        routed_transcode_poll_tick,
         update_check_tick,
         housekeeping_tick,
+        reap_stale_scans,
     ]
     cron_jobs = [
         cron(
@@ -504,6 +748,17 @@ class WorkerSettings:
             run_at_startup=True,
         ),
         cron(
+            routed_transcode_poll_tick,
+            name="routed_transcode_poll_tick",
+            # Stage 08 (v1.7) plan §444: every 5 minutes. The poll
+            # is light — one provider call per routed item — so
+            # the bound is set by "how fast should we notice a
+            # completed Tdarr job?" rather than load. Five minutes
+            # is the documented cadence.
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+            run_at_startup=True,
+        ),
+        cron(
             update_check_tick,
             name="update_check_tick",
             minute=set(range(60)),
@@ -516,6 +771,18 @@ class WorkerSettings:
             # 24h. ``run_at_startup`` means a fresh deployment trims its
             # backlog immediately.
             minute=set(range(60)),
+            run_at_startup=True,
+        ),
+        cron(
+            reap_stale_scans,
+            name="reap_stale_scans",
+            # v1.8.1: every 5 minutes. Reaps ScanRun rows that got
+            # stuck at queued/running because the worker process
+            # died mid-scan (OOM, SIGKILL, container restart).
+            # The 1-hour staleness threshold means a genuinely
+            # long scan won't get reaped while it's still
+            # progressing.
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
             run_at_startup=True,
         ),
     ]

@@ -41,15 +41,12 @@ class MediaFilter:
     severity: str | None = None
     extension: str | None = None
     is_orphaned: bool | None = None
-    # Stage 27: quarantine filter.
-    #
-    # ``None`` means "no filter" (return both quarantined and not).
-    # ``False`` means "only non-quarantined" — the conventional
-    # default for the Files page so the operator doesn't see
-    # quarantined noise in normal use.
-    # ``True`` means "only quarantined" — for the dedicated review
-    # view.
-    quarantined: bool | None = None
+    # Stage 27 added a quarantine filter (``quarantined: bool | None``).
+    # Stage 05 (v1.7) retired the quarantine workflow — "delete means
+    # delete" (Section A.0). The filter is gone with it; callers
+    # that used to pass ``quarantined=False`` for the default Files
+    # view now get the same behaviour for free since no row carries
+    # that state any more.
     search: str | None = None  # substring match against path/filename
     # Stage 23: sortable column + direction. ``sort`` must be one of the
     # whitelisted keys below; anything else falls back to the legacy order
@@ -117,6 +114,38 @@ class MediaFilter:
     # anything tagged sonarr OR radarr". A future ``tags_all`` flag
     # could add AND semantics if needed; one knob at a time.
     tags_any: list[str] | None = None
+    # Stage 02 (v1.7): per-column quick filters from the Files
+    # table's optional filter row. All eight are independent
+    # predicates ANDed with the rest of the WHERE.
+    #
+    # ``path_contains`` — case-insensitive substring on ``path``.
+    # Complements ``search`` (which also substring-matches path)
+    # so two distinct UI inputs can coexist without one
+    # invalidating the other.
+    #
+    # ``codec_contains`` — case-insensitive substring on
+    # ``video_codec``. Useful for the operator who types ``hev`` to
+    # match both ``hevc`` and any future ``hevc-*`` variant.
+    #
+    # ``container_eq`` / ``extension_eq`` — strict equality.
+    # Container and extension are short closed-set values where
+    # substring noise hurts.
+    #
+    # ``size_min`` / ``size_max`` — inclusive byte range. The UI
+    # for these arrives later; the contract ships now so the
+    # backend can be wired and tested without a follow-up.
+    #
+    # ``mtime_after`` / ``mtime_before`` — inclusive datetime
+    # range against ``MediaFile.mtime``. ISO 8601 strings on the
+    # wire; converted at the API boundary to datetime objects.
+    path_contains: str | None = None
+    codec_contains: str | None = None
+    container_eq: str | None = None
+    extension_eq: str | None = None
+    size_min: int | None = None
+    size_max: int | None = None
+    mtime_after: object | None = None  # datetime | None
+    mtime_before: object | None = None  # datetime | None
 
 
 SORTABLE_COLUMNS: tuple[str, ...] = (
@@ -227,8 +256,8 @@ class MediaRepository:
             conditions.append(MediaFile.extension == filt.extension.lower())
         if filt.is_orphaned is not None:
             conditions.append(MediaFile.is_orphaned.is_(filt.is_orphaned))
-        if filt.quarantined is not None:
-            conditions.append(MediaFile.quarantined.is_(filt.quarantined))
+        # Stage 27's ``quarantined`` predicate was removed in Stage 05
+        # (Section A.0) — the column is gone, the filter is gone.
         # Stage 31: codec + container filters. Comma-separated
         # values become IN clauses; single values become equality.
         # Empty string after split (e.g. "h264,") is silently
@@ -274,6 +303,43 @@ class MediaRepository:
                     )
                     .exists()
                 )
+
+        # Stage 02 (v1.7): per-column quick filters. All
+        # case-insensitive where they're substring filters; strict
+        # equality where the value space is small. Each predicate
+        # is independent and ANDed with the rest of the WHERE so
+        # an operator can combine "path contains 1080" with
+        # "codec contains hevc" without surprise interactions.
+        if filt.path_contains and filt.path_contains.strip():
+            needle = filt.path_contains.strip().lower()
+            conditions.append(func.lower(MediaFile.path).like(f"%{needle}%"))
+        if filt.codec_contains and filt.codec_contains.strip():
+            needle = filt.codec_contains.strip().lower()
+            # ``video_codec`` is nullable; the LIKE comparison is
+            # short-circuited on NULL by SQL so we don't need an
+            # explicit IS NOT NULL guard.
+            conditions.append(
+                func.lower(MediaFile.video_codec).like(f"%{needle}%")
+            )
+        if filt.container_eq and filt.container_eq.strip():
+            conditions.append(MediaFile.container == filt.container_eq.strip())
+        if filt.extension_eq and filt.extension_eq.strip():
+            # ``extension`` is stored lowercased and WITHOUT the
+            # leading dot (see ``services/media/scanner.py`` —
+            # ``abs_path.suffix.lstrip(".").lower()``). The
+            # operator's input may carry the dot ("``.mkv``")
+            # because that's the human convention; normalise so
+            # both forms match.
+            needle = filt.extension_eq.strip().lstrip(".").lower()
+            conditions.append(MediaFile.extension == needle)
+        if filt.size_min is not None:
+            conditions.append(MediaFile.size_bytes >= filt.size_min)
+        if filt.size_max is not None:
+            conditions.append(MediaFile.size_bytes <= filt.size_max)
+        if filt.mtime_after is not None:
+            conditions.append(MediaFile.mtime >= filt.mtime_after)
+        if filt.mtime_before is not None:
+            conditions.append(MediaFile.mtime <= filt.mtime_before)
 
         where = and_(*conditions) if conditions else None
 

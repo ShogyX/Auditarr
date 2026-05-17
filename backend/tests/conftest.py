@@ -96,3 +96,31 @@ def _reset_database_singleton() -> Iterator[None]:
     yield
     db_module._db = None  # noqa: SLF001
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_virustotal_quota() -> Iterator[None]:
+    """Stage 10 (addendum C.5) — auto-reset the VT quota state
+    between every test.
+
+    The VT plugin's ``_quota`` is a module-level singleton (per
+    plan §514: "rate-limiting state stays as a process-wide
+    singleton"). Without this autouse fixture, a test that
+    burns lookups against the daily cap would leak counter
+    state into subsequent tests, making them flaky.
+
+    Resets all three windows (per-minute, per-day, per-month)
+    + the per-window alert flags + the last-check timestamp.
+    """
+    # Import locally so this fixture doesn't crash test
+    # collection on environments where the plugin module isn't
+    # importable (e.g. partial repos during refactors). In
+    # practice the plugin is always present in CI.
+    try:
+        from plugins.virustotal.backend import reset_quota_for_tests
+    except ImportError:
+        yield
+        return
+    reset_quota_for_tests()
+    yield
+    reset_quota_for_tests()

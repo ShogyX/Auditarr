@@ -1,15 +1,12 @@
-"""Stage 27 — Reprobe + Quarantine API.
+"""Stage 27 — Reprobe API.
 
-Covers the new endpoints:
+Stage 05 (v1.7) retired the quarantine workflow Stage 27 originally
+covered (Section A.0 — "delete means delete"). The quarantine
+tests that used to live here are gone; this file now covers only
+the reprobe endpoints, which Stage 05 did not touch:
 
   - POST /api/v1/media/{id}/reprobe (admin-only)
-  - POST /api/v1/media/{id}/quarantine (admin-only)
-  - POST /api/v1/media/{id}/unquarantine (admin-only)
   - POST /api/v1/media/bulk/reprobe (admin-only)
-  - POST /api/v1/media/bulk/quarantine (admin-only)
-  - POST /api/v1/media/bulk/unquarantine (admin-only)
-  - GET  /api/v1/media excludes quarantined files by default,
-    but honors ``quarantined=true`` / ``include_quarantined=true``
 
 The reprobe endpoint substitutes an in-process Ffprobe stub so
 the test suite doesn't need the binary installed. The substitution
@@ -315,174 +312,13 @@ async def test_bulk_reprobe_partial_unknown_ids(client: AsyncClient) -> None:
 
 
 # ── Quarantine ──────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_quarantine_endpoint(client: AsyncClient) -> None:
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    response = await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "Broken on disk; can't decode"},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["quarantined"] is True
-    assert body["quarantined_reason"] == "Broken on disk; can't decode"
-    assert body["quarantined_at"] is not None
-
-
-@pytest.mark.asyncio
-async def test_quarantine_is_idempotent(client: AsyncClient) -> None:
-    """Quarantining an already-quarantined file refreshes the
-    timestamp + reason rather than erroring."""
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    first = await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "first reason"},
-    )
-    assert first.status_code == 200
-
-    second = await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "second reason"},
-    )
-    assert second.status_code == 200
-    assert second.json()["quarantined_reason"] == "second reason"
-
-
-@pytest.mark.asyncio
-async def test_unquarantine_endpoint(client: AsyncClient) -> None:
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "test"},
-    )
-    response = await client.post(
-        f"/api/v1/media/{media_id}/unquarantine", headers=headers
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["quarantined"] is False
-    assert body["quarantined_at"] is None
-    assert body["quarantined_reason"] is None
-
-
-@pytest.mark.asyncio
-async def test_quarantine_admin_only(client: AsyncClient) -> None:
-    media_id = await _seed_one_file(client)
-    user_headers = await _user_headers(client)
-    response = await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=user_headers,
-        json={"reason": "test"},
-    )
-    assert response.status_code == 403
-
-
-# ── List endpoint quarantine filter ─────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_list_excludes_quarantined_by_default(
-    client: AsyncClient,
-) -> None:
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    # Quarantine the file.
-    await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "for the test"},
-    )
-
-    # Default list should NOT include it.
-    response = await client.get("/api/v1/media", headers=headers)
-    assert response.status_code == 200
-    ids = [item["id"] for item in response.json()["items"]]
-    assert media_id not in ids
-
-
-@pytest.mark.asyncio
-async def test_list_returns_quarantined_when_explicit(
-    client: AsyncClient,
-) -> None:
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "for the test"},
-    )
-
-    # Explicit quarantined=true returns only quarantined files.
-    response = await client.get(
-        "/api/v1/media?quarantined=true", headers=headers
-    )
-    assert response.status_code == 200
-    ids = [item["id"] for item in response.json()["items"]]
-    assert media_id in ids
-
-
-@pytest.mark.asyncio
-async def test_list_include_quarantined_mixes_both(
-    client: AsyncClient,
-) -> None:
-    """``include_quarantined=true`` returns both quarantined and
-    non-quarantined files together (useful for raw-data export
-    style queries)."""
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    await client.post(
-        f"/api/v1/media/{media_id}/quarantine",
-        headers=headers,
-        json={"reason": "test"},
-    )
-
-    response = await client.get(
-        "/api/v1/media?include_quarantined=true", headers=headers
-    )
-    assert response.status_code == 200
-    ids = [item["id"] for item in response.json()["items"]]
-    # The quarantined file IS included.
-    assert media_id in ids
-
-
-# ── Bulk quarantine ─────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_bulk_quarantine_and_unquarantine(client: AsyncClient) -> None:
-    media_id = await _seed_one_file(client)
-    headers = await _admin_headers(client)
-
-    q_res = await client.post(
-        "/api/v1/media/bulk/quarantine",
-        headers=headers,
-        json={"media_ids": [media_id], "reason": "in bulk"},
-    )
-    assert q_res.status_code == 200
-    assert q_res.json()["files_quarantined"] == 1
-
-    uq_res = await client.post(
-        "/api/v1/media/bulk/unquarantine",
-        headers=headers,
-        json={"media_ids": [media_id]},
-    )
-    assert uq_res.status_code == 200
-    assert uq_res.json()["files_unquarantined"] == 1
+#
+# Stage 27's quarantine tests covered the per-file + bulk
+# quarantine/unquarantine endpoints and the ``?quarantined=`` /
+# ``?include_quarantined=`` list filters. Stage 05 (v1.7) removed
+# all of those API surfaces (Section A.0 — "delete means delete").
+# The tests are gone; the delete-action contract is exercised
+# in ``test_stage9.py`` and the per-stage Stage 05 test file.
 
 
 @pytest.mark.asyncio

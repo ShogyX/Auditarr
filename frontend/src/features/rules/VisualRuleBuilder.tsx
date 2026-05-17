@@ -28,6 +28,7 @@ import { useMemo, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { useMediaVocabulary, type MediaVocabulary } from "@/hooks/useMedia";
 import { cn } from "@/lib/cn";
 import type {
   Action,
@@ -178,23 +179,42 @@ export function VisualRuleBuilder({
   }
 
   function setAction(idx: number, action: Action) {
-    onChange({
-      ...definition,
-      actions: definition.actions.map((a, i) => (i === idx ? action : a)),
-    });
+    const nextActions = definition.actions.map((a, i) => (i === idx ? action : a));
+    onChange(syncAck({ ...definition, actions: nextActions }, vocabulary));
   }
 
   function addAction() {
     const first = vocabulary.actions[0];
     if (!first) return;
     const fresh = freshAction(first.type);
-    onChange({ ...definition, actions: [...definition.actions, fresh] });
+    onChange(
+      syncAck(
+        { ...definition, actions: [...definition.actions, fresh] },
+        vocabulary,
+      ),
+    );
   }
 
   function removeAction(idx: number) {
     const next = definition.actions.filter((_, i) => i !== idx);
     if (next.length === 0) return;
-    onChange({ ...definition, actions: next });
+    onChange(syncAck({ ...definition, actions: next }, vocabulary));
+  }
+
+  // Stage 06 (v1.7) — destructive-action acknowledgement (addendum
+  // A.0.1). The backend rejects rule bodies with a delete action
+  // unless ``acknowledged_destructive: true`` is set. The flag
+  // metadata comes from ``vocabulary.rule_flags`` so the label /
+  // hint text stays server-authoritative.
+  const ackFlag = vocabulary.rule_flags?.acknowledged_destructive;
+  const hasDelete = definition.actions.some((a) => a.type === "delete");
+  const ackChecked = definition.acknowledged_destructive === true;
+
+  function setAck(checked: boolean) {
+    onChange({
+      ...definition,
+      acknowledged_destructive: checked ? true : undefined,
+    });
   }
 
   return (
@@ -282,6 +302,47 @@ export function VisualRuleBuilder({
           </div>
         </Column>
       </div>
+
+      {/* Stage 06 (v1.7) — destructive-action acknowledgement.
+          Visible only when the rule contains at least one delete
+          action; the backend rejects on save without this flag.
+          The flag's label + hint come from
+          ``vocabulary.rule_flags`` so the server stays
+          authoritative for the wording (per addendum A.0.1).
+      */}
+      {ackFlag && hasDelete ? (
+        <div
+          className={cn(
+            "p-2.5 rounded-md border text-[12px]",
+            ackChecked
+              ? "bg-sev-warn/5 border-sev-warn/30 text-text"
+              : "bg-sev-error/10 border-sev-error/40 text-text",
+          )}
+          data-testid="acknowledged-destructive-section"
+        >
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={ackChecked}
+              onChange={(e) => setAck(e.target.checked)}
+              aria-label={ackFlag.label}
+            />
+            <div className="flex flex-col">
+              <span className="font-medium">{ackFlag.label}</span>
+              {ackFlag.hint ? (
+                <span className="text-[11px] text-muted-2 mt-0.5">{ackFlag.hint}</span>
+              ) : null}
+              {!ackChecked ? (
+                <span className="text-[11px] text-sev-error mt-1">
+                  <Icon name="alert" size={10} className="inline mr-1" />
+                  This rule will not save until acknowledged.
+                </span>
+              ) : null}
+            </div>
+          </label>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -395,6 +456,17 @@ function ValueInput({
   const className =
     "h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent flex-1 min-w-[120px]";
 
+  // Stage 15 (plan §657) — for codec / container / extension /
+  // tag fields, fetch the library's actual vocabulary and offer
+  // it as a datalist alongside the free-text input. We keep
+  // free-text so operators can author rules for values that
+  // haven't been indexed yet (e.g. a new codec that'll appear
+  // after the next scan).
+  const vocab = useMediaVocabulary();
+  const vocabSlice = fieldDef
+    ? vocabularySliceFor(fieldDef.key, vocab.data)
+    : null;
+
   if (!fieldDef) {
     return (
       <input
@@ -467,6 +539,32 @@ function ValueInput({
     );
   }
 
+  // Stage 15 — for string fields that match the library
+  // vocabulary, augment with a datalist. Browsers fall back
+  // gracefully to plain input when datalist isn't supported.
+  if (vocabSlice && vocabSlice.length > 0) {
+    const datalistId = `vocab-${fieldDef.key}`;
+    return (
+      <>
+        <input
+          className={className}
+          value={String(value ?? "")}
+          onChange={(e) => onChange(e.target.value)}
+          list={datalistId}
+          data-testid={`rule-value-input-${fieldDef.key}`}
+        />
+        <datalist
+          id={datalistId}
+          data-testid={`rule-value-datalist-${fieldDef.key}`}
+        >
+          {vocabSlice.map((opt) => (
+            <option key={opt} value={opt} />
+          ))}
+        </datalist>
+      </>
+    );
+  }
+
   // Plain string
   return (
     <input
@@ -475,6 +573,36 @@ function ValueInput({
       onChange={(e) => onChange(e.target.value)}
     />
   );
+}
+
+/**
+ * Stage 15 helper — map a rule field key to the matching slice
+ * of the media vocabulary. Returns null when the field doesn't
+ * have a library-driven value list (e.g. numeric / bool fields,
+ * or string fields like ``filename`` whose values are unbounded).
+ */
+function vocabularySliceFor(
+  key: string,
+  vocab: MediaVocabulary | undefined,
+): string[] | null {
+  if (!vocab) return null;
+  switch (key) {
+    case "video_codec":
+      return vocab.video_codecs;
+    case "audio_codec":
+      return vocab.audio_codecs;
+    case "container":
+      return vocab.containers;
+    case "extension":
+      return vocab.extensions;
+    case "tags":
+      // The ``tags`` field is an array-typed rule field
+      // (handled above) — this slice is a fallback for any
+      // string-typed tag variant a future stage might add.
+      return vocab.tags;
+    default:
+      return null;
+  }
 }
 
 // ── Action row ──────────────────────────────────────────────
@@ -531,12 +659,54 @@ function ActionArgInput({
   onChange,
 }: {
   argKey: string;
-  argDef: { type: string; enum?: string[]; required?: boolean; hint?: string };
+  argDef: {
+    type: string;
+    enum?: string[];
+    required?: boolean;
+    hint?: string;
+    /** Stage 06 (v1.7): nested-object args carry ``properties``
+     *  (used by Notify's ``throttle`` block). Numeric children
+     *  may also carry ``minimum`` for client-side validation. */
+    properties?: Record<
+      string,
+      {
+        type: string;
+        minimum?: number;
+        required?: boolean;
+        hint?: string;
+      }
+    >;
+    minimum?: number;
+  };
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
   const className =
     "h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent flex-1 min-w-[120px]";
+
+  // Stage 06 (v1.7) — object-typed args. Today only ``throttle``
+  // on Notify lands here; a generic renderer keeps future
+  // nested args working with no code change. Object args are
+  // optional + collapse to ``null`` when empty.
+  if (argDef.type === "object" && argDef.properties) {
+    return (
+      <ObjectArgInput
+        argKey={argKey}
+        argDef={
+          argDef as {
+            type: string;
+            hint?: string;
+            properties: Record<
+              string,
+              { type: string; minimum?: number; required?: boolean; hint?: string }
+            >;
+          }
+        }
+        value={value as Record<string, unknown> | null | undefined}
+        onChange={onChange}
+      />
+    );
+  }
 
   if (argDef.enum) {
     return (
@@ -556,10 +726,12 @@ function ActionArgInput({
       </label>
     );
   }
-  // Stage 9 (audit follow-up): boolean arg renderer. ``Delete``'s
-  // ``confirm`` is the only boolean today. Surface it as a labeled
-  // checkbox so the hard-delete semantics is visible and
-  // deliberately checkable, not buried as a typed-into "true" string.
+  // Stage 9 (audit follow-up): boolean arg renderer. Pre-Stage-05
+  // this rendered ``Delete.confirm``; Stage 05 retired that flag,
+  // and no action in the current vocabulary publishes a boolean
+  // arg. The renderer stays for forward compatibility — a future
+  // action shipping a boolean arg gets a labeled checkbox without
+  // any extra wiring.
   if (argDef.type === "boolean") {
     return (
       <label
@@ -591,6 +763,101 @@ function ActionArgInput({
   );
 }
 
+// Stage 06 (v1.7) — nested-object arg renderer. The Notify
+// action's ``throttle`` is the first object-typed arg; this
+// component renders a collapsed toggle that expands into one
+// numeric input per declared property. When the toggle is off,
+// the value is ``null`` (the backend reads "throttle unset");
+// when on, the value is ``{prop: number, prop: number, ...}``.
+//
+// Numeric children use ``argDef.properties[k].minimum`` for
+// client-side validation — the backend's schema validator
+// catches sub-minimum values too, but a hint here helps the
+// operator avoid round-trip rejections.
+function ObjectArgInput({
+  argKey,
+  argDef,
+  value,
+  onChange,
+}: {
+  argKey: string;
+  argDef: {
+    type: string;
+    hint?: string;
+    properties: Record<
+      string,
+      { type: string; minimum?: number; required?: boolean; hint?: string }
+    >;
+  };
+  value: Record<string, unknown> | null | undefined;
+  onChange: (v: unknown) => void;
+}) {
+  const enabled = value != null;
+
+  function toggle(on: boolean) {
+    if (on) {
+      // Seed every property with its minimum (or 0) so the body
+      // is always shape-valid against the backend's schema.
+      const seed: Record<string, unknown> = {};
+      for (const [k, p] of Object.entries(argDef.properties)) {
+        seed[k] = p.minimum ?? 0;
+      }
+      onChange(seed);
+    } else {
+      onChange(null);
+    }
+  }
+
+  function setChild(childKey: string, raw: string) {
+    const next = { ...(value ?? {}) };
+    const n = Number(raw);
+    next[childKey] = Number.isFinite(n) ? n : 0;
+    onChange(next);
+  }
+
+  const className =
+    "h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent w-[110px]";
+
+  return (
+    <div className="flex flex-col gap-1 w-full border-t border-border mt-1 pt-2">
+      <label
+        className="flex items-center gap-1.5 text-[11.5px] text-muted-2"
+        title={argDef.hint}
+      >
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => toggle(e.target.checked)}
+        />
+        <span className="font-medium">{argKey}</span>
+        {argDef.hint ? (
+          <span className="text-muted text-[11px]">({argDef.hint})</span>
+        ) : null}
+      </label>
+      {enabled ? (
+        <div className="flex items-center gap-3 flex-wrap pl-5">
+          {Object.entries(argDef.properties).map(([k, p]) => (
+            <label
+              key={k}
+              className="flex items-center gap-1 text-[11.5px] text-muted-2"
+              title={p.hint}
+            >
+              {k}
+              <input
+                type="number"
+                className={className}
+                min={p.minimum}
+                value={String(value?.[k] ?? p.minimum ?? 0)}
+                onChange={(e) => setChild(k, e.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // ── Defaults ────────────────────────────────────────────────
 function defaultValueFor(field: RuleVocabularyField): unknown {
   if (field.enum) return field.enum[0] ?? "";
@@ -598,6 +865,27 @@ function defaultValueFor(field: RuleVocabularyField): unknown {
   if (field.type === "bool") return true;
   if (field.type === "array") return "";
   return "";
+}
+
+// Stage 06 (v1.7) — destructive-action acknowledgement helper.
+// The backend rejects ``acknowledged_destructive: true`` on rules
+// without a delete action AND rejects its absence on rules with
+// one. The visual builder mediates: whenever the action list
+// changes such that no delete remains, strip the flag so the
+// next save doesn't trip the "forbidden" branch. When a delete
+// is present, leave the flag untouched — the operator's checkbox
+// click is what writes True there.
+function syncAck(
+  definition: RuleDefinition,
+  _vocabulary: RuleVocabulary,
+): RuleDefinition {
+  const hasDelete = definition.actions.some((a) => a.type === "delete");
+  if (!hasDelete && definition.acknowledged_destructive) {
+    const { acknowledged_destructive: _drop, ...rest } = definition;
+    void _drop;
+    return rest;
+  }
+  return definition;
 }
 
 function freshAction(type: string): Action {
@@ -610,15 +898,12 @@ function freshAction(type: string): Action {
       return { type: "queue_optimization", profile: "" };
     case "notify":
       return { type: "notify", channel: "", message: null };
-    // Stage 9 (audit follow-up): defaults match the schema defaults.
-    // ``quarantine`` has no required fields. ``delete`` defaults
-    // ``confirm`` to false so the picker's first-clicked state is
-    // the SAFE soft-delete; the operator must explicitly flip
-    // confirm to true for a hard delete.
-    case "quarantine":
-      return { type: "quarantine", reason: null };
+    // Stage 9 (audit follow-up), updated Stage 05 (v1.7): ``delete``
+    // is now unconditional with an optional ``reason`` recorded in
+    // the audit log. Stage 05 retired the Stage 9 ``quarantine``
+    // action and the Stage 9 ``confirm`` flag on Delete.
     case "delete":
-      return { type: "delete", confirm: false };
+      return { type: "delete", reason: null };
     default:
       return { type: "set_severity", severity: "warn" };
   }

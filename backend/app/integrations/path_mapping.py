@@ -82,6 +82,35 @@ def remap_path(path: str, mappings: list[PathMapping]) -> str:
     return path
 
 
+def remap_path_inverse(path: str, mappings: list[PathMapping]) -> str:
+    """Inverse of :func:`remap_path`.
+
+    Stage 08 (v1.7) — converts an Auditarr-side path (matching
+    ``MediaFile.path``) back to the integration-side path (what
+    Plex / Jellyfin / Tdarr would report on the Part / file
+    record). Used by ``PlexProvider._resolve_rating_key_from_path``
+    so transcode hand-offs can find the right Plex item without
+    an operator pre-supplying the ratingKey.
+
+    Picks the longest matching ``dst_prefix`` (the Auditarr side)
+    so the most specific mapping wins. Falls through to the
+    unchanged path when no mapping matches (the "assume 1:1
+    layout" behaviour mirrors :func:`remap_path`).
+
+    The match respects directory boundaries — a mapping of
+    ``/data/tv`` does **not** match ``/data/tvshows`` (same
+    semantics as :func:`remap_path`).
+    """
+    # Caller-supplied mappings may already be sorted longest-src-
+    # first; we re-sort by dst_prefix for the inverse direction.
+    candidates = sorted(mappings, key=lambda m: len(m.dst_prefix), reverse=True)
+    for m in candidates:
+        if path == m.dst_prefix or path.startswith(m.dst_prefix + "/"):
+            suffix = path[len(m.dst_prefix):]
+            return m.src_prefix + suffix
+    return path
+
+
 def remap_path_chain(
     path: str,
     integration_mappings: list[PathMapping],

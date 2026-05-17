@@ -22,6 +22,11 @@ def _vars(**over):
         library_name="Movies",
         message="extra context",
         time="2026-05-10T22:00:00+00:00",
+        # Stage 06 (v1.7): every rendered notification carries
+        # ``auto_delete`` — the dispatcher always sets it; for
+        # default-body tests where the rule has no delete action,
+        # the variable is False and the badge is omitted.
+        auto_delete=False,
     )
     base.update(over)
     return base

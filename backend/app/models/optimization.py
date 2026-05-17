@@ -52,11 +52,17 @@ class OptimizationItem(Base, TimestampMixin):
     )
     profile: Mapped[str] = mapped_column(String(64), nullable=False)
     # Stage 10 owns this state machine. Stage 7 only sets ``queued``.
+    # Stage 07 (v1.7) added ``routed`` — the worker marks an item
+    # ``routed`` after handing it to a non-in_process integration
+    # provider (Stage 08 wires the provider side). A routed item
+    # is no longer queued + not running locally; the provider's
+    # eventual completion event flips it to ``completed`` or
+    # ``failed``.
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
         default="queued",
-        doc="queued | running | completed | failed | cancelled | skipped",
+        doc="queued | running | routed | completed | failed | cancelled | skipped",
     )
     # Audit: which rule queued this item.
     queued_by_rule_id: Mapped[str | None] = mapped_column(

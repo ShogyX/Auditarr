@@ -99,7 +99,7 @@ export function RulesPage() {
         }
       />
 
-      <div className="p-6 flex flex-col gap-4 max-w-5xl">
+      <div className="p-6 flex flex-col gap-4 rules-page">
         {s.evaluate.data && s.tab !== "automation" ? (
           <Card>
             <div className="px-4 py-3 text-[13px]">

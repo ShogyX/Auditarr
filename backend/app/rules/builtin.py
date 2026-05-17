@@ -244,43 +244,307 @@ BUILTIN_RULES: tuple[BuiltinRule, ...] = (
         description=(
             "Media files where ffprobe returned an error. Usually "
             "means a corrupt or truncated file. Elevated to 'warn' "
-            "so the operator notices."
+            "so the operator notices. Enabled by default in Stage 06 "
+            "(v1.7) now that ``probe_failed`` is a DSL field."
         ),
         priority=15,
         definition={
             "match": {
                 "all": [
                     {"field": "category", "op": "eq", "value": "media"},
+                    # Stage 06 (v1.7): the rule's match predicate
+                    # finally has its missing piece. Pre-Stage-06
+                    # this rule was a stub (matched every media
+                    # file, tagged ``probe-failed-stub``) and
+                    # shipped DISABLED-by-default. Stage 06 added
+                    # ``probe_failed`` to ``SUPPORTED_FIELDS`` /
+                    # ``BOOL_FIELDS`` so the rule can fire on the
+                    # actual condition.
+                    {"field": "probe_failed", "op": "eq", "value": True},
                 ],
             },
-            # Note: the schema doesn't expose probe_failed directly
-            # (we'd need to add it to SUPPORTED_FIELDS). For now this
-            # rule matches all media files; until probe_failed lands
-            # in the rule DSL, operators see this surface different
-            # signals via the orphan + unknown-codec rules. The rule
-            # is included here so a future DSL extension picks it up
-            # without needing a migration — name stays stable.
-            #
-            # KNOWN LIMITATION: this rule is intentionally seeded
-            # DISABLED-via-runtime since its match has no
-            # probe-failure predicate yet. Operators see it in the
-            # builtin list but it doesn't fire. When the DSL grows a
-            # probe_failed field (deferred), the definition is
-            # updated in place and the rule starts firing.
             "actions": [
-                {"type": "add_tag", "tag": "probe-failed-stub"},
+                {"type": "set_severity", "severity": "warn"},
+                {"type": "add_tag", "tag": "probe-failed"},
+            ],
+        },
+    ),
+    # ── Stage 03 (v1.7) — Plex / Jellyfin compatibility, executables, junk
+    # ──
+    # Codec lists are honest about scope: they flag codecs known to
+    # be universally unsupported by the named client (not "every
+    # codec the web client doesn't direct-play"). See addendum B.2 —
+    # Plex direct-play compat is client-dependent; this rule's
+    # description acknowledges that.
+    BuiltinRule(
+        name="Plex incompatible video codec",
+        description=(
+            "Detects video codecs that Plex transcoding fails to "
+            "direct-play on most clients. Plex direct-play "
+            "compatibility varies by client; this rule flags codecs "
+            "that are universally unsupported (msmpeg4v3, wmv3, "
+            "mpeg2video, mpeg4, theora, mjpeg). Tagged "
+            "'plex-incompatible-video' for operator triage."
+        ),
+        priority=35,
+        definition={
+            "match": {
+                "all": [
+                    {"field": "category", "op": "eq", "value": "media"},
+                    {
+                        "field": "video_codec",
+                        "op": "in",
+                        "value": [
+                            "msmpeg4v3",
+                            "wmv3",
+                            "mpeg2video",
+                            "mpeg4",
+                            "theora",
+                            "mjpeg",
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "plex-incompatible-video"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Plex incompatible audio codec",
+        description=(
+            "Audio codecs that Plex cannot direct-play on most "
+            "clients (truehd, dts-hd, dts:x, atrac3, wmav2, speex). "
+            "Tagged 'plex-incompatible-audio' for operator triage."
+        ),
+        priority=45,
+        definition={
+            "match": {
+                "all": [
+                    {"field": "category", "op": "eq", "value": "media"},
+                    {
+                        "field": "audio_codec",
+                        "op": "in",
+                        "value": [
+                            "truehd",
+                            "dts-hd",
+                            "dts:x",
+                            "atrac3",
+                            "wmav2",
+                            "speex",
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "plex-incompatible-audio"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Jellyfin incompatible video codec",
+        description=(
+            "Video codecs Jellyfin transcoding struggles with across "
+            "the common clients (wmv3, msmpeg4v3, mpeg4, theora, "
+            "mjpeg). Tagged 'jellyfin-incompatible-video'."
+        ),
+        priority=55,
+        definition={
+            "match": {
+                "all": [
+                    {"field": "category", "op": "eq", "value": "media"},
+                    {
+                        "field": "video_codec",
+                        "op": "in",
+                        "value": [
+                            "wmv3",
+                            "msmpeg4v3",
+                            "mpeg4",
+                            "theora",
+                            "mjpeg",
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "jellyfin-incompatible-video"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Jellyfin incompatible audio codec",
+        description=(
+            "Audio codecs Jellyfin direct-play does not support "
+            "(truehd, dts-hd, dts:x, wmav2, speex). Tagged "
+            "'jellyfin-incompatible-audio'."
+        ),
+        priority=65,
+        definition={
+            "match": {
+                "all": [
+                    {"field": "category", "op": "eq", "value": "media"},
+                    {
+                        "field": "audio_codec",
+                        "op": "in",
+                        "value": [
+                            "truehd",
+                            "dts-hd",
+                            "dts:x",
+                            "wmav2",
+                            "speex",
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "jellyfin-incompatible-audio"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Likely transcode trigger (4K HEVC 10-bit)",
+        description=(
+            "4K HEVC files almost always force a transcode on "
+            "common direct-play targets (older Apple TVs, Chromecast "
+            "with Google TV, some Roku models). This rule flags "
+            "candidate files so operators considering a downscale "
+            "profile can find them. Doesn't elevate to 'crit' "
+            "because operators with capable hardware shouldn't be "
+            "alarmed."
+        ),
+        priority=70,
+        definition={
+            "match": {
+                "all": [
+                    {"field": "category", "op": "eq", "value": "media"},
+                    {"field": "video_codec", "op": "eq", "value": "hevc"},
+                    {"field": "width", "op": "gte", "value": 3000},
+                    {"field": "height", "op": "gte", "value": 1600},
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "warn"},
+                {"type": "add_tag", "tag": "likely-transcode-trigger"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Executable file in library",
+        description=(
+            "An executable in a media library is almost always "
+            "wrong — a stray installer, a misplaced script, or in "
+            "the worst case a malicious payload. The match list "
+            "covers the common operating-system executables: exe, "
+            "bat, cmd, ps1, sh, com, scr, msi, app, dmg. The "
+            "scanner stores extensions WITHOUT a leading dot so "
+            "the value list is dotless. Tagged "
+            "'executable-in-library' at 'crit' severity."
+        ),
+        priority=73,
+        definition={
+            "match": {
+                "all": [
+                    # Extension storage is dotless (scanner strips
+                    # the leading "." — see services/media/scanner.py).
+                    {
+                        "field": "extension",
+                        "op": "in",
+                        "value": [
+                            "exe",
+                            "bat",
+                            "cmd",
+                            "ps1",
+                            "sh",
+                            "com",
+                            "scr",
+                            "msi",
+                            "app",
+                            "dmg",
+                        ],
+                    },
+                ],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "executable-in-library"},
+            ],
+        },
+    ),
+    BuiltinRule(
+        name="Non-media file extension",
+        description=(
+            "Files whose extension marks them as junk (txt, log, "
+            "nfo offshoots, leftover .part / .crdownload). Stage 05 "
+            "introduces the 'junk' category cleanly via the "
+            "extension-classifier; until then the rule sits enabled "
+            "but matches nothing because no file is ever categorised "
+            "as 'junk'. The contract ships now so a future toggle "
+            "doesn't need a code change to start firing."
+        ),
+        priority=75,
+        definition={
+            "match": {
+                "all": [
+                    # Stage 05 introduces the 'junk' category. Until
+                    # then this matches zero rows — see
+                    # DISABLED_BY_DEFAULT below.
+                    {"field": "category", "op": "eq", "value": "junk"},
+                ],
+            },
+            "actions": [
+                {"type": "add_tag", "tag": "junk-extension"},
+            ],
+        },
+    ),
+    # Stage 06 (v1.7) — VirusTotal-driven rule. Per plan §364:
+    # severity ``crit``, matches ``vt_status in [malicious,
+    # suspicious]``. The ``vt_status`` field was added to
+    # ``SUPPORTED_FIELDS`` in Stage 06; the column on
+    # ``MediaFile`` (migration 0024) is populated by the
+    # VirusTotal plugin once Stage 10 wires it. Pre-Stage-10
+    # this rule matches no rows (the column is NULL for every
+    # file), so shipping it enabled is safe.
+    BuiltinRule(
+        name="VirusTotal non-clean",
+        description=(
+            "Files where VirusTotal returned malicious or suspicious "
+            "verdicts. Escalates to 'crit' so the operator notices "
+            "immediately. Populated by the VirusTotal plugin once "
+            "configured; matches no files until then."
+        ),
+        priority=10,  # earliest — VT verdicts should fire before
+        # any cosmetic codec rules so the crit severity wins
+        # aggregation.
+        definition={
+            "match": {
+                "field": "vt_status",
+                "op": "in",
+                "value": ["malicious", "suspicious"],
+            },
+            "actions": [
+                {"type": "set_severity", "severity": "crit"},
+                {"type": "add_tag", "tag": "virustotal-non-clean"},
             ],
         },
     ),
 )
 
 
-# The "Probe failed" rule above is shipped DISABLED by default
-# because its match predicate isn't expressible in the current DSL.
-# Until probe_failed lands as a SUPPORTED_FIELD this would tag
-# every media file. Tracked separately so the seeding logic knows
-# to default to disabled.
-DISABLED_BY_DEFAULT: frozenset[str] = frozenset({"Probe failed"})
+# Stage 06 (v1.7) — both rules previously DISABLED_BY_DEFAULT
+# (per plan §337 / §363) are now enabled:
+#   * "Probe failed" — the DSL gained the ``probe_failed`` field,
+#     so the rule now matches the actual condition rather than
+#     tagging every media file as a stub.
+#   * "Non-media file extension" — Stage 05 introduced the
+#     extension-classifier which populates the 'junk' category;
+#     the rule now matches the rows it was always intended to.
+# Both are kept in the builtin set so existing operator
+# customisations survive a refresh.
+DISABLED_BY_DEFAULT: frozenset[str] = frozenset()
 
 
 async def register_builtin_rules(session: AsyncSession) -> dict[str, int]:

@@ -25,7 +25,6 @@ from app.services.repositories import (
 )
 from app.services.repositories.media import SORTABLE_COLUMNS
 from app.services.rules_service import RulesService
-from app.utils.datetime import utcnow
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -39,15 +38,12 @@ async def list_media(
     severity: str | None = Query(default=None),
     extension: str | None = Query(default=None),
     is_orphaned: bool | None = Query(default=None),
-    # Stage 27: quarantine filter.
-    # ``None`` (default) → exclude quarantined files. This matches
-    # the convention used everywhere else: quarantined files are
-    # out-of-scope unless the operator explicitly asks for them.
-    # Pass ``quarantined=true`` to surface the quarantine view, or
-    # ``include_quarantined=true`` to mix them with regular files
-    # (useful for "show everything regardless").
-    quarantined: bool | None = Query(default=None),
-    include_quarantined: bool = Query(default=False),
+    # Stage 27 had ``quarantined`` and ``include_quarantined`` query
+    # params here. Stage 05 (v1.7) removed both alongside the
+    # quarantine workflow they served (Section A.0 — "delete means
+    # delete"). Callers that used to pass ``quarantined=false``
+    # for the default Files view need no change — every row is
+    # implicitly "not quarantined" now.
     # Stage 31: codec + container filters. Comma-separated to
     # match the existing severity-filter convention (one query
     # param, multi-value supported). The UI populates these from
@@ -95,19 +91,49 @@ async def list_media(
     # default. The Files page enables it when the optional "tags"
     # column is on.
     include_tags: bool = Query(default=False),
+    # Stage 02 (v1.7) — per-column quick filters. These mirror the
+    # ``MediaFilter`` fields added in the same stage; the router
+    # is a thin pass-through. See the dataclass for the contract
+    # of each parameter.
+    path_contains: str | None = Query(default=None, max_length=512),
+    codec_contains: str | None = Query(default=None, max_length=64),
+    container_eq: str | None = Query(default=None, max_length=64),
+    extension_eq: str | None = Query(default=None, max_length=16),
+    size_min: int | None = Query(default=None, ge=0),
+    size_max: int | None = Query(default=None, ge=0),
+    mtime_after: str | None = Query(
+        default=None,
+        description="ISO 8601 timestamp. Files with mtime >= this are returned.",
+    ),
+    mtime_before: str | None = Query(
+        default=None,
+        description="ISO 8601 timestamp. Files with mtime <= this are returned.",
+    ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> MediaPageRead:
-    # Resolve the effective quarantine filter:
-    # - explicit `quarantined=true` or `=false` → that exact filter
-    # - `include_quarantined=true` → no quarantine filter (return both)
-    # - neither set → default to `quarantined=false` (exclude them)
-    if quarantined is not None:
-        effective_q: bool | None = quarantined
-    elif include_quarantined:
-        effective_q = None
-    else:
-        effective_q = False
+    # Stage 02 — parse the ISO mtime filters once, here, so the
+    # repository can be tested with concrete datetimes rather than
+    # strings. Reject malformed values with a 422 (FastAPI's
+    # ValidationError → standard 422 response).
+    from datetime import datetime as _dt
+
+    def _parse_iso(value: str | None, *, field_name: str) -> _dt | None:
+        if value is None or value == "":
+            return None
+        try:
+            # ``fromisoformat`` accepts both naive (no tz) and
+            # offset-bearing timestamps. The caller is responsible
+            # for sending consistent values; we don't silently
+            # rebase to UTC.
+            return _dt.fromisoformat(value)
+        except ValueError as exc:
+            raise ValidationError(
+                f"{field_name} must be an ISO 8601 timestamp"
+            ) from exc
+
+    parsed_mtime_after = _parse_iso(mtime_after, field_name="mtime_after")
+    parsed_mtime_before = _parse_iso(mtime_before, field_name="mtime_before")
 
     page = await MediaRepository(session).list(
         filt=MediaFilter(
@@ -116,7 +142,6 @@ async def list_media(
             severity=severity,
             extension=extension,
             is_orphaned=is_orphaned,
-            quarantined=effective_q,
             video_codec=video_codec,
             container=container,
             search=search,
@@ -126,6 +151,15 @@ async def list_media(
             severities_empty=severities_empty,
             include_matched_rules=include_matched_rules,
             include_tags=include_tags,
+            # Stage 02 — per-column filter pass-through.
+            path_contains=path_contains,
+            codec_contains=codec_contains,
+            container_eq=container_eq,
+            extension_eq=extension_eq,
+            size_min=size_min,
+            size_max=size_max,
+            mtime_after=parsed_mtime_after,
+            mtime_before=parsed_mtime_before,
         ),
         offset=offset,
         limit=limit,
@@ -165,6 +199,116 @@ async def list_media(
         offset=page.offset,
         limit=page.limit,
     )
+
+
+# ── Stage 15: context-driven dropdowns vocabulary endpoint ──────
+
+
+class MediaVocabulary(BaseModel):
+    """Distinct values currently in the indexed library.
+
+    Used by the rule builder, optimization profile dialog, and
+    automation schedule editor to present operator-typeable
+    fields as multi-selects driven by what the scanner has
+    actually seen — instead of free-text inputs that risk
+    typos.
+
+    All five columns mirror the matching fields on
+    ``MediaFile`` / ``MediaTag``. Empty strings and NULLs are
+    excluded; values come back sorted asc for stable UI
+    rendering.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    video_codecs: list[str] = Field(default_factory=list)
+    audio_codecs: list[str] = Field(default_factory=list)
+    containers: list[str] = Field(default_factory=list)
+    extensions: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+# Module-level TTL cache. Plan §656 specifies 60s. A library
+# of any size produces tiny result sets (the cardinality of
+# distinct codecs / containers / extensions is bounded by the
+# real-world list of formats, NOT by file count), so the cache
+# is purely a request-storm dampener — when the rules page
+# opens and the operator picks five different fields in a row,
+# we'd otherwise hit the database five times for the same
+# result.
+_VOCABULARY_CACHE_TTL_SECONDS = 60.0
+_vocabulary_cache: tuple[float, MediaVocabulary] | None = None
+
+
+def _vocabulary_cache_clear() -> None:
+    """Test hook — clear the in-process TTL cache so tests
+    don't leak vocabularies into each other."""
+    global _vocabulary_cache
+    _vocabulary_cache = None
+
+
+@router.get(
+    "/vocabulary",
+    response_model=MediaVocabulary,
+    summary="Distinct codec / container / extension / tag values in the library",
+)
+async def get_media_vocabulary(
+    _user: CurrentUser,
+    session: SessionDep,
+) -> MediaVocabulary:
+    """Returns the distinct values currently in the library.
+
+    Cached in-process for 60 seconds. The cache key is
+    library-global (no per-user variance), so cross-user cache
+    hits are correct.
+
+    Stage 15 (plan §656) — frontend rule / profile / automation
+    surfaces consume this to drive value-pickers from the
+    library's actual content rather than free-text.
+    """
+    import time as _time
+
+    from sqlalchemy import select
+
+    from app.models.media import MediaFile
+    from app.models.tag import MediaTag
+
+    global _vocabulary_cache
+
+    now = _time.monotonic()
+    if _vocabulary_cache is not None:
+        ts, payload = _vocabulary_cache
+        if now - ts < _VOCABULARY_CACHE_TTL_SECONDS:
+            return payload
+
+    async def _distinct(column) -> list[str]:
+        # SELECT DISTINCT <column> excluding NULL and empty
+        # string. Sort ascending for stable UI rendering.
+        stmt = (
+            select(column)
+            .where(column.is_not(None))
+            .where(column != "")
+            .distinct()
+            .order_by(column.asc())
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        return [r for r in rows if r]
+
+    video_codecs = await _distinct(MediaFile.video_codec)
+    audio_codecs = await _distinct(MediaFile.audio_codec)
+    containers = await _distinct(MediaFile.container)
+    extensions = await _distinct(MediaFile.extension)
+    tags = await _distinct(MediaTag.name)
+
+    payload = MediaVocabulary(
+        video_codecs=video_codecs,
+        audio_codecs=audio_codecs,
+        containers=containers,
+        extensions=extensions,
+        tags=tags,
+    )
+    _vocabulary_cache = (now, payload)
+    return payload
 
 
 @router.get("/{media_id}", response_model=MediaFileDetail, summary="Media file detail")
@@ -345,7 +489,7 @@ async def bulk_reevaluate(
     )
 
 
-# ── Stage 27: per-file re-probe + quarantine ────────────────────
+# ── Stage 27: per-file re-probe ─────────────────────────────────
 #
 # NOTE on route ordering. FastAPI matches routes in registration
 # order. Because the per-file endpoints carry a path parameter
@@ -358,7 +502,7 @@ async def bulk_reevaluate(
 # next to their endpoint for readability.
 
 
-# ── Bulk reprobe / quarantine / unquarantine ────────────────────
+# ── Bulk reprobe ────────────────────────────────────────────────
 
 
 class BulkReprobeRequest(BaseModel):
@@ -442,108 +586,22 @@ async def bulk_reprobe(
     )
 
 
-class BulkQuarantineRequest(BaseModel):
-    """Body for ``POST /media/bulk/quarantine`` (Stage 27)."""
-
-    model_config = ConfigDict(extra="forbid")
-    media_ids: list[str] = Field(min_length=1, max_length=500)
-    reason: str | None = Field(default=None, max_length=512)
-
-
-class BulkQuarantineResponse(BaseModel):
-    files_quarantined: int
-    files_not_found: list[str]
-
-
-@router.post(
-    "/bulk/quarantine",
-    response_model=BulkQuarantineResponse,
-    summary="Quarantine a specific set of files (Stage 27)",
-)
-async def bulk_quarantine(
-    body: BulkQuarantineRequest,
-    _admin: AdminUser,
-    session: SessionDep,
-    bus: EventBusDep,
-) -> BulkQuarantineResponse:
-    if len(set(body.media_ids)) != len(body.media_ids):
-        raise ValidationError("media_ids must not contain duplicates")
-    repo = MediaRepository(session)
-    now = utcnow()
-    quarantined = 0
-    not_found: list[str] = []
-    for mid in body.media_ids:
-        record = await repo.get(mid)
-        if record is None:
-            not_found.append(mid)
-            continue
-        record.quarantined = True
-        record.quarantined_at = now
-        record.quarantined_reason = body.reason
-        quarantined += 1
-    await session.commit()
-    if quarantined > 0:
-        await bus.emit(
-            "media.quarantined_bulk",
-            {"count": quarantined, "reason": body.reason},
-            source="media-api",
-        )
-    return BulkQuarantineResponse(
-        files_quarantined=quarantined,
-        files_not_found=not_found,
-    )
+# Stage 27 had ``POST /media/bulk/quarantine`` and
+# ``POST /media/bulk/unquarantine`` here, plus their request /
+# response models. Stage 05 (v1.7) removed all four
+# (Section A.0 — "delete means delete"). Operators who want to
+# act on a selection now have two paths:
+#
+#   * Add a tag via the existing bulk-tag flow + write a rule
+#     that matches on the tag.
+#   * For destructive intent, run a rule with a Delete action;
+#     the audit log records each removal.
+#
+# The Files-page selection bar's "Quarantine selected" button
+# is also removed in the frontend portion of this stage.
 
 
-class BulkUnquarantineRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    media_ids: list[str] = Field(min_length=1, max_length=500)
-
-
-class BulkUnquarantineResponse(BaseModel):
-    files_unquarantined: int
-    files_not_found: list[str]
-
-
-@router.post(
-    "/bulk/unquarantine",
-    response_model=BulkUnquarantineResponse,
-    summary="Restore a specific set of quarantined files (Stage 27)",
-)
-async def bulk_unquarantine(
-    body: BulkUnquarantineRequest,
-    _admin: AdminUser,
-    session: SessionDep,
-    bus: EventBusDep,
-) -> BulkUnquarantineResponse:
-    if len(set(body.media_ids)) != len(body.media_ids):
-        raise ValidationError("media_ids must not contain duplicates")
-    repo = MediaRepository(session)
-    unquarantined = 0
-    not_found: list[str] = []
-    for mid in body.media_ids:
-        record = await repo.get(mid)
-        if record is None:
-            not_found.append(mid)
-            continue
-        if record.quarantined:
-            record.quarantined = False
-            record.quarantined_at = None
-            record.quarantined_reason = None
-            unquarantined += 1
-    await session.commit()
-    if unquarantined > 0:
-        await bus.emit(
-            "media.unquarantined_bulk",
-            {"count": unquarantined},
-            source="media-api",
-        )
-    return BulkUnquarantineResponse(
-        files_unquarantined=unquarantined,
-        files_not_found=not_found,
-    )
-
-
-# ── Per-file reprobe / quarantine / unquarantine ────────────────
+# ── Per-file reprobe ────────────────────────────────────────────
 
 
 @router.post(
@@ -586,82 +644,8 @@ async def reprobe_media(
     return MediaFileDetail.model_validate(record)
 
 
-class QuarantineRequest(BaseModel):
-    """Optional reason on quarantine. Capped at 512 chars to match
-    the column."""
-
-    model_config = ConfigDict(extra="forbid")
-    reason: str | None = Field(default=None, max_length=512)
-
-
-@router.post(
-    "/{media_id}/quarantine",
-    response_model=MediaFileDetail,
-    summary="Mark a single file as quarantined (Stage 27)",
-)
-async def quarantine_media(
-    media_id: str,
-    body: QuarantineRequest,
-    _admin: AdminUser,
-    session: SessionDep,
-    bus: EventBusDep,
-) -> MediaFileDetail:
-    """Quarantine a single file.
-
-    Quarantining is idempotent at the row level — quarantining a
-    file that's already quarantined refreshes ``quarantined_at``
-    and replaces the reason, but doesn't error. (Re-quarantining
-    is sometimes a useful "I confirmed this is still broken"
-    signal; we don't want to make the operator dig out an old
-    error to do it.)
-    """
-    record = await MediaRepository(session).get(media_id)
-    if record is None:
-        raise NotFoundError("Media file not found")
-    record.quarantined = True
-    record.quarantined_at = utcnow()
-    record.quarantined_reason = body.reason
-    await session.commit()
-    await session.refresh(record)
-    await bus.emit(
-        "media.quarantined",
-        {"id": record.id, "reason": body.reason},
-        source="media-api",
-    )
-    return MediaFileDetail.model_validate(record)
-
-
-@router.post(
-    "/{media_id}/unquarantine",
-    response_model=MediaFileDetail,
-    summary="Restore a quarantined file (Stage 27)",
-)
-async def unquarantine_media(
-    media_id: str,
-    _admin: AdminUser,
-    session: SessionDep,
-    bus: EventBusDep,
-) -> MediaFileDetail:
-    """Restore a quarantined file to normal operation.
-
-    Idempotent in the same sense as quarantine — unquarantining a
-    file that isn't quarantined is a no-op (no error, no event).
-    This keeps bulk operations clean: the operator selects a
-    range of files and clicks Unquarantine; partial selections
-    don't bail.
-    """
-    record = await MediaRepository(session).get(media_id)
-    if record is None:
-        raise NotFoundError("Media file not found")
-    if record.quarantined:
-        record.quarantined = False
-        record.quarantined_at = None
-        record.quarantined_reason = None
-        await session.commit()
-        await session.refresh(record)
-        await bus.emit(
-            "media.unquarantined",
-            {"id": record.id},
-            source="media-api",
-        )
-    return MediaFileDetail.model_validate(record)
+# Stage 27 had per-file ``POST /media/{media_id}/quarantine`` and
+# ``POST /media/{media_id}/unquarantine`` endpoints here. Stage 05
+# (v1.7) removed both alongside the rest of the quarantine
+# workflow (Section A.0 — "delete means delete"). The drawer's
+# quarantine button is gone in the frontend portion of this stage.

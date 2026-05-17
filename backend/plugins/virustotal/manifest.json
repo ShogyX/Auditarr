@@ -1,0 +1,14 @@
+{
+  "id": "virustotal",
+  "name": "VirusTotal",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Look up file hashes against the VirusTotal API. Surfaces malicious / suspicious / clean status on each media file so the rule engine can act on it.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.virustotal"],
+  "requires": []
+}

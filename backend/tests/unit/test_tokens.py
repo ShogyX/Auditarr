@@ -8,7 +8,7 @@ import pytest
 
 from app.core.exceptions import AuthenticationError
 from app.core.settings import Settings
-from app.security import ACCESS, REFRESH, RESET, TokenService
+from app.security import ACCESS, RESET, TokenService
 
 
 @pytest.fixture

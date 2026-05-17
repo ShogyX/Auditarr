@@ -27,12 +27,16 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.core.settings import get_settings
 from app.events.bus import EventBus
+from app.integrations.types import TranscodeJobSpec
+from app.models.integration import Integration
 from app.models.media import MediaFile
 from app.models.optimization import OptimizationItem
 from app.models.optimization_profile import OptimizationProfile
@@ -41,9 +45,15 @@ from app.optimization.ffmpeg_runner import (
     run_transcode,
     validate_output,
 )
-from app.optimization.profile_schema import ProfileDefinition
+from app.optimization.profile_schema import (
+    ProfileDefinition,
+    schedule_window_is_open,
+)
 from app.services.repositories import OptimizationRepository
 from app.utils.datetime import utcnow
+
+if TYPE_CHECKING:
+    from app.integrations.manager import IntegrationManager
 
 log = get_logger("auditarr.optimization.worker", category="optimization")
 
@@ -61,10 +71,20 @@ class OptimizationWorker:
         *,
         session: AsyncSession,
         event_bus: EventBus | None = None,
+        integration_manager: "IntegrationManager | None" = None,
     ) -> None:
         self._session = session
         self._bus = event_bus
         self._items = OptimizationRepository(session)
+        # Stage 08 (v1.7) — when provided, the worker calls
+        # ``submit_transcode_job`` on the routed item's
+        # integration provider. When ``None`` (legacy / test
+        # construction), the worker falls back to the Stage 07
+        # behaviour: mark routed + emit the event, but don't
+        # actually hand the job off. The polling job
+        # (``poll_routed_transcodes``) similarly requires the
+        # manager to advance routed items.
+        self._integration_manager = integration_manager
 
     # ── Public API ──────────────────────────────────────────────
     async def run_one(self) -> WorkerReport:
@@ -232,6 +252,46 @@ class OptimizationWorker:
                 item, f"profile {item.profile!r} has invalid settings: {exc!s}"
             )
 
+        # ── Stage 07 (v1.7) gates ─────────────────────────────────
+        # Order matters. Cheapest checks first.
+        #
+        # 1) Schedule window. When outside the window, release the
+        #    item back to ``queued`` so the next tick picks it up.
+        #    We don't fail/skip the item — it's not a permanent
+        #    outcome, it's "try again later". Emit
+        #    ``optimization.skipped_window`` per addendum A.1 §114
+        #    so the dashboard can surface "X items waiting for
+        #    schedule".
+        if profile.schedule_window is not None and not schedule_window_is_open(
+            profile.schedule_window
+        ):
+            return await self._release_for_schedule(item, profile)
+
+        # 2) Routing target. When the profile targets a non-
+        #    in_process runner, mark the item ``routed`` and emit
+        #    ``optimization.routed`` (per plan §402 + addendum
+        #    A.1 §114). The integration provider's
+        #    ``submit_transcode_job`` actually runs the job;
+        #    Stage 08 wires the provider side. Stage 07 lays the
+        #    seam: the item leaves the in-process queue without
+        #    being executed locally.
+        if profile.routing_target != "in_process":
+            return await self._route_to_provider(
+                item, profile, profile_row, media
+            )
+
+        # 3) In-process kill-switch. When the runtime setting
+        #    ``optimization_in_process_runner_enabled`` is False,
+        #    refuse to run in-process items with a clear error.
+        #    Profiles routed to plex/jellyfin/tdarr already
+        #    returned above and aren't affected by this toggle.
+        if not self._in_process_runner_enabled():
+            return await self._fail(
+                item,
+                "in-process runner disabled; reconfigure the "
+                "profile to route to plex/jellyfin/tdarr",
+            )
+
         # ── Pre-flight checks ──
         input_path = Path(media.path)
         if not input_path.exists():
@@ -381,6 +441,322 @@ class OptimizationWorker:
         log.info(
             "optimization.swap_complete",
             final=str(final_path),
+        )
+
+    # ── Stage 07 (v1.7) helpers ────────────────────────────────
+    def _in_process_runner_enabled(self) -> bool:
+        """Read the ``optimization_in_process_runner_enabled``
+        runtime setting. The runtime-settings layer reads from
+        the override store first and falls back to the env-default
+        ``Settings`` value (True). Reading via ``get_settings()``
+        picks up the override transparently because the runtime-
+        settings service writes back into the cached Settings
+        instance on each change."""
+        try:
+            return bool(get_settings().optimization_in_process_runner_enabled)
+        except Exception:  # noqa: BLE001
+            # Defensive: if the settings cache is somehow unbuilt,
+            # default to the env-default value (True). The kill-
+            # switch errs on the side of running rather than
+            # silently quarantining work.
+            return True
+
+    async def _release_for_schedule(
+        self, item: OptimizationItem, profile: ProfileDefinition
+    ) -> WorkerReport:
+        """Outside the profile's schedule window — release the
+        item back to ``queued`` so the next tick can pick it up
+        when the window opens. NOT a terminal state; the item
+        stays in the queue.
+
+        Emits ``optimization.skipped_window`` so the dashboard can
+        surface "X items waiting for their schedule" without the
+        operator needing to inspect each row.
+        """
+        # We claimed the row as ``running`` in ``_claim_next``;
+        # flip it back to ``queued`` so a future tick re-picks it.
+        # Reset ``started_at`` and ``progress_pct`` so the
+        # transient running-state doesn't leak into the next run.
+        item.status = "queued"
+        item.started_at = None
+        item.progress_pct = 0
+        await self._session.commit()
+        window = profile.schedule_window
+        detail = (
+            f"outside schedule window "
+            f"{window.start_hour:02d}:00..{window.end_hour:02d}:00 "
+            f"({window.timezone})"
+            if window is not None
+            else "outside schedule window"
+        )
+        if self._bus is not None:
+            await self._bus.emit(
+                "optimization.skipped_window",
+                {
+                    "item_id": item.id,
+                    "profile": item.profile,
+                    "reason": detail,
+                },
+                source="optimization",
+            )
+        log.info(
+            "optimization.skipped_window",
+            item_id=item.id,
+            profile=item.profile,
+            detail=detail,
+        )
+        return WorkerReport(
+            item_id=item.id, status="skipped", detail=detail
+        )
+
+    async def _route_to_provider(
+        self,
+        item: OptimizationItem,
+        profile: ProfileDefinition,
+        profile_row: OptimizationProfile,
+        media: MediaFile,
+    ) -> WorkerReport:
+        """Hand the item off to a non-in_process integration provider.
+
+        Stage 08 (v1.7) — when the worker was constructed with
+        an ``IntegrationManager`` and the profile names an
+        ``optimization_integration_id``, we resolve the
+        integration, build a :class:`TranscodeJobSpec`, and call
+        the provider's ``submit_transcode_job`` (per plan §402
+        + §444).
+
+        The provider's :class:`JobSubmitResult` drives the
+        terminal state:
+          * ``"accepted"`` → item flips to ``routed`` with the
+            upstream job id stamped on metadata; the polling
+            job will later flip it to ``completed`` / ``failed``.
+          * ``"rejected"`` → item flips to ``failed`` with the
+            provider's detail message. Operator action required.
+          * ``"error"`` (transient / transport) → item flips
+            back to ``queued`` so the next tick re-tries.
+
+        Backwards compatibility: when the worker was constructed
+        without an integration manager (tests, legacy callers),
+        we fall back to the Stage 07 behaviour: mark routed,
+        emit the event, never poll. This preserves existing
+        Stage 07 test expectations.
+        """
+        item.item_metadata = dict(item.item_metadata or {})
+        item.item_metadata["routing_target"] = profile.routing_target
+        item.item_metadata["routed_at"] = utcnow().isoformat()
+
+        # When the worker was constructed without an integration
+        # manager (Stage 07-style legacy callers, tests pinning
+        # the seam-only behaviour), fall back to "mark routed +
+        # emit, don't dispatch". The integration_id check below
+        # is intentionally NOT reached in this branch — without
+        # a manager we can't dispatch either way, so the
+        # operator-actionable error doesn't help.
+        if self._integration_manager is None:
+            item.status = "routed"
+            await self._session.commit()
+            if self._bus is not None:
+                await self._bus.emit(
+                    "optimization.routed",
+                    {
+                        "item_id": item.id,
+                        "profile": item.profile,
+                        "routing_target": profile.routing_target,
+                    },
+                    source="optimization",
+                )
+            log.info(
+                "optimization.routed",
+                item_id=item.id,
+                profile=item.profile,
+                target=profile.routing_target,
+                provider_dispatched=False,
+            )
+            return WorkerReport(
+                item_id=item.id,
+                status="routed",
+                detail=(
+                    f"routed to {profile.routing_target} "
+                    "(integration manager not provided to worker; "
+                    "provider not called)"
+                ),
+            )
+
+        # ── Find the integration provider ────────────────────────
+        # The profile carries ``optimization_integration_id``
+        # naming a specific integration row. Stage 08 requires
+        # the operator to pick one when routing_target != in_process;
+        # without it we can't dispatch (Plex vs Jellyfin both
+        # match ``routing_target=plex`` etc., but the operator
+        # may have multiple Plex servers configured).
+        integration_id = profile_row.optimization_integration_id
+        if not integration_id:
+            return await self._fail(
+                item,
+                (
+                    f"profile {item.profile!r} has routing_target="
+                    f"{profile.routing_target!r} but no integration "
+                    "is configured (optimization_integration_id is "
+                    "empty). Pick one in the profile editor."
+                ),
+            )
+
+        # ── Provider dispatch (Stage 08) ────────────────────────
+        integration = await self._session.get(Integration, integration_id)
+        if integration is None:
+            return await self._fail(
+                item,
+                (
+                    f"profile {item.profile!r} references integration "
+                    f"id {integration_id!r} which no longer exists"
+                ),
+            )
+        if integration.kind != profile.routing_target:
+            return await self._fail(
+                item,
+                (
+                    f"profile {item.profile!r} expected routing_target="
+                    f"{profile.routing_target!r} but the configured "
+                    f"integration is kind={integration.kind!r}"
+                ),
+            )
+
+        provider = self._integration_manager.provider_for(integration.kind)
+        if provider is None:
+            return await self._fail(
+                item,
+                (
+                    f"no provider registered for integration kind "
+                    f"{integration.kind!r}"
+                ),
+            )
+        if not hasattr(provider, "submit_transcode_job"):
+            return await self._fail(
+                item,
+                (
+                    f"provider {integration.kind!r} does not support "
+                    "submit_transcode_job (Stage 08 contract); switch "
+                    "this profile's routing_target to 'in_process' "
+                    "or to a provider that supports hand-off."
+                ),
+            )
+
+        config = self._integration_manager.build_config(integration)
+
+        # Build the transcode job spec from the profile + media.
+        # ``provider_profile_id`` and any provider-specific hints
+        # live in the profile's settings under
+        # ``settings.provider_metadata`` (free-form per plan §407
+        # — the profile editor populates it).
+        provider_metadata = {}
+        raw_provider_meta = (profile_row.settings or {}).get(
+            "provider_metadata"
+        )
+        if isinstance(raw_provider_meta, dict):
+            provider_metadata = dict(raw_provider_meta)
+
+        job_spec = TranscodeJobSpec(
+            item_id=item.id,
+            input_path=media.path,
+            transcode_scope=profile.transcode_scope,
+            video_codec=profile.video.codec,
+            audio_codec=profile.audio.codec,
+            container=profile.output.container,
+            crf=profile.video.crf,
+            max_bitrate_kbps=profile.video.max_bitrate_kbps,
+            scale_height=profile.video.scale_height,
+            metadata=provider_metadata,
+        )
+
+        try:
+            result = await provider.submit_transcode_job(config, job_spec)
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "optimization.routed_submit_crashed",
+                item_id=item.id,
+                integration=integration.name,
+            )
+            # A provider crash is a transient error — re-queue
+            # rather than failing terminally so the next tick
+            # can re-try.
+            item.status = "queued"
+            item.started_at = None
+            item.progress_pct = 0
+            await self._session.commit()
+            return WorkerReport(
+                item_id=item.id,
+                status="skipped",
+                detail=f"provider crashed during submit: {exc!s}",
+            )
+
+        # ── Map JobSubmitResult to item state ────────────────────
+        if result.status == "accepted":
+            item.status = "routed"
+            item.item_metadata["upstream_job_id"] = result.upstream_job_id
+            item.item_metadata["integration_id"] = integration.id
+            item.item_metadata["integration_name"] = integration.name
+            if result.detail:
+                item.item_metadata["routed_detail"] = result.detail
+            await self._session.commit()
+            if self._bus is not None:
+                await self._bus.emit(
+                    "optimization.routed",
+                    {
+                        "item_id": item.id,
+                        "profile": item.profile,
+                        "routing_target": profile.routing_target,
+                        "integration_id": integration.id,
+                        "upstream_job_id": result.upstream_job_id,
+                    },
+                    source="optimization",
+                )
+            log.info(
+                "optimization.routed",
+                item_id=item.id,
+                profile=item.profile,
+                target=profile.routing_target,
+                integration=integration.name,
+                upstream_job_id=result.upstream_job_id,
+            )
+            return WorkerReport(
+                item_id=item.id,
+                status="routed",
+                detail=(
+                    f"submitted to {integration.name} as "
+                    f"{result.upstream_job_id}"
+                ),
+            )
+
+        if result.status == "rejected":
+            # Provider refused — terminal failure. Operator must
+            # fix the profile / target before this item can run.
+            return await self._fail(
+                item,
+                (
+                    f"{integration.kind!r} provider rejected job: "
+                    f"{result.detail or '(no detail)'}"
+                ),
+            )
+
+        # ``error`` or any unknown status — transient; re-queue.
+        item.status = "queued"
+        item.started_at = None
+        item.progress_pct = 0
+        await self._session.commit()
+        log.warning(
+            "optimization.routed_submit_transient_error",
+            item_id=item.id,
+            integration=integration.name,
+            detail=result.detail,
+        )
+        return WorkerReport(
+            item_id=item.id,
+            status="skipped",
+            detail=(
+                f"transient error from {integration.kind} provider: "
+                f"{result.detail or '(no detail)'} — re-queued for "
+                "next tick"
+            ),
         )
 
     # ── State transitions ──────────────────────────────────────

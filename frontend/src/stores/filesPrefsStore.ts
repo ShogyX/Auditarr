@@ -79,6 +79,34 @@ const ALWAYS_KEYS = FILES_COLUMNS.filter(
   (c) => "always" in c && c.always,
 ).map((c) => c.key as FilesColumnKey);
 
+// Stage 02 — default column widths in CSS pixels. These are the
+// widths the table starts at on a fresh install; operators can drag
+// to resize and the new values persist in this store.
+//
+// The values are tuned for a 1440px-wide viewport: filename gets
+// the lion's share (it's variable-length and the operator wants to
+// read it), numeric columns are tight, the matched_rules / tags
+// chip columns are wider than the others because their content is
+// itself wide.
+const DEFAULT_COLUMN_WIDTHS: Record<FilesColumnKey, number> = {
+  filename: 360,
+  category: 110,
+  severity: 110,
+  size: 96,
+  codec: 110,
+  container: 110,
+  resolution: 110,
+  subs: 70,
+  updated: 130,
+  extension: 80,
+  matched_rules: 220,
+  tags: 180,
+};
+
+// Stage 02 — minimum column width. Below this the resize handle
+// stops responding so columns can't be collapsed to invisibility.
+export const FILES_COLUMN_MIN_WIDTH = 48;
+
 export type SortState = {
   key: MediaSortKey;
   dir: "asc" | "desc";
@@ -88,11 +116,24 @@ interface FilesPrefsState {
   visibleColumns: FilesColumnKey[];
   pageSize: number;
   sort: SortState;
+  // Stage 02 — per-column width (px). Keys are FilesColumnKey;
+  // missing keys fall back to DEFAULT_COLUMN_WIDTHS at the call
+  // site. Map (rather than dense record) so adding a new column in
+  // a later release doesn't invalidate the persisted state.
+  columnWidths: Partial<Record<FilesColumnKey, number>>;
+  // Stage 02 — per-column quick filter strings. Same map-shape
+  // reasoning as columnWidths. Empty string and missing key both
+  // mean "no filter on this column".
+  perColumnFilters: Partial<Record<FilesColumnKey, string>>;
   setVisibleColumns: (cols: FilesColumnKey[]) => void;
   toggleColumn: (key: FilesColumnKey) => void;
   resetColumns: () => void;
   setPageSize: (n: number) => void;
   setSort: (sort: SortState) => void;
+  setColumnWidth: (key: FilesColumnKey, width: number) => void;
+  resetColumnWidths: () => void;
+  setPerColumnFilter: (key: FilesColumnKey, value: string) => void;
+  clearPerColumnFilters: () => void;
 }
 
 const DEFAULTS = {
@@ -105,7 +146,21 @@ const DEFAULTS = {
   // ``severity`` from now on. Persisted ``severity_rank`` from
   // older clients still works (it sorts identically).
   sort: { key: "severity" as MediaSortKey, dir: "desc" as const },
+  columnWidths: {} as Partial<Record<FilesColumnKey, number>>,
+  perColumnFilters: {} as Partial<Record<FilesColumnKey, string>>,
 };
+
+/** Read the effective width for a column (persisted or default). */
+export function effectiveColumnWidth(
+  key: FilesColumnKey,
+  persisted: Partial<Record<FilesColumnKey, number>>,
+): number {
+  const stored = persisted[key];
+  if (typeof stored === "number" && stored >= FILES_COLUMN_MIN_WIDTH) {
+    return stored;
+  }
+  return DEFAULT_COLUMN_WIDTHS[key];
+}
 
 export const useFilesPrefs = create<FilesPrefsState>()(
   persist(
@@ -136,6 +191,29 @@ export const useFilesPrefs = create<FilesPrefsState>()(
         set({ pageSize: clamped });
       },
       setSort: (sort) => set({ sort }),
+      // Stage 02 — column resize.
+      setColumnWidth: (key, width) => {
+        if (!ALL_KEYS.includes(key)) return;
+        const clamped = Math.max(FILES_COLUMN_MIN_WIDTH, Math.round(width));
+        set((prev) => ({
+          columnWidths: { ...prev.columnWidths, [key]: clamped },
+        }));
+      },
+      resetColumnWidths: () => set({ columnWidths: {} }),
+      // Stage 02 — per-column quick filters.
+      setPerColumnFilter: (key, value) => {
+        if (!ALL_KEYS.includes(key)) return;
+        set((prev) => {
+          const next = { ...prev.perColumnFilters };
+          if (value === "") {
+            delete next[key];
+          } else {
+            next[key] = value;
+          }
+          return { perColumnFilters: next };
+        });
+      },
+      clearPerColumnFilters: () => set({ perColumnFilters: {} }),
     }),
     {
       name: "auditarr.files.prefs",
@@ -158,7 +236,23 @@ export const useFilesPrefs = create<FilesPrefsState>()(
         ) {
           state.visibleColumns = visible;
         }
+        // Stage 02 — defensive: an older persisted state may not
+        // carry the two new maps. Default-initialise so the table
+        // doesn't crash on first paint.
+        if (!state.columnWidths || typeof state.columnWidths !== "object") {
+          state.columnWidths = {};
+        }
+        if (
+          !state.perColumnFilters ||
+          typeof state.perColumnFilters !== "object"
+        ) {
+          state.perColumnFilters = {};
+        }
       },
     },
   ),
 );
+
+// Stage 02 — export the default-width record so tests and the table
+// can resolve defaults without re-declaring them.
+export { DEFAULT_COLUMN_WIDTHS };

@@ -23,9 +23,16 @@ differ only in how the runtime is packaged and supervised.
 
 ## Docker install
 
-The recommended Docker path uses `install.sh`, which walks you
+The recommended Docker path uses `install-docker.sh`, which walks you
 through prerequisites, secrets, the first admin user, library
 mounts, and starting the stack.
+
+> **v1.7 rename.** Pre-v1.7 the Docker installer was `install.sh`,
+> ambiguously named next to the bare-metal installer. v1.7
+> renamed it to `install-docker.sh`. A stub `install.sh` still
+> exists at the repo root — it prints the new name and exits, so
+> operators running `./install.sh` out of muscle memory get a
+> clear message instead of a silent miss.
 
 If you'd rather configure everything by hand, the **Manual setup**
 section below describes what the installer is doing under the hood.
@@ -48,8 +55,8 @@ section below describes what the installer is doing under the hood.
 
 ```bash
 # Download the release tarball, extract, then:
-cd auditarr-1.0.0
-./install.sh
+cd auditarr-1.7.0
+./install-docker.sh
 ```
 
 The script will:
@@ -163,7 +170,7 @@ and rollback flow.
 
 ## Manual setup
 
-If you'd rather not use `install.sh`:
+If you'd rather not use `install-docker.sh`:
 
 ```bash
 # 1. Generate a secret key

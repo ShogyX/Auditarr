@@ -7,8 +7,9 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import update
 
 from app.api.auth_deps import AdminUser, CurrentUser
-from app.api.dependencies import EventBusDep, SessionDep
+from app.api.dependencies import EventBusDep, RegistryDep, SessionDep
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.integrations.manager import IntegrationManager
 from app.models.optimization import OptimizationItem
 from app.models.optimization_profile import OptimizationProfile
 from app.optimization import OptimizationWorker
@@ -23,6 +24,7 @@ from app.schemas.optimization import (
     OptimizationProfileUpdate,
     WorkerReportRead,
 )
+from app.security.secrets import get_secret_box
 from app.services.repositories import (
     MediaRepository,
     OptimizationProfileRepository,
@@ -334,9 +336,24 @@ async def bulk_enqueue(
     summary="Run the oldest queued item synchronously",
 )
 async def run_next_now(
-    _admin: AdminUser, session: SessionDep, bus: EventBusDep
+    _admin: AdminUser,
+    session: SessionDep,
+    bus: EventBusDep,
+    registry: RegistryDep,
 ) -> WorkerReportRead:
-    worker = OptimizationWorker(session=session, event_bus=bus)
+    # Stage 08 (v1.7) — pass IntegrationManager so a routed item
+    # picked up by the "Run now" button actually dispatches to
+    # its integration provider instead of just stamping ``routed``
+    # and stopping.
+    manager = IntegrationManager(
+        session=session,
+        registry=registry,
+        secret_box=get_secret_box(),
+        event_bus=bus,
+    )
+    worker = OptimizationWorker(
+        session=session, event_bus=bus, integration_manager=manager
+    )
     report = await worker.run_one()
     return WorkerReportRead(
         item_id=report.item_id, status=report.status, detail=report.detail
@@ -367,8 +384,17 @@ async def run_item(
     _admin: AdminUser,
     session: SessionDep,
     bus: EventBusDep,
+    registry: RegistryDep,
 ) -> WorkerReportRead:
-    worker = OptimizationWorker(session=session, event_bus=bus)
+    manager = IntegrationManager(
+        session=session,
+        registry=registry,
+        secret_box=get_secret_box(),
+        event_bus=bus,
+    )
+    worker = OptimizationWorker(
+        session=session, event_bus=bus, integration_manager=manager
+    )
     report = await worker.run_item(item_id)
     if report.status == "failed" and report.detail == "not found":
         raise NotFoundError("Optimization item not found")

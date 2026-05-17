@@ -79,8 +79,8 @@ const GRAPH: Record<MutationKind, readonly string[]> = {
     "rules",
   ],
 
-  // Media changes (severity edits, quarantine, etc.) flow back into
-  // dashboard rollups and the files list.
+  // Media changes (severity edits, deletes, re-evaluations, etc.)
+  // flow back into dashboard rollups and the files list.
   media: ["media", "files", "dashboard"],
 
   // Scan starts and progress impact dashboard counts, the library
@@ -211,3 +211,37 @@ export function invalidateMany(
     }
   }
 }
+
+
+/**
+ * Stage 13 audit (plan §604 + addendum C.1) — mutations that
+ * legitimately do NOT call ``invalidateRelated`` / ``invalidateMany``.
+ *
+ * The grep audit (``grep -rn "useMutation" frontend/src/hooks``)
+ * surfaces 72 mutation hooks. The 9 below intentionally skip
+ * invalidation. If a future change adds a 10th, justify it
+ * here — otherwise wire it into the graph.
+ *
+ *   1. ``useTestIntegration`` (useIntegrations.ts) — preflight
+ *      probe that doesn't change server state.
+ *   2. ``useDiscoverLibraries`` (useIntegrations.ts) — discovery
+ *      probe; read-only call to the upstream.
+ *   3. ``useDryRunRule`` (useRules.ts) — preview evaluation;
+ *      no server-side persistence.
+ *   4. ``useLogin`` (useAuth.ts) — populates the auth store
+ *      via ``setSession``; the resulting auth-change remounts
+ *      the shell so all queries refresh naturally.
+ *   5. ``useRegister`` (useAuth.ts) — same shell-remount path.
+ *   6. ``useLogout`` (useAuth.ts) — clears the auth store →
+ *      redirects to /login → no app data is rendered.
+ *   7. ``useLogoutAll`` (useAuth.ts) — same as logout for the
+ *      caller's session; the OTHER sessions are server-side
+ *      and don't have a corresponding client-side query.
+ *   8. ``useRequestPasswordReset`` (useAuth.ts) — server-side
+ *      side effect (email / banner). No client query reads
+ *      from the result.
+ *   9. ``useConfirmPasswordReset`` (useAuth.ts) — followed
+ *      immediately by a fresh login, which goes through the
+ *      shell-remount path. The intermediate UI shows static
+ *      "password reset successful" copy.
+ */

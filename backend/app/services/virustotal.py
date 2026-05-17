@@ -1,137 +1,103 @@
-"""VirusTotal hash-lookup client (Stage 19 audit follow-up).
+"""VirusTotal hash-lookup client — legacy compat shim (Stage 10).
 
-Free-tier: ``GET /files/{hash}``. We do NOT upload files — that
-needs a paid tier and was explicitly out of scope. The quota
-counter resets daily at UTC midnight and is in-process only (no
-shared state needed; per-process daily quotas are aligned with
-VT's own per-API-key counting).
+Stage 10 moved the VirusTotal behaviour onto a proper plugin
+under ``backend/plugins/virustotal/backend.py`` so VT lives on
+the Integrations page rather than the Plugins page. This module
+remains as a thin compat shim because the Stage 19 audit
+follow-up's scanner integration imports
+``lookup_by_hash`` and ``reset_quota_for_tests`` from here.
 
-Usage:
+The actual logic — three-window quota state (per-minute /
+per-day / per-month per addendum B.7), the canonical
+``vt_status`` strings (addendum B.4), the
+``virustotal.result`` / ``virustotal.quota_exhausted`` bus
+events — lives in the plugin module. This file re-exports the
+public surface so existing call sites keep working.
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        result = await lookup_by_hash(
-            session=session, api_key=key, sha256=hex_hash
-        )
-        if result is not None:
-            media_file.virustotal_result = result
-            media_file.virustotal_checked_at = utcnow()
-
-``None`` return value means "no result to persist" (quota
-exhausted, or 404, or transient network error). Caller stays
-quiet.
+What's preserved:
+    * ``lookup_by_hash(api_key, sha256, daily_quota, timeout)``
+      — same signature as Stage 19 but now delegates to the
+      plugin's three-window-aware implementation.
+    * ``reset_quota_for_tests()`` — same name; clears the
+      plugin's quota state.
+    * ``_check_and_increment_quota(cap)`` — legacy single-cap
+      wrapper kept for the Stage 19 test that exercises it
+      directly. Internally delegates to the new three-window
+      function with the minute/month caps set so they don't
+      affect the legacy daily-only contract.
 """
+
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
 from typing import Any
 
-import httpx
+# Re-export the plugin's canonical types + helpers so existing
+# callers don't need to know about the move.
+from plugins.virustotal.backend import (
+    VT_MINUTE_CEILING,
+    VT_MONTHLY_CEILING_DEFAULT,
+    VT_STATUS_CLEAN,
+    VT_STATUS_ERROR,
+    VT_STATUS_MALICIOUS,
+    VT_STATUS_NOT_FOUND,
+    VT_STATUS_SUSPICIOUS,
+    _check_and_increment_quota as _plugin_check_and_increment,
+    lookup_by_hash as _plugin_lookup_by_hash,
+    quota_snapshot,
+    reset_quota_for_tests,
+)
 
-from app.core.logging import get_logger
-
-log = get_logger("auditarr.virustotal", category="virustotal")
-
-_VT_BASE = "https://www.virustotal.com/api/v3"
-
-
-@dataclass
-class _QuotaState:
-    """Per-day submission counter. Resets at UTC midnight."""
-
-    counter: int = 0
-    day: date = field(default_factory=lambda: datetime.now(UTC).date())
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-
-_quota = _QuotaState()
-
-
-async def _check_and_increment_quota(cap: int) -> bool:
-    """Atomically check whether we can spend one quota unit.
-    Returns ``True`` if the caller may proceed; ``False`` if the
-    daily cap is exhausted (caller skips the lookup silently)."""
-    today = datetime.now(UTC).date()
-    async with _quota.lock:
-        if _quota.day != today:
-            _quota.day = today
-            _quota.counter = 0
-        if _quota.counter >= cap:
-            return False
-        _quota.counter += 1
-        return True
+__all__ = [
+    "lookup_by_hash",
+    "reset_quota_for_tests",
+    "_check_and_increment_quota",
+    "quota_snapshot",
+    "VT_STATUS_CLEAN",
+    "VT_STATUS_MALICIOUS",
+    "VT_STATUS_SUSPICIOUS",
+    "VT_STATUS_NOT_FOUND",
+    "VT_STATUS_ERROR",
+]
 
 
 async def lookup_by_hash(
-    *, api_key: str, sha256: str, daily_quota: int, timeout: float = 10.0
+    *,
+    api_key: str,
+    sha256: str,
+    daily_quota: int,
+    timeout: float = 10.0,
 ) -> dict[str, Any] | None:
-    """Look up a hash on VirusTotal. Returns a small persistable
-    result dict, or ``None`` if there's nothing to persist (quota,
-    404, or transient error).
+    """Legacy daily-cap-only wrapper.
 
-    The persisted shape is deliberately tiny — the verbose VT
-    response gets compressed to the four severity-style counters
-    that the Files page surfaces, plus the permalink so the
-    operator can click through.
+    The Stage 19 callers pass only ``daily_quota``; we
+    forward to the new three-window implementation with the
+    monthly cap set to the free-tier ceiling (which doesn't
+    affect those callers' behaviour because they're nowhere
+    near 15500 lookups in a test run).
     """
-    if not api_key or not sha256:
-        return None
-    if not await _check_and_increment_quota(daily_quota):
-        log.info("virustotal.quota_exhausted", sha256=sha256, cap=daily_quota)
-        return None
-
-    url = f"{_VT_BASE}/files/{sha256}"
-    headers = {"x-apikey": api_key, "accept": "application/json"}
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url, headers=headers)
-    except httpx.HTTPError as exc:
-        log.warning(
-            "virustotal.network_error", sha256=sha256, error=str(exc)[:200]
-        )
-        return None
-
-    if response.status_code == 404:
-        # File hash unknown to VT. Persist the negative result so
-        # the Files page can show "Unknown to VirusTotal" rather
-        # than render nothing.
-        return {
-            "status": "not_found",
-            "checked_at": datetime.now(UTC).isoformat(),
-        }
-    if response.status_code in (401, 403):
-        log.warning("virustotal.auth_rejected", status=response.status_code)
-        return None
-    if response.status_code == 429:
-        log.warning("virustotal.rate_limited")
-        return None
-    if response.status_code >= 400:
-        log.warning(
-            "virustotal.upstream_error", status=response.status_code
-        )
-        return None
-
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-
-    attributes = (body.get("data") or {}).get("attributes") or {}
-    stats = attributes.get("last_analysis_stats") or {}
-    return {
-        "status": "ok",
-        "malicious": int(stats.get("malicious", 0)),
-        "suspicious": int(stats.get("suspicious", 0)),
-        "harmless": int(stats.get("harmless", 0)),
-        "undetected": int(stats.get("undetected", 0)),
-        "permalink": f"https://www.virustotal.com/gui/file/{sha256}",
-        "checked_at": datetime.now(UTC).isoformat(),
-    }
+    return await _plugin_lookup_by_hash(
+        api_key=api_key,
+        sha256=sha256,
+        daily_quota=daily_quota,
+        monthly_quota=VT_MONTHLY_CEILING_DEFAULT,
+        timeout=timeout,
+        event_bus=None,
+    )
 
 
-def reset_quota_for_tests() -> None:
-    """Test-only helper: zero the daily counter so a test suite
-    doesn't run up against the cap. Not exported via __all__."""
-    _quota.counter = 0
-    _quota.day = datetime.now(UTC).date()
+async def _check_and_increment_quota(cap: int) -> bool:
+    """Legacy single-cap wrapper kept for the existing Stage 19
+    test that exercises this helper directly.
+
+    Forwards to the three-window helper with the daily cap set
+    to the caller's value and minute/month caps set to safely
+    high values so they don't interfere. Returns just the
+    boolean (the new helper returns ``(bool, window | None)``).
+    """
+    allowed, _ = await _plugin_check_and_increment(
+        minute_cap=VT_MINUTE_CEILING,
+        daily_cap=cap,
+        monthly_cap=VT_MONTHLY_CEILING_DEFAULT,
+        event_bus=None,
+    )
+    return allowed

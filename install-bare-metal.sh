@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Auditarr bare-metal installer (v1.6.0+).
+# Auditarr bare-metal installer (v1.7.0+).
 #
 # Targets LXC containers and VMs where Docker isn't available or
 # desired. Tested on Debian 12 / Ubuntu 22.04 + 24.04. Other distros
@@ -179,20 +179,35 @@ ok()    { printf "    ${GREEN}✓${RESET} %s\n" "$1"; }
 die()   { printf "${RED}✗${RESET} %s\n" "$1" >&2; exit 1; }
 
 # Prompt helpers honoring NON_INTERACTIVE.
+#
+# In NON_INTERACTIVE mode, the env var (if set) is the source of
+# truth; if unset, the explicit default is used; if neither, we die.
+#
+# In INTERACTIVE mode, the env var (if set) becomes the *default*
+# shown to the operator — the operator can still override it. This
+# matters: previously, setting an env var would silently bypass the
+# prompt even in interactive mode, which surprised operators who set
+# AUDITARR_ADMIN_EMAIL=admin@localhost just to have it as a default
+# and then never got asked anything else.
 prompt() {
-    # $1: prompt text, $2: env-var-name for non-interactive default
+    # $1: prompt text, $2: env-var-name for non-interactive default,
+    # $3: literal default (used if env var is unset).
     local text="$1" envvar="$2" default="${3:-}" value=""
+    local env_value="${!envvar:-}"
     if [[ "$NON_INTERACTIVE" == "1" ]]; then
-        value="${!envvar:-$default}"
+        value="${env_value:-$default}"
         if [[ -z "$value" ]]; then
             die "$envvar must be set in non-interactive mode"
         fi
         printf "%s\n" "$value"
         return
     fi
-    if [[ -n "$default" ]]; then
-        read -r -p "    $text [$default]: " value
-        value="${value:-$default}"
+    # Interactive: env var becomes the default the operator can accept
+    # or override. Falls back to the literal default if no env var.
+    local effective_default="${env_value:-$default}"
+    if [[ -n "$effective_default" ]]; then
+        read -r -p "    $text [default: $effective_default]: " value
+        value="${value:-$effective_default}"
     else
         read -r -p "    $text: " value
     fi
@@ -201,17 +216,29 @@ prompt() {
 
 prompt_secret() {
     # Like prompt(), but doesn't echo. $1 = label, $2 = envvar.
+    # In interactive mode never echoes the default value (security);
+    # shows ``[unchanged]`` if an env value was supplied so the
+    # operator knows pressing Enter keeps it.
     local text="$1" envvar="$2" value=""
+    local env_value="${!envvar:-}"
     if [[ "$NON_INTERACTIVE" == "1" ]]; then
-        value="${!envvar:-}"
+        value="$env_value"
         if [[ -z "$value" ]]; then
             die "$envvar must be set in non-interactive mode"
         fi
         printf "%s\n" "$value"
         return
     fi
-    read -r -s -p "    $text: " value
-    echo "" >&2
+    # Interactive: prompt regardless of env var. If an env value was
+    # supplied, treat it as the effective default but never echo it.
+    if [[ -n "$env_value" ]]; then
+        read -r -s -p "    $text [unchanged]: " value
+        echo "" >&2
+        value="${value:-$env_value}"
+    else
+        read -r -s -p "    $text: " value
+        echo "" >&2
+    fi
     printf "%s\n" "$value"
 }
 
@@ -231,10 +258,10 @@ confirm() {
 # ── Banner ────────────────────────────────────────────────────
 cat <<'BANNER'
 
-  ┌──────────────────────────────────────────────┐
-  │   Auditarr bare-metal setup (LXC / VM)       │
-  │   For Docker installs use ./install.sh       │
-  └──────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────┐
+  │   Auditarr bare-metal setup (LXC / VM)           │
+  │   For Docker installs use ./install-docker.sh    │
+  └──────────────────────────────────────────────────┘
 
 BANNER
 
@@ -692,12 +719,14 @@ fi
 # Upgrade pip and install the backend in editable mode. Using
 # editable install so the operator can patch backend/ in-place and
 # restart the service without re-running the installer.
+note "This step typically takes 3–5 minutes — pip is compiling wheels. Please wait."
 sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --quiet --upgrade pip setuptools wheel
 sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --quiet -e "$APP_HOME/backend"
 
 # Also install gunicorn — backend pyproject doesn't list it because
 # the Docker image uses gunicorn from a system package layer; under
 # bare-metal we install it into the venv.
+note "Backend dependencies installed. Installing the gunicorn / uvicorn runtime…"
 sudo -u "$APP_USER" "$VENV_DIR/bin/pip" install --quiet 'gunicorn>=22.0' 'uvicorn[standard]>=0.32'
 ok "Backend installed into venv"
 
@@ -896,9 +925,30 @@ else
 
     ADMIN_EMAIL="$(prompt 'Admin email' AUDITARR_ADMIN_EMAIL 'admin@localhost')"
     ADMIN_USERNAME="$(prompt 'Admin username' AUDITARR_ADMIN_USERNAME 'admin')"
-    ADMIN_PASSWORD="$(prompt_secret 'Admin password (min 12 chars)' AUDITARR_ADMIN_PASSWORD)"
-    if [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
-        die "Admin password must be at least 12 characters."
+
+    # Admin password — in interactive mode we ask twice and re-prompt
+    # on mismatch or on length < 12. In non-interactive mode the
+    # env var is the source of truth and we validate length once.
+    if [[ "$NON_INTERACTIVE" == "1" ]]; then
+        ADMIN_PASSWORD="$(prompt_secret 'Admin password (min 12 chars)' AUDITARR_ADMIN_PASSWORD)"
+        if [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
+            die "Admin password must be at least 12 characters."
+        fi
+    else
+        while :; do
+            ADMIN_PASSWORD="$(prompt_secret 'Admin password (min 12 chars)' AUDITARR_ADMIN_PASSWORD)"
+            ADMIN_PASSWORD_CONFIRM="$(prompt_secret 'Confirm admin password' AUDITARR_ADMIN_PASSWORD)"
+            if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD_CONFIRM" ]]; then
+                warn "Passwords didn't match — try again."
+                continue
+            fi
+            if [[ ${#ADMIN_PASSWORD} -lt 12 ]]; then
+                warn "Too short (${#ADMIN_PASSWORD} chars; need ≥12). Try again."
+                continue
+            fi
+            unset ADMIN_PASSWORD_CONFIRM
+            break
+        done
     fi
 
     export AUDITARR_ADMIN_EMAIL="$ADMIN_EMAIL"

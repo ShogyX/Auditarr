@@ -30,7 +30,6 @@ from app.rules.schema import (
     Delete,
     Match,
     Notify,
-    Quarantine,
     QueueOptimization,
     RuleDefinition,
     SetSeverity,
@@ -67,6 +66,23 @@ class EvaluationInput:
     subtitle_languages: list[str] = field(default_factory=list)
     audio_languages: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    # Stage 06 (v1.7) — rule engine extensions.
+    #
+    # ``probe_failed``: True when ffprobe couldn't read the file
+    # (set by ``scanner.py``; cleared on a successful re-probe).
+    # Powers the Stage 06 built-in "Probe failed" rule which
+    # used to be stubbed because the column didn't exist as a
+    # DSL field.
+    probe_failed: bool = False
+    # ``vt_status``: VirusTotal scan result; one of
+    # ``VT_STATUS_VALUES`` (clean/malicious/suspicious/not_found/
+    # error) or ``None`` for "never looked up". Populated by the
+    # VT plugin (Stage 10). Stage 06 wires the DSL field so the
+    # built-in "VirusTotal non-clean" rule has somewhere to
+    # match — even before Stage 10, operator-authored rules can
+    # use this field and will simply not match until a VT result
+    # arrives.
+    vt_status: str | None = None
 
 
 @dataclass(slots=True)
@@ -78,20 +94,22 @@ class EvaluationResult:
     severity_rank: int = 0
     add_tags: list[str] = field(default_factory=list)
     queue_optimizations: list[str] = field(default_factory=list)
-    notifications: list[dict[str, str | None]] = field(default_factory=list)
-    # Stage 9 (audit follow-up): quarantine + delete decisions.
-    # ``quarantine`` is True when at least one matched action is a
-    # Quarantine action OR a Delete action (soft-delete falls back
-    # to quarantine when ``confirm=False``). ``quarantine_reason``
-    # is the first non-null reason supplied across the matched
-    # quarantine actions.
-    quarantine: bool = False
-    quarantine_reason: str | None = None
-    # ``delete_paths`` is populated with the file's path when a
-    # Delete(confirm=True) action matched. The service layer
-    # consumes this list; the evaluator never touches the
-    # filesystem.
+    notifications: list[dict[str, Any]] = field(default_factory=list)
+    # Stage 05 (v1.7): delete decisions. The quarantine intermediate
+    # state retired in this stage — "delete means delete" (Section
+    # A.0 of the v1.7 addendum). Per matched ``Delete`` action, the
+    # evaluator records the file's path and the operator-supplied
+    # reason (or a synthesized one when no reason was given). The
+    # service layer reads ``delete_paths`` to move the file to
+    # trash + drop the row, and uses ``delete_reasons`` for the
+    # audit-log entry it emits for every successful delete.
+    #
+    # Two parallel lists keep the (path, reason) pairing stable
+    # without forcing a TypedDict on every downstream consumer.
+    # They're always the same length; ``merge_into`` extends both
+    # in lockstep.
     delete_paths: list[str] = field(default_factory=list)
+    delete_reasons: list[str] = field(default_factory=list)
 
     def merge_into(self, other: "EvaluationResult") -> None:
         """Combine this result's escalations into ``other``.
@@ -110,17 +128,9 @@ class EvaluationResult:
                 seen.add(tag)
         other.queue_optimizations.extend(self.queue_optimizations)
         other.notifications.extend(self.notifications)
-        # Stage 9: quarantine is a one-way escalation — once any rule
-        # quarantines, the aggregate stays quarantined. Reason carries
-        # the first non-null value (preserves the most specific
-        # message rather than overwriting it).
-        if self.quarantine and not other.quarantine:
-            other.quarantine = True
-            other.quarantine_reason = self.quarantine_reason
-        elif self.quarantine_reason and not other.quarantine_reason:
-            other.quarantine_reason = self.quarantine_reason
-        # delete_paths accumulates so the service can dedupe.
+        # Stage 05: delete_paths + delete_reasons stay paired by index.
         other.delete_paths.extend(self.delete_paths)
+        other.delete_reasons.extend(self.delete_reasons)
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -221,34 +231,30 @@ def _apply_action(
         result.queue_optimizations.append(action.profile)
         return
     if isinstance(action, Notify):
-        result.notifications.append(
-            {"channel": action.channel, "message": action.message}
-        )
-        return
-    if isinstance(action, Quarantine):
-        # Stage 9 (audit follow-up): quarantine is a flag the service
-        # layer reads; the evaluator stays pure (no DB writes here).
-        result.quarantine = True
-        if action.reason and not result.quarantine_reason:
-            result.quarantine_reason = action.reason
+        # Stage 06 (v1.7): surface the optional throttle config so
+        # the service layer can decide whether to suppress this
+        # notification before dispatch. The ``throttle`` value is
+        # either a ``{"window_seconds": int, "max_per_window":
+        # int}`` dict (when the operator configured one) or
+        # ``None`` (unthrottled — every match delivers).
+        notif: dict[str, Any] = {
+            "channel": action.channel,
+            "message": action.message,
+            "throttle": action.throttle.model_dump()
+            if action.throttle is not None
+            else None,
+        }
+        result.notifications.append(notif)
         return
     if isinstance(action, Delete):
-        # Stage 9 (audit follow-up): Defensive default. Without
-        # ``confirm=True`` the action soft-deletes (quarantine +
-        # flag); with confirm, we surface the path for the service
-        # to move to trash + delete the row.
-        result.quarantine = True
-        if not result.quarantine_reason:
-            result.quarantine_reason = (
-                "Soft-delete via rule (confirm=false)"
-                if not action.confirm
-                else "Pending hard delete via rule"
-            )
-        if action.confirm:
-            # Stage 9 (audit follow-up): the service layer reads
-            # ``result.delete_paths`` to drive the actual filesystem
-            # move + row removal. The evaluator stays pure (no I/O);
-            # it just records the path the matched rule wants deleted.
-            result.delete_paths.append(input_.path)
+        # Stage 05 (v1.7) — "delete means delete" (Section A.0).
+        # The pre-Stage-05 ``confirm`` flag is gone; every matched
+        # Delete moves the file to ``data_dir/trash/`` and removes
+        # the row. The reason supplied on the action flows through
+        # to the audit-log entry the service layer emits; if no
+        # reason was supplied, we synthesize a generic one so the
+        # audit row still carries something operator-readable.
+        result.delete_paths.append(input_.path)
+        result.delete_reasons.append(action.reason or "Deleted by rule")
         return
     raise TypeError(f"Unknown action type: {type(action)!r}")

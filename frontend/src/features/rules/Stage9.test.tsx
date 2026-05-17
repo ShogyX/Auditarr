@@ -1,13 +1,20 @@
 /**
- * Stage 9 (audit follow-up) — VisualRuleBuilder + Action union.
+ * Stage 9 (audit follow-up), updated Stage 05 (v1.7) —
+ * VisualRuleBuilder + Action union.
  *
- * Pins:
- *   - Action type union includes ``quarantine`` and ``delete`` so
- *     the discriminated shape compiles cleanly.
- *   - The visual builder renders vocabulary actions including the
- *     two new types when the backend reports them.
- *   - Selecting ``delete`` exposes a confirm checkbox (boolean arg).
- *   - The confirm checkbox starts unchecked (safe default).
+ * Stage 9 originally pinned a ``Quarantine`` action + a Delete
+ * action gated by a ``confirm`` boolean. Stage 05 retired both
+ * (Section A.0 of the v1.7 addendum — "delete means delete").
+ * The file now pins the post-Stage-05 contract:
+ *
+ *   - The Action type union excludes ``quarantine`` (TS compile-
+ *     time guarantee).
+ *   - The visual builder renders ``Delete`` from vocabulary as a
+ *     plain action with a ``reason`` text input (not a checkbox).
+ *   - ``Quarantine`` does NOT appear in the action picker (it's
+ *     gone from the vocabulary).
+ *   - The freshAction("delete") default returns
+ *     ``{ type: "delete", reason: null }`` — no ``confirm`` field.
  */
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -89,7 +96,8 @@ function wrap(child: ReactNode): ReactNode {
   );
 }
 
-// Mirror the backend's Stage 9 vocabulary endpoint output.
+// Stage 05 (v1.7) vocabulary: ``Quarantine`` is gone; ``Delete``
+// publishes ``reason`` (string) only, no ``confirm`` boolean.
 const VOCAB: RuleVocabulary = {
   fields: [
     {
@@ -106,24 +114,21 @@ const VOCAB: RuleVocabulary = {
       type: "set_severity",
       label: "Set severity",
       args_schema: {
-        severity: { type: "string", enum: ["ok", "info", "warn"], required: true },
-      },
-    },
-    {
-      type: "quarantine",
-      label: "Quarantine",
-      args_schema: {
-        reason: { type: "string", required: false, hint: "Optional reason" },
+        severity: {
+          type: "string",
+          enum: ["ok", "info", "warn"],
+          required: true,
+        },
       },
     },
     {
       type: "delete",
       label: "Delete",
       args_schema: {
-        confirm: {
-          type: "boolean",
+        reason: {
+          type: "string",
           required: false,
-          hint: "Required for HARD delete",
+          hint: "Optional reason recorded in the audit log",
         },
       },
     },
@@ -138,8 +143,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("Stage 9 — VisualRuleBuilder action vocabulary", () => {
-  it("renders Quarantine and Delete in the action-type picker", () => {
+describe("Stage 05 (v1.7) — VisualRuleBuilder action vocabulary", () => {
+  it("renders Delete but NOT Quarantine in the action-type picker", () => {
     const def: RuleDefinition = {
       match: { field: "extension", op: "eq", value: "mkv" },
       actions: [{ type: "set_severity", severity: "warn" }],
@@ -154,18 +159,18 @@ describe("Stage 9 — VisualRuleBuilder action vocabulary", () => {
       ),
     );
 
-    // The action-type <select> shows the three Stage 9 vocabulary
-    // actions (including the new ones).
     const selects = screen.getAllByRole("combobox", { name: /action type/i });
     expect(selects.length).toBeGreaterThan(0);
     const firstSelect = selects[0]!;
     const options = within(firstSelect).getAllByRole("option");
     const labels = options.map((o) => o.textContent?.trim());
-    expect(labels).toContain("Quarantine");
     expect(labels).toContain("Delete");
+    // Stage 05 retired the Quarantine action — it must not appear
+    // in the picker even if a stale vocabulary publishes it.
+    expect(labels).not.toContain("Quarantine");
   });
 
-  it("switching to Delete reveals a confirm checkbox at unchecked default", () => {
+  it("switching to Delete emits the Stage 05 default { type: 'delete', reason: null }", () => {
     let captured: RuleDefinition | null = null;
     const def: RuleDefinition = {
       match: { field: "extension", op: "eq", value: "mkv" },
@@ -187,21 +192,24 @@ describe("Stage 9 — VisualRuleBuilder action vocabulary", () => {
     const select = screen.getByRole("combobox", { name: /action type/i });
     fireEvent.change(select, { target: { value: "delete" } });
 
-    // onChange should be called with a new definition whose action
-    // is the freshAction("delete") shape: confirm=false.
     expect(captured).not.toBeNull();
     const action = captured!.actions[0] as Action;
     expect(action.type).toBe("delete");
-    // Discriminated shape — the type narrowing kicks in here.
     if (action.type === "delete") {
-      expect(action.confirm).toBe(false);
+      // Stage 05 retired ``confirm``; default carries a null
+      // reason (audit log gets "Deleted by rule" synthesized
+      // server-side).
+      expect(action.reason).toBeNull();
+      // ``confirm`` isn't on the union type — runtime guard for
+      // a future regression that adds it back.
+      expect((action as Record<string, unknown>).confirm).toBeUndefined();
     }
   });
 
-  it("delete action's confirm checkbox is rendered when active", () => {
+  it("Delete action surfaces a reason text input (not a checkbox)", () => {
     const def: RuleDefinition = {
       match: { field: "extension", op: "eq", value: "mkv" },
-      actions: [{ type: "delete", confirm: false } as Action],
+      actions: [{ type: "delete", reason: null } as Action],
     };
     render(
       wrap(
@@ -213,17 +221,23 @@ describe("Stage 9 — VisualRuleBuilder action vocabulary", () => {
       ),
     );
 
-    // The confirm input is rendered as a checkbox.
-    const checkbox = screen.getByRole("checkbox", { name: /confirm/i });
-    expect(checkbox).toBeInTheDocument();
-    expect((checkbox as HTMLInputElement).checked).toBe(false);
+    // Stage 05: Delete's only published arg is ``reason``,
+    // typed as ``string``. The pre-Stage-05 ``confirm`` checkbox
+    // must not appear — assert both directions so a regression
+    // that re-introduces it trips this test.
+    expect(
+      screen.queryByRole("checkbox", { name: /confirm/i }),
+    ).not.toBeInTheDocument();
+    // The reason input is rendered (label text contains "reason").
+    const labels = screen.getAllByText(/reason/i);
+    expect(labels.length).toBeGreaterThan(0);
   });
 
-  it("checking the confirm checkbox propagates confirm=true via onChange", () => {
+  it("typing in the reason input propagates the new reason via onChange", () => {
     let captured: RuleDefinition | null = null;
     const def: RuleDefinition = {
       match: { field: "extension", op: "eq", value: "mkv" },
-      actions: [{ type: "delete", confirm: false } as Action],
+      actions: [{ type: "delete", reason: null } as Action],
     };
     render(
       wrap(
@@ -237,13 +251,29 @@ describe("Stage 9 — VisualRuleBuilder action vocabulary", () => {
       ),
     );
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /confirm/i }));
+    // Find the reason text input. The renderer wraps the input
+    // in a label whose text contains "reason"; the input's
+    // placeholder is the hint string.
+    const inputs = screen.getAllByRole("textbox");
+    const reasonInput = inputs.find(
+      (el) =>
+        (el.getAttribute("placeholder") || "")
+          .toLowerCase()
+          .includes("reason") ||
+        (el.closest("label")?.textContent || "")
+          .toLowerCase()
+          .includes("reason"),
+    );
+    expect(reasonInput).toBeDefined();
+    fireEvent.change(reasonInput!, {
+      target: { value: "Plex codec incompat" },
+    });
 
     expect(captured).not.toBeNull();
     const action = captured!.actions[0] as Action;
     expect(action.type).toBe("delete");
     if (action.type === "delete") {
-      expect(action.confirm).toBe(true);
+      expect(action.reason).toBe("Plex codec incompat");
     }
   });
 });

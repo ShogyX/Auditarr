@@ -1,6 +1,6 @@
 [project]
 name = "auditarr"
-version = "0.1.0"
+version = "1.8.1"
 description = "Auditarr — media library auditor (next gen)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -22,6 +22,14 @@ dependencies = [
   "argon2-cffi>=23.1.0",
   "pyjwt>=2.9.0",
   "httpx>=0.27.0",
+  # v1.7.2: certifi is a transitive dep of httpx, but on hosts
+  # where the package was somehow uninstalled (apt upgrade, manual
+  # pip uninstall, broken venv rebuild) httpx fails with an
+  # opaque ``FileNotFoundError`` at first AsyncClient construction.
+  # Pinning it explicitly makes the dependency visible to ``pip
+  # install -e .`` and to deployment tooling that audits the
+  # requirements set.
+  "certifi>=2024.0",
   "structlog>=24.4.0",
   "python-multipart>=0.0.12",
   "websockets>=13.1",

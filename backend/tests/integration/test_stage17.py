@@ -76,6 +76,32 @@ class _DiscoveryStub:
     ) -> list:
         return []
 
+    # Stage 07 / Stage 08 protocol additions — the stub doesn't
+    # exercise these surfaces but must satisfy the
+    # ``runtime_checkable`` isinstance check at module load. We
+    # return inert defaults so the protocol-conformance assert
+    # below passes without altering the discovery behaviour
+    # under test.
+    async def submit_transcode_job(self, _config, _job_spec):  # noqa: ANN001, ANN202
+        from app.integrations.types import JobSubmitResult
+
+        return JobSubmitResult(
+            status="rejected", detail="discovery stub does not submit jobs"
+        )
+
+    async def list_transcode_profiles(self, _config):  # noqa: ANN001, ANN202
+        return []
+
+    async def get_transcode_job_status(self, _config, _upstream_job_id):  # noqa: ANN001, ANN202
+        from app.integrations.types import TranscodeJobStatus
+
+        return TranscodeJobStatus(status="unknown")
+
+    # Stage 09 (v1.7) protocol addition — return [] so the
+    # ``runtime_checkable`` isinstance check passes.
+    async def fetch_live_playbacks(self, _config):  # noqa: ANN001, ANN202
+        return []
+
 
 assert isinstance(_DiscoveryStub(), IntegrationProvider)
 

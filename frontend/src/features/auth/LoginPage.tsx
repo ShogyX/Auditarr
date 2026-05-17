@@ -19,6 +19,13 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
 
   if (tokens?.accessToken) {
+    // Stage 12 (plan §584) — already-signed-in users with
+    // the must-change flag still get routed to the change-
+    // password screen rather than the requested destination.
+    const user = useAuthStore.getState().user;
+    if (user?.must_change_password) {
+      return <Navigate to="/change-password" replace />;
+    }
     const dest = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname ?? "/";
     return <Navigate to={dest} replace />;
   }
@@ -27,7 +34,16 @@ export function LoginPage() {
     e.preventDefault();
     setError(null);
     try {
-      await login.mutateAsync({ login: identifier, password });
+      const user = await login.mutateAsync({ login: identifier, password });
+      // Stage 12 (plan §584) — if the user consumed a
+      // terminal-OTP reset, force them through the change-
+      // password screen before they reach the rest of the
+      // app. The backend's ``confirm_password_reset`` sets
+      // the flag; ``change_password`` clears it.
+      if (user.must_change_password) {
+        navigate("/change-password", { replace: true });
+        return;
+      }
       navigate("/", { replace: true });
     } catch (err) {
       setError(

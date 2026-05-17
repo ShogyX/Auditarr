@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from app.rules.evaluator import EvaluationInput, EvaluationResult, evaluate
 from app.rules.schema import RuleDefinition
@@ -228,8 +227,12 @@ def test_notify_action() -> None:
         },
         _input(),
     )
+    # Stage 06 (v1.7): notify dicts now also carry the ``throttle``
+    # key (``None`` when the Notify action has no throttle config).
+    # The service layer reads this key to decide whether to gate
+    # the dispatch through the rule_notification_windows table.
     assert result.notifications == [
-        {"channel": "ops", "message": "look at this"}
+        {"channel": "ops", "message": "look at this", "throttle": None}
     ]
 
 

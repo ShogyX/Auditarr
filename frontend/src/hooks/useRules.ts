@@ -26,6 +26,23 @@ export interface Rule {
 export interface RuleDefinition {
   match: Match;
   actions: Action[];
+  /**
+   * Stage 06 (v1.7) — destructive-action acknowledgement.
+   *
+   * Per addendum A.0.1: a rule that contains any ``delete`` action
+   * MUST carry ``acknowledged_destructive: true`` at the rule
+   * level. The backend's ``RuleDefinition`` Pydantic model rejects
+   * delete-action bodies without this flag (and forbids it on
+   * non-delete bodies). The visual rule builder renders the flag
+   * as a checkbox labelled "I understand this rule deletes files
+   * from disk." driven by ``vocabulary.rule_flags``.
+   *
+   * Optional in the TS type so existing rule payloads (no delete
+   * action) don't need to set it; the builder writes ``true``
+   * only when needed and ``undefined`` otherwise. The backend
+   * defaults absent to ``false``.
+   */
+  acknowledged_destructive?: boolean;
 }
 
 export type Match = Condition | AllOf | AnyOf;
@@ -48,13 +65,34 @@ export type Action =
   | { type: "set_severity"; severity: string }
   | { type: "add_tag"; tag: string }
   | { type: "queue_optimization"; profile: string }
-  | { type: "notify"; channel: string; message?: string | null }
-  // Stage 9 (audit follow-up): quarantine + delete actions.
-  // Quarantine sets MediaFile.quarantined=True + emits
-  // media.quarantined. Delete is gated by ``confirm`` — without
-  // it the action soft-deletes (quarantine only).
-  | { type: "quarantine"; reason?: string | null }
-  | { type: "delete"; confirm?: boolean };
+  | {
+      type: "notify";
+      channel: string;
+      message?: string | null;
+      /**
+       * Stage 06 (v1.7) — optional throttle. The rules service
+       * gates the dispatch through ``rule_notification_windows``;
+       * matches beyond ``max_per_window`` in a rolling
+       * ``window_seconds`` window are suppressed and a
+       * ``rule.throttled`` event is emitted on the bus. The
+       * backend enforces ``window_seconds >= 60`` and
+       * ``max_per_window >= 1``.
+       */
+      throttle?: NotifyThrottle | null;
+    }
+  // Stage 9 (audit follow-up), updated Stage 05 (v1.7): Stage 05
+  // retired the Quarantine action and Delete's ``confirm`` flag
+  // (Section A.0 — "delete means delete"). Delete is now
+  // unconditional; the optional ``reason`` lands in the
+  // ``file.deleted`` audit-log entry the service emits on every
+  // successful delete.
+  | { type: "delete"; reason?: string | null };
+
+/** Stage 06 (v1.7) — Notify throttle config. */
+export interface NotifyThrottle {
+  window_seconds: number;
+  max_per_window: number;
+}
 
 export interface DryRunResult {
   matched: boolean;
@@ -99,8 +137,37 @@ export interface RuleVocabularyArgSchema {
   enum?: string[];
   minLength?: number;
   maxLength?: number;
+  /**
+   * Stage 06 (v1.7) — nested object args. The Notify action's
+   * ``throttle`` arg is the first object-typed arg in the
+   * vocabulary; its sub-properties live here. ``minimum`` is
+   * surfaced on numeric children so the builder can validate
+   * client-side before posting.
+   */
+  properties?: Record<string, RuleVocabularyArgSchema>;
+  minimum?: number;
   required?: boolean;
   hint?: string;
+}
+
+/**
+ * Stage 06 (v1.7) — rule-level boolean flags the builder must
+ * surface. Today carries only ``acknowledged_destructive``
+ * (addendum A.0.1). Each entry advertises its label, hint, and
+ * the conditional-visibility rule (``required_when``).
+ */
+export interface RuleVocabularyFlag {
+  type: "bool";
+  label: string;
+  hint?: string;
+  /**
+   * The builder shows + enforces the flag only when this
+   * predicate matches the rule's current shape. The only
+   * predicate today is ``{ any_action_type: "delete" }`` —
+   * meaning "show this flag when any action in the rule is a
+   * delete action."
+   */
+  required_when?: { any_action_type?: string };
 }
 
 export interface RuleVocabulary {
@@ -108,6 +175,9 @@ export interface RuleVocabulary {
   ops: Record<"numeric" | "string" | "bool" | "array", string[]>;
   severities: string[];
   actions: RuleVocabularyAction[];
+  /** Stage 06 — rule-level flag definitions. Optional for back-
+   * compat with older API versions that didn't return the field. */
+  rule_flags?: Record<string, RuleVocabularyFlag>;
 }
 
 // ── Hooks ─────────────────────────────────────────────────────
@@ -240,6 +310,17 @@ export interface AnalyzePlaybackOutcome {
   skipped_dismissed: number;
   skipped_deployed: number;
   skipped_too_few_events: boolean;
+  // ── Stage 09 (v1.7) — playback-count fix ───────────────────
+  // The recommendation card reads ``examined_events_total``
+  // (not ``examined_events``, which is resolved-only) so the
+  // operator-visible count is the *true* number of playback
+  // events. When ``examined_events_unresolved > 0`` the card
+  // renders a path-mappings hint per addendum A.7.
+  // Defaulted to 0 in the runtime path so older backends
+  // without these fields still parse.
+  examined_events_total?: number;
+  examined_events_resolved?: number;
+  examined_events_unresolved?: number;
 }
 
 // ── Stage 16: hooks ───────────────────────────────────────────

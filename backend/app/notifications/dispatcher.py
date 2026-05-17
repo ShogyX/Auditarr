@@ -274,4 +274,13 @@ class NotificationDispatcher:
             "library_name": context.get("library_name", ""),
             "message": message or "",
             "time": now.isoformat(),
+            # Stage 06 (v1.7): true when the rule that triggered
+            # this notification ALSO contains a delete action — the
+            # service layer surfaces this via the dispatch context.
+            # The default body template uses this to render an
+            # "auto-deleting; no action required" badge so the
+            # operator knows the file has already been removed by
+            # the time the email lands. Custom templates can read
+            # the variable to render the same hint.
+            "auto_delete": bool(context.get("auto_delete", False)),
         }

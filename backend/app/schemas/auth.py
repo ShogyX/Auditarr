@@ -145,6 +145,12 @@ class UserPublic(BaseModel):
     role: str
     is_active: bool
     is_verified: bool
+    # Stage 12 (v1.7) — set True when the user has consumed
+    # a terminal-OTP password reset and hasn't completed a
+    # subsequent ``change_password`` call yet. The frontend's
+    # post-login flow checks this and routes to the change-
+    # password screen before the dashboard.
+    must_change_password: bool = False
     created_at: _dt.datetime
     last_login_at: _dt.datetime | None
 

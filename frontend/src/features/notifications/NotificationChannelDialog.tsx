@@ -117,6 +117,10 @@ export function NotificationChannelDialog({
             </Field>
           ))}
 
+          {/* Stage 11 (plan §549) — loud warning when the
+              operator has opted out of HMAC. */}
+          <WebhookHmacDisabledWarning kind={kind.kind} config={config} />
+
           {kind.secret_fields.map((field) => (
             <Field key={field} label={field}>
               <Input
@@ -169,5 +173,47 @@ export function NotificationChannelDialog({
         </ModalFoot>
       </form>
     </Modal>
+  );
+}
+
+
+/**
+ * Stage 11 (v1.7) — inline warning shown when the operator has
+ * disabled HMAC signing on a webhook channel.
+ *
+ * Exported so the test suite can exercise the warning's
+ * rendering contract without mounting the full dialog (which
+ * depends on the kinds-endpoint mock + auth store + query
+ * client). The dialog itself just calls
+ * ``<WebhookHmacDisabledWarning kind={kind.kind} config={config} />``.
+ *
+ * The warning surfaces ONLY when:
+ *   - the channel kind is ``webhook``, AND
+ *   - the form's current ``config.hmac_required`` is exactly
+ *     ``false`` (not undefined, which means "use the default
+ *     True").
+ */
+export function WebhookHmacDisabledWarning({
+  kind,
+  config,
+}: {
+  kind: string;
+  config: Record<string, unknown>;
+}) {
+  if (kind !== "webhook") return null;
+  if (config.hmac_required !== false) return null;
+  return (
+    <div
+      role="alert"
+      className="rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300"
+      data-testid="webhook-hmac-disabled-warning"
+    >
+      <strong className="font-semibold">HMAC signing is disabled.</strong>{" "}
+      Sends from this channel will go out unsigned. Anyone with the
+      webhook URL can spoof requests to your receiver. Only use this
+      for upstreams that don't support signature verification, and
+      restrict access by network position (private network, source
+      IP whitelist on the receiver, etc.).
+    </div>
   );
 }

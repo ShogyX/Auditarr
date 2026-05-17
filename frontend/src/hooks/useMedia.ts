@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 
 import { invalidateRelated, invalidateRelatedDeferred } from "@/lib/invalidate";
-import { apiClient } from "@/services/apiClient";
+import { toast } from "@/lib/toast";
+import { ApiError, apiClient } from "@/services/apiClient";
 
 // ── Types ─────────────────────────────────────────────────────
 export interface Library {
@@ -44,9 +45,11 @@ export interface MediaFileSummary {
   height: number | null;
   has_subtitles: boolean;
   is_orphaned: boolean;
-  // Stage 27: quarantine state. Surfaced in summaries so the Files
-  // table can render a badge without a per-row detail fetch.
-  quarantined?: boolean;
+  // Stage 27 added a ``quarantined`` flag here. Stage 05 (v1.7)
+  // removed it along with the rest of the quarantine workflow
+  // (Section A.0 — "delete means delete"). A file is either in
+  // the library or it has been deleted by a rule (audit-logged
+  // and moved to ``data_dir/trash/``); no intermediate state.
   // Stage 3 (audit follow-up): matched-rules chip strip. Present
   // only when the request enabled ``include_matched_rules``; the
   // server returns an empty array if no rules matched, but older
@@ -105,9 +108,8 @@ export interface MediaFileDetail extends MediaFileSummary {
   probe_error: string | null;
   last_scan_id: string | null;
   seen_at: string;
-  // Stage 27: audit fields. Only meaningful when ``quarantined: true``.
-  quarantined_at?: string | null;
-  quarantined_reason?: string | null;
+  // Stage 27 added ``quarantined_at`` and ``quarantined_reason``
+  // here. Stage 05 (v1.7) removed them — see ``MediaFileSummary``.
   // Stage 19 (audit follow-up): content hash + VirusTotal result.
   // All four nullable; the drawer's Security section hides itself
   // when both hash + VT result are null.
@@ -115,6 +117,22 @@ export interface MediaFileDetail extends MediaFileSummary {
   hash_computed_at?: string | null;
   virustotal_result?: VirusTotalResult | null;
   virustotal_checked_at?: string | null;
+  /**
+   * Stage 06 (v1.7) — VirusTotal scan status as a denormalised
+   * column. One of ``"clean" | "malicious" | "suspicious" |
+   * "not_found" | "error"`` (per ``VT_STATUS_VALUES`` in the
+   * backend) or ``null`` for "never looked up". The Stage 06
+   * built-in "VirusTotal non-clean" rule matches on this column;
+   * the Stage 10 VT plugin will populate it. The drawer can
+   * surface the value once Stage 10 lands.
+   */
+  vt_status?:
+    | "clean"
+    | "malicious"
+    | "suspicious"
+    | "not_found"
+    | "error"
+    | null;
   created_at: string;
   updated_at: string;
 }
@@ -156,14 +174,12 @@ export interface MediaFilters {
   severity?: string;
   extension?: string;
   is_orphaned?: boolean;
-  // Stage 27: quarantine filters.
-  // - quarantined: undefined → use server default (excludes quarantined)
-  // - quarantined: true     → only quarantined
-  // - quarantined: false    → only non-quarantined (explicit; same as default)
-  // - include_quarantined: true → return both, regardless of quarantine state
-  // The two flags are independent; quarantined wins when both are set.
-  quarantined?: boolean;
-  include_quarantined?: boolean;
+  // Stage 27 carried ``quarantined`` and ``include_quarantined``
+  // filter flags here. Stage 05 (v1.7) removed both alongside the
+  // quarantine workflow (Section A.0 — "delete means delete").
+  // Callers that used to omit both flags got "exclude quarantined"
+  // for free; that behaviour is still the default outcome now
+  // simply because no row carries a quarantined state any more.
   search?: string;
   // Stage 23: sortable column (whitelist enforced server-side; unknown
   // values fall back to the legacy severity-first order rather than
@@ -200,6 +216,37 @@ export interface MediaFilters {
   // endpoint. Off by default. The Files page turns it on when the
   // optional ``tags`` column is enabled.
   include_tags?: boolean;
+  // Stage 02 — per-column quick filters.
+  //
+  // The Files-page toolbar adds an optional filter row beneath the
+  // header. Each input writes to one of these fields. The server
+  // accepts them as conventional substring/equality filters; the
+  // existing ``search`` predicate covers a different surface
+  // (full-path substring across the whole row), so these are
+  // additive rather than alternatives.
+  //
+  // ``path_contains`` is a case-insensitive substring filter on
+  // ``path`` (which carries the full file path). ``codec_contains``
+  // is a case-insensitive substring filter on ``video_codec`` —
+  // useful when an operator types ``hev`` to find both ``hevc``
+  // and ``hevc-something``. ``container_eq`` and ``extension_eq``
+  // are strict equality because container and extension are short
+  // closed-set values where substring matches are noise.
+  //
+  // ``size_min``/``size_max`` and ``mtime_after``/``mtime_before``
+  // are reserved for future UI (size and updated-time columns).
+  // The contract is shipped now so the backend can be tested
+  // end-to-end without a frontend follow-up.
+  path_contains?: string;
+  codec_contains?: string;
+  container_eq?: string;
+  extension_eq?: string;
+  size_min?: number;
+  size_max?: number;
+  /** ISO 8601 timestamp string. */
+  mtime_after?: string;
+  /** ISO 8601 timestamp string. */
+  mtime_before?: string;
 }
 
 export type MediaSortKey =
@@ -378,7 +425,54 @@ export function useTriggerScan() {
     // Stage 8 (audit follow-up): scan is now async-by-default
     // server-side. The response is the queued ScanRun row, not a
     // completed one — the UI watches WS events for progress.
-    onSuccess: () => invalidateRelated(qc, "scan"),
+    //
+    // v1.8.1: toast on both success and error so the operator
+    // always knows whether the click did anything. Pre-1.8.1
+    // there was zero feedback on failure — the button just
+    // stopped being "Scanning…" and the user was left guessing.
+    onSuccess: (run) => {
+      // The row is returned in whatever state the backend got
+      // it to — usually "queued" but possibly "failed" if the
+      // enqueue collided or Redis was down.
+      if (run.status === "failed") {
+        toast(
+          run.error
+            ? `Scan didn't start: ${run.error}`
+            : "Scan didn't start. Check the worker logs.",
+          "error",
+          8000,
+        );
+      } else {
+        toast("Scan queued", "ok");
+      }
+      invalidateRelated(qc, "scan");
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        if (err.status === 409) {
+          // Library has a stuck queued/running scan. The
+          // FilesPage error banner exposes a "Reset" button
+          // calling useResetLibraryScans. Toast still fires
+          // so the user knows the click registered.
+          toast(
+            "A scan is already running for this library. " +
+              "Use 'Unstick library' to clear it if it's stuck.",
+            "warn",
+            6000,
+          );
+        } else if (err.status === 403) {
+          toast("You need admin permission to run scans.", "error");
+        } else {
+          toast(`Scan failed to start: ${err.message}`, "error", 6000);
+        }
+      } else {
+        toast(
+          `Scan failed to start: ${(err as Error)?.message ?? "Unknown error"}`,
+          "error",
+          6000,
+        );
+      }
+    },
   });
 }
 
@@ -387,6 +481,10 @@ export function useTriggerScan() {
  * library at once. Backend ``POST /scans/all`` returns the list of
  * queued runs (or empty if there are no enabled libraries to scan).
  * Libraries already scanning are silently skipped.
+ *
+ * v1.8.1: success and error toasts. When any of the queued rows
+ * comes back in a ``failed`` state (enqueue collision), surface
+ * a warn-level toast naming the count.
  */
 export function useTriggerScanAll() {
   const qc = useQueryClient();
@@ -402,7 +500,100 @@ export function useTriggerScanAll() {
         mode,
         follow_symlinks: followSymlinks,
       }),
-    onSuccess: () => invalidateRelated(qc, "scan"),
+    onSuccess: (runs) => {
+      const failed = runs.filter((r) => r.status === "failed").length;
+      const queued = runs.length - failed;
+      if (queued === 0 && failed === 0) {
+        toast(
+          "No libraries to scan — all are either disabled or " +
+            "already scanning.",
+          "warn",
+          5000,
+        );
+      } else if (failed > 0) {
+        toast(
+          `${queued} scan(s) queued; ${failed} failed to enqueue. ` +
+            "Check the worker logs for details.",
+          "warn",
+          6000,
+        );
+      } else {
+        toast(`${queued} scan(s) queued`, "ok");
+      }
+      invalidateRelated(qc, "scan");
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          toast("You need admin permission to run scans.", "error");
+        } else {
+          toast(`Scan-all failed: ${err.message}`, "error", 6000);
+        }
+      } else {
+        toast(
+          `Scan-all failed: ${(err as Error)?.message ?? "Unknown error"}`,
+          "error",
+          6000,
+        );
+      }
+    },
+  });
+}
+
+/**
+ * v1.8.1: ``POST /scans/libraries/{id}/reset`` — admin-only
+ * endpoint that forcibly marks any ``queued``/``running``
+ * ScanRun rows for the library as ``failed``. Lets the operator
+ * unstick a library after a worker crash without waiting the
+ * full 1-hour reaper threshold.
+ *
+ * The FilesPage exposes this as an "Unstick library" button
+ * surfaced when a scan trigger comes back 409.
+ */
+export function useResetLibraryScans() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (libraryId: string) =>
+      apiClient.post<{ reset_count: number; run_ids: string[] }>(
+        `/scans/libraries/${libraryId}/reset`,
+        {},
+      ),
+    onSuccess: (data) => {
+      if (data.reset_count === 0) {
+        toast(
+          "Nothing to reset — no scans were stuck for this library.",
+          "info",
+        );
+      } else {
+        toast(
+          `Reset ${data.reset_count} stuck scan(s). ` +
+            "You can run a new scan now.",
+          "ok",
+          5000,
+        );
+      }
+      invalidateRelated(qc, "scan");
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          toast(
+            "You need admin permission to reset scans.",
+            "error",
+          );
+        } else if (err.status === 404) {
+          toast("Library not found.", "error");
+        } else {
+          toast(`Reset failed: ${err.message}`, "error", 6000);
+        }
+      } else {
+        toast(
+          `Reset failed: ${(err as Error)?.message ?? "Unknown error"}`,
+          "error",
+          6000,
+        );
+      }
+    },
   });
 }
 
@@ -472,6 +663,31 @@ export function useTagsCatalog() {
   });
 }
 
+/** Stage 15 (plan §656) — vocabulary endpoint. The distinct
+ *  values currently in the library, used to drive value-pickers
+ *  in the rule builder, optimization profile dialog, and
+ *  automation editor. Backend caches the result for 60s, so a
+ *  React-Query staleTime of 60s matches the backend cache TTL
+ *  (matching staleTime to the server cache means we don't
+ *  emit a request the server would have served from cache
+ *  anyway). */
+export interface MediaVocabulary {
+  video_codecs: string[];
+  audio_codecs: string[];
+  containers: string[];
+  extensions: string[];
+  tags: string[];
+}
+
+export function useMediaVocabulary() {
+  return useQuery({
+    queryKey: ["media", "vocabulary"] as const,
+    queryFn: () => apiClient.get<MediaVocabulary>("/media/vocabulary"),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+}
+
 /** Bulk re-evaluation against the enabled rule set.
  *
  *  Invalidates the media list (severity/rank may change), the
@@ -491,29 +707,22 @@ export function useBulkReevaluate() {
   });
 }
 
-// ── Stage 27: reprobe + quarantine hooks ─────────────────────────
+// ── Stage 27: reprobe hook ──────────────────────────────────────
+//
+// Stage 27 originally exported reprobe + quarantine + unquarantine
+// hooks here, plus their bulk variants. Stage 05 (v1.7) removed
+// the quarantine hooks alongside the API endpoints they called
+// (Section A.0 — "delete means delete"). Reprobe is the only
+// surface that survived this stage.
 //
 // Each mutation invalidates the media list (severity/probe state
 // changed) and the per-file detail (drawer reflects the new state).
-// The bulk variants share the same invalidation surface since the
-// list query doesn't differentiate "you touched one file" from
-// "you touched many".
 
 export interface BulkReprobeResult {
   files_reprobed: number;
   files_failed: number;
   files_not_found: string[];
   files_orphaned: number;
-}
-
-export interface BulkQuarantineResult {
-  files_quarantined: number;
-  files_not_found: string[];
-}
-
-export interface BulkUnquarantineResult {
-  files_unquarantined: number;
-  files_not_found: string[];
 }
 
 export function useReprobeMedia() {
@@ -528,66 +737,11 @@ export function useReprobeMedia() {
   });
 }
 
-export function useQuarantineMedia() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ mediaId, reason }: { mediaId: string; reason?: string }) =>
-      apiClient.post<MediaFileDetail>(`/media/${mediaId}/quarantine`, {
-        reason: reason ?? null,
-      }),
-    onSuccess: (_data, { mediaId }) => {
-      invalidateRelated(qc, "media");
-      qc.invalidateQueries({ queryKey: ["media", mediaId] });
-    },
-  });
-}
-
-export function useUnquarantineMedia() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (mediaId: string) =>
-      apiClient.post<MediaFileDetail>(`/media/${mediaId}/unquarantine`),
-    onSuccess: (_data, mediaId) => {
-      invalidateRelated(qc, "media");
-      qc.invalidateQueries({ queryKey: ["media", mediaId] });
-    },
-  });
-}
-
 export function useBulkReprobe() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (mediaIds: string[]) =>
       apiClient.post<BulkReprobeResult>("/media/bulk/reprobe", {
-        media_ids: mediaIds,
-      }),
-    onSuccess: () => invalidateRelated(qc, "media"),
-  });
-}
-
-export function useBulkQuarantine() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      mediaIds,
-      reason,
-    }: {
-      mediaIds: string[];
-      reason?: string;
-    }) =>
-      apiClient.post<BulkQuarantineResult>("/media/bulk/quarantine", {
-        media_ids: mediaIds,
-        reason: reason ?? null,
-      }),
-    onSuccess: () => invalidateRelated(qc, "media"),
-  });
-}
-
-export function useBulkUnquarantine() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (mediaIds: string[]) =>
-      apiClient.post<BulkUnquarantineResult>("/media/bulk/unquarantine", {
         media_ids: mediaIds,
       }),
     onSuccess: () => invalidateRelated(qc, "media"),

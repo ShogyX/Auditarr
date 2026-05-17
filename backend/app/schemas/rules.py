@@ -133,6 +133,13 @@ class RuleVocabularyRead(BaseModel):
     and action types defined in :mod:`app.rules.schema`. The frontend
     builder reads this once at mount and renders typed inputs per
     condition row from it.
+
+    Stage 06 (v1.7) added the ``rule_flags`` map — rule-level
+    boolean flags the builder must surface. The only entry today
+    is ``acknowledged_destructive`` (addendum A.0.1: required when
+    any action is delete); the API enforces the flag at save time,
+    but the builder needs to render the checkbox + its label /
+    hint text without hardcoding.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -143,6 +150,12 @@ class RuleVocabularyRead(BaseModel):
     ops: dict[str, list[str]]
     severities: list[str]
     actions: list[RuleVocabularyAction]
+    # Stage 06 (v1.7): rule-level toggles that aren't part of the
+    # ``actions`` or ``match`` shape. Today only carries the
+    # destructive-action acknowledgement flag (per addendum A.0.1).
+    # Default empty so older API consumers that don't read the
+    # field continue to deserialise this response.
+    rule_flags: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 # ── Stage 24: import/export ──────────────────────────────────

@@ -32,6 +32,17 @@ class MediaFile(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_media_files_library_category", "library_id", "category"),
         Index("ix_media_files_library_severity", "library_id", "severity"),
+        # Stage 06 (v1.7): the built-in "Probe failed" rule
+        # matches on ``probe_failed = True``, and the rule engine
+        # scans every library file on each pass. An index keeps
+        # the predicate cheap as libraries scale into the millions.
+        Index("ix_media_files_probe_failed", "probe_failed"),
+        # Stage 06 (v1.7): the built-in "VirusTotal non-clean"
+        # rule matches on ``vt_status in ('malicious', 'suspicious')``.
+        # Index keeps the predicate selective; the column is
+        # nullable (most rows have no VT result) so most index
+        # pages are tiny.
+        Index("ix_media_files_vt_status", "vt_status"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -93,26 +104,14 @@ class MediaFile(Base, TimestampMixin):
         Boolean, nullable=False, default=False, index=True
     )
 
-    # Stage 27: quarantine state.
-    #
-    # Quarantining a file marks it as deliberately set aside — the
-    # operator has decided the file is broken, suspicious, or
-    # otherwise out of scope for normal automation. Distinct from
-    # ``is_orphaned`` (which means "the scanner couldn't find it on
-    # disk anymore") and from ``probe_failed`` (which is a probe-time
-    # technical failure). Quarantined files stay in the database with
-    # their metadata intact; they just get excluded from automation
-    # by default. The state is restorable — see the
-    # ``/unquarantine`` endpoint.
-    quarantined: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False, index=True
-    )
-    quarantined_at: Mapped[_dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    quarantined_reason: Mapped[str | None] = mapped_column(
-        String(512), nullable=True
-    )
+    # Stage 27 introduced quarantine columns (quarantined,
+    # quarantined_at, quarantined_reason). Stage 05 (v1.7) removed
+    # them — "delete means delete" (Section A.0). A file is either
+    # in the library or it's in ``data_dir/trash/`` after a rule
+    # deleted it; there's no intermediate "quarantined" state on
+    # the row. The 0015 migration drops the columns and rewrites
+    # any persisted rule definitions that referenced
+    # ``type: "quarantine"`` to ``type: "delete"``.
 
     # Stage 19 (audit follow-up): content hash + VirusTotal result.
     # The hash is computed at most once per (path, mtime) pair —
@@ -136,4 +135,19 @@ class MediaFile(Base, TimestampMixin):
     )
     virustotal_checked_at: Mapped[_dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Stage 06 (v1.7): VT scan status as a denormalised column.
+    # Per addendum B.4, ``vt_status`` is a string column populated
+    # by the VT plugin (Stage 10 wires the actual lookup) with one
+    # of the canonical values defined in
+    # ``app.rules.schema.VT_STATUS_VALUES``: "clean", "malicious",
+    # "suspicious", "not_found", "error". NULL means "never
+    # looked up" — distinct from ``not_found`` (which means "VT
+    # said it doesn't know this hash"). The column exists in
+    # Stage 06 even though the populating code arrives in Stage
+    # 10 so the built-in "VirusTotal non-clean" rule has
+    # somewhere to look. Indexed because the rule engine filters
+    # on it every evaluation pass.
+    vt_status: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
     )

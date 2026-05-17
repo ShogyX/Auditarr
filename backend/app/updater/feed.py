@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.core.logging import get_logger
 
 log = get_logger("auditarr.updater.feed", category="updater")
@@ -72,7 +74,7 @@ def _normalize_generic(payload: dict[str, Any]) -> FeedResult:
 async def fetch_feed(url: str, *, timeout: float = 10.0) -> FeedResult:
     """Fetch + normalize. Network/HTTP errors return ``ok=False``."""
     try:
-        async with httpx.AsyncClient(
+        async with async_client(
             timeout=timeout,
             headers={
                 # Identify ourselves so GitHub doesn't 403 us on shared

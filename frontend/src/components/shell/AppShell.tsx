@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 
 import { useSidebarBadges } from "@/hooks/useDashboard";
+import { useScanProgressWs } from "@/hooks/useScanProgress";
 import { applyAccent, applyTheme } from "@/lib/accent";
 import { useHelpStore } from "@/stores/helpStore";
 import { useUiStore } from "@/stores/uiStore";
@@ -11,6 +12,15 @@ import { Sidebar } from "./Sidebar";
 import { TopNav } from "./TopNav";
 
 export function AppShell() {
+  // Stage 13 (plan §605, §616) — subscribe to the scan WS
+  // bus ONCE at shell level so progress survives navigation.
+  // Pre-Stage-13 the subscription lived inside ``useScanProgress``
+  // which was mounted per-component — navigating away unmounted
+  // the badge and reset state. With the subscription up here
+  // and state in the central ``scanProgressStore``, the bar
+  // stays consistent across all routes.
+  useScanProgressWs();
+
   const nav = useUiStore((s) => s.nav);
   // Stage 20: subscribe to theme + accent so the DOM is always in sync
   // with the store. Without this effect, the persist middleware can

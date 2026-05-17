@@ -31,9 +31,7 @@ import {
   useMediaDetail,
   useMediaEvaluations,
   useMediaTags,
-  useQuarantineMedia,
   useReprobeMedia,
-  useUnquarantineMedia,
   type MediaFileDetail,
   type MediaFileSummary,
   type MediaTag,
@@ -67,10 +65,10 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
   const tagsQuery = useMediaTags(file.id);
 
   // Stage 27: per-file mutations. Wired here so the operator can
-  // refresh probe data or quarantine without leaving the drawer.
+  // refresh probe data without leaving the drawer. The Stage 27
+  // quarantine + unquarantine hooks that lived here are gone with
+  // Stage 05 (v1.7) — Section A.0 "delete means delete".
   const reprobe = useReprobeMedia();
-  const quarantine = useQuarantineMedia();
-  const unquarantine = useUnquarantineMedia();
 
   // Close on Escape — keyboard parity with the prototype's drawer.
   useEffect(() => {
@@ -90,11 +88,8 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
   const full: MediaFileDetail | undefined = detail.data;
   const lastDir = file.path.split("/").slice(0, -1).join("/");
 
-  // Effective quarantined state prefers the fresh detail-fetch
-  // over the summary snapshot the parent passed in — that way the
-  // foot reflects state changes made inside the drawer (e.g.
-  // click Quarantine, the button immediately flips to Restore).
-  const isQuarantined = full?.quarantined ?? d.quarantined ?? false;
+  // Stage 27's ``isQuarantined`` derived state is gone — the
+  // quarantine columns have been removed (Stage 05, Section A.0).
 
   async function runReprobe() {
     try {
@@ -118,40 +113,9 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
     }
   }
 
-  async function runQuarantine() {
-    // Light prompt for a reason; matches the bulk-action UX.
-    const reason = window.prompt(
-      `Quarantine ${file.filename}? Optional reason:`,
-      "",
-    );
-    if (reason === null) return;
-    try {
-      await quarantine.mutateAsync({
-        mediaId: file.id,
-        reason: reason || undefined,
-      });
-      toast("File quarantined", "ok");
-    } catch (err) {
-      toast(
-        `Quarantine failed: ${err instanceof Error ? err.message : String(err)}`,
-        "error",
-        5000,
-      );
-    }
-  }
-
-  async function runUnquarantine() {
-    try {
-      await unquarantine.mutateAsync(file.id);
-      toast("File restored", "ok");
-    } catch (err) {
-      toast(
-        `Restore failed: ${err instanceof Error ? err.message : String(err)}`,
-        "error",
-        5000,
-      );
-    }
-  }
+  // Stage 27's ``runQuarantine`` + ``runUnquarantine`` handlers
+  // lived here. Stage 05 (v1.7) retired the quarantine workflow
+  // (Section A.0); the drawer no longer offers those buttons.
 
   return (
     <>
@@ -174,13 +138,12 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
               <Pill sev={d.severity}>{d.severity}</Pill>
               <Pill>{d.category}</Pill>
               {d.is_orphaned ? <Pill sev="warn">orphaned</Pill> : null}
-              {isQuarantined ? <Pill sev="warn">quarantined</Pill> : null}
+              {/* Stage 27 also rendered a "quarantined" Pill here;
+                  Stage 05 (v1.7) removed it. */}
             </div>
-            {isQuarantined && full?.quarantined_reason ? (
-              <div className="text-[11.5px] text-muted-2 mt-1 italic">
-                Quarantine reason: {full.quarantined_reason}
-              </div>
-            ) : null}
+            {/* Stage 27 surfaced a "Quarantine reason: ..." line
+                here when the file was quarantined; that block is
+                gone with the workflow. */}
           </div>
           <Button
             size="sm"
@@ -483,10 +446,10 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
           <Button size="sm" onClick={() => copyToClipboard(file.path)}>
             <Icon name="duplicate" size={12} /> Copy path
           </Button>
-          {/* Stage 27: per-file actions. Re-probe is always available;
-              the Quarantine button flips to Restore when the file is
-              already quarantined so the operator doesn't need to leave
-              the drawer to release it. */}
+          {/* Stage 27: per-file Re-probe. The Stage 27 Quarantine /
+              Restore button block that sat next to this — flipping
+              based on isQuarantined — is removed with Stage 05
+              (Section A.0 "delete means delete"). */}
           <Button
             size="sm"
             onClick={runReprobe}
@@ -500,26 +463,6 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
             />
             {reprobe.isPending ? "Re-probing…" : "Re-probe"}
           </Button>
-          {isQuarantined ? (
-            <Button
-              size="sm"
-              onClick={runUnquarantine}
-              disabled={unquarantine.isPending}
-              title="Restore this file from quarantine"
-            >
-              <Icon name="check" size={12} /> Restore
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="danger"
-              onClick={runQuarantine}
-              disabled={quarantine.isPending}
-              title="Mark this file as quarantined. Excluded from default views; restorable anytime."
-            >
-              <Icon name="trash" size={12} /> Quarantine
-            </Button>
-          )}
         </div>
       </aside>
     </>

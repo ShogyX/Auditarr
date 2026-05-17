@@ -1,15 +1,40 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 
 import { BrandMark } from "@/components/shell/BrandMark";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody } from "@/components/ui/Card";
 import { useRequestPasswordReset } from "@/hooks/useAuth";
+import { apiClient } from "@/services/apiClient";
 
 export function ForgotPasswordPage() {
   const request = useRequestPasswordReset();
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  // Stage 12 (plan §585) — query the server for email-
+  // provider availability so we can show the right copy. We
+  // default to ``null`` (unknown) and render the email copy
+  // when ``true``, the terminal copy when ``false``. Even if
+  // this probe fails, we fall through to the email copy
+  // (the conservative default).
+  const [emailConfigured, setEmailConfigured] = useState<boolean | null>(
+    null,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get<{ configured: boolean }>("/auth/email-configured")
+      .then((r) => {
+        if (!cancelled) setEmailConfigured(r.configured);
+      })
+      .catch(() => {
+        if (!cancelled) setEmailConfigured(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -32,15 +57,38 @@ export function ForgotPasswordPage() {
           <h1 className="text-[16px] font-semibold tracking-tight m-0">Reset your password</h1>
 
           {submitted ? (
-            <p className="text-[13px] text-text-2 leading-relaxed m-0">
-              If <span className="font-mono">{email}</span> matches an account, you will receive a
-              reset link within a minute. Check your inbox and follow the link to set a new
-              password.
-            </p>
+            // Stage 12 (plan §585) — swap copy based on
+            // whether email is configured. We default the
+            // copy to the email variant when the probe
+            // hasn't returned yet — that's the conservative
+            // choice if the response is racing with the
+            // submit.
+            emailConfigured === false ? (
+              <p
+                className="text-[13px] text-text-2 leading-relaxed m-0"
+                data-testid="forgot-password-terminal-copy"
+              >
+                If <span className="font-mono">{email}</span> matches an account,
+                a one-time password has been printed to the server logs.
+                Look for a bordered banner on the Auditarr server's stdout
+                or in your container logs.
+              </p>
+            ) : (
+              <p
+                className="text-[13px] text-text-2 leading-relaxed m-0"
+                data-testid="forgot-password-email-copy"
+              >
+                If <span className="font-mono">{email}</span> matches an account, you will receive a
+                reset link within a minute. Check your inbox and follow the link to set a new
+                password.
+              </p>
+            )
           ) : (
             <form onSubmit={onSubmit} className="flex flex-col gap-3">
               <p className="text-[12.5px] text-muted m-0">
-                Enter the email address associated with your account.
+                {emailConfigured === false
+                  ? "Enter the email address associated with your account. The one-time password will be printed to the server logs."
+                  : "Enter the email address associated with your account."}
               </p>
               <input
                 type="email"
@@ -60,7 +108,11 @@ export function ForgotPasswordPage() {
                 disabled={request.isPending}
                 className="w-full"
               >
-                {request.isPending ? "Sending…" : "Send reset link"}
+                {request.isPending
+                  ? "Sending…"
+                  : emailConfigured === false
+                    ? "Request one-time password"
+                    : "Send reset link"}
               </Button>
             </form>
           )}

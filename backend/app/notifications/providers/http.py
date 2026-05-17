@@ -19,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from app.core.http import async_client
+
 from app.notifications.types import (
     ChannelConfig,
     DeliveryReport,
@@ -31,7 +33,7 @@ async def _post_json(
 ) -> DeliveryReport:
     """Single-shot JSON POST that returns a normalized DeliveryReport."""
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with async_client(timeout=timeout) as client:
             response = await client.post(url, json=payload)
         if response.status_code >= 400:
             return DeliveryReport(
@@ -54,6 +56,14 @@ class WebhookNotificationProvider:
     and the ``webhook_secret`` secret is configured on the channel,
     every request carries an ``X-...: sha256=<hex>`` header so the
     receiver can verify authenticity.
+
+    Stage 11 (v1.7) — plan §540-545: operators can opt out of HMAC
+    via ``hmac_required=False`` for endpoints whose upstream
+    doesn't support signature verification. A loud warning surfaces
+    via ``healthcheck`` so the operator notices the security
+    downgrade. By default ``hmac_required=True``: a misconfigured
+    channel (signature header set but secret missing) returns a
+    failed delivery rather than silently sending unsigned.
     """
 
     kind = "webhook"
@@ -92,6 +102,24 @@ class WebhookNotificationProvider:
                     "signature is attached as 'sha256=<hex>' in this header. "
                     "Standard pattern: 'X-Auditarr-Signature'."
                 ),
+            },
+            # Stage 11 (v1.7) — opt out of HMAC for receivers that
+            # don't support it. When False AND no secret is set,
+            # the send goes out UNSIGNED. The healthcheck surfaces
+            # this prominently so operators don't forget they
+            # disabled it.
+            "hmac_required": {
+                "type": "boolean",
+                "title": "Require HMAC signing",
+                "description": (
+                    "When enabled (default), a send is refused if a "
+                    "``secret_header_name`` is configured but the "
+                    "``webhook_secret`` is missing. Disable for "
+                    "upstreams that don't support signature "
+                    "verification; the healthcheck will warn that "
+                    "the channel is sending unsigned requests."
+                ),
+                "default": True,
             },
         },
     }
@@ -138,6 +166,27 @@ class WebhookNotificationProvider:
         sig_header = str(
             config.options.get("secret_header_name") or ""
         ).strip()
+
+        # Stage 11 (plan §540-545): HMAC-required gate. Default
+        # True. When True AND a signature header is configured
+        # AND the secret is missing, we REFUSE rather than
+        # silently sending unsigned — that's the Stage 11 fix
+        # for the "you thought you were signing but weren't"
+        # footgun. When False, the send is allowed to go out
+        # unsigned (the receiver doesn't support HMAC).
+        hmac_required = bool(
+            config.options.get("hmac_required", True)
+        )
+        if hmac_required and sig_header and not secret:
+            return DeliveryReport(
+                status="failed",
+                detail=(
+                    "HMAC required but webhook_secret is not "
+                    "configured. Either set the secret, clear "
+                    "the signature header name, or disable "
+                    "hmac_required."
+                ),
+            )
         if sig_header and secret:
             digest = hmac.new(
                 str(secret).encode("utf-8"), body_bytes, hashlib.sha256
@@ -145,7 +194,7 @@ class WebhookNotificationProvider:
             headers[sig_header] = f"sha256={digest}"
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with async_client(timeout=10.0) as client:
                 response = await client.request(
                     method, url, content=body_bytes, headers=headers
                 )
@@ -156,8 +205,73 @@ class WebhookNotificationProvider:
                 )
         except httpx.HTTPError as exc:
             return DeliveryReport(status="failed", detail=str(exc)[:500])
+
+        # Stage 11 (plan §545): when ``hmac_required=False`` and
+        # no secret is set, surface a "unsigned" warning so the
+        # operator's delivery log carries the security context.
+        # Successful sends always return status="sent"; the
+        # detail string carries the security note.
+        detail = f"HTTP {response.status_code}"
+        if not hmac_required and not secret:
+            detail = f"{detail} (sent unsigned — HMAC disabled by operator)"
+        return DeliveryReport(status="sent", detail=detail)
+
+    async def healthcheck(self, config: ChannelConfig) -> DeliveryReport:
+        """Stage 11 (plan §545) — report the channel's security
+        posture.
+
+        Returns ``status="ok"`` with a ``detail`` that flags
+        the security downgrade when:
+          * ``hmac_required=False`` AND no secret is configured.
+          * The signature header is configured but secret is
+            missing AND ``hmac_required=False`` (would-send-
+            unsigned scenario).
+
+        Returns ``status="failed"`` when the channel is mis-
+        configured (URL missing, etc.) — that's not a security
+        downgrade but a hard error.
+        """
+        url = str(config.options.get("url", "")).strip()
+        if not url:
+            return DeliveryReport(
+                status="failed", detail="No URL configured"
+            )
+        secret = (config.secrets or {}).get("webhook_secret")
+        sig_header = str(
+            config.options.get("secret_header_name") or ""
+        ).strip()
+        hmac_required = bool(
+            config.options.get("hmac_required", True)
+        )
+
+        # The "sends-unsigned" scenario:
+        # hmac_required=False AND no secret available. Whether
+        # or not the signature header is set, no signature
+        # will be attached.
+        if not hmac_required and not secret:
+            return DeliveryReport(
+                status="ok",
+                detail=(
+                    "Channel will send unsigned — HMAC verification "
+                    "disabled by operator. Receiver must trust the "
+                    "source by network position or other means."
+                ),
+            )
+        # Misconfigured: HMAC required but secret missing.
+        if hmac_required and sig_header and not secret:
+            return DeliveryReport(
+                status="failed",
+                detail=(
+                    "HMAC required but webhook_secret is not "
+                    "configured. Sends will be refused until the "
+                    "secret is set or hmac_required is disabled."
+                ),
+            )
         return DeliveryReport(
-            status="sent", detail=f"HTTP {response.status_code}"
+            status="ok",
+            detail="Channel configured with HMAC signing."
+            if sig_header and secret
+            else "Channel configured.",
         )
 
 

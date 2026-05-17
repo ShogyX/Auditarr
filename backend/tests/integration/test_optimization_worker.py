@@ -13,8 +13,6 @@ progress parsing, output validation gating, and the swap.
 
 from __future__ import annotations
 
-import asyncio
-import datetime as _dt
 import os
 import stat
 from collections.abc import AsyncIterator
