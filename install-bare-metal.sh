@@ -824,6 +824,14 @@ AUDITARR_RUN_MIGRATIONS=1
 # Set to 0 to disable WebSocket auth temporarily for debugging.
 AUDITARR_WS_REQUIRE_AUTH=1
 
+# v1.8.2: explicit update feed URL. Pinning it here (rather than
+# relying on the backend default) keeps the feed URL visible in
+# auditarr.env where operators look for configuration, AND lets
+# the bare-metal update watcher source it via the systemd unit's
+# EnvironmentFile= directive so the watcher can derive a default
+# release tarball URL automatically.
+AUDITARR_UPDATE_FEED_URL=https://api.github.com/repos/ShogyX/Auditarr/releases/latest
+
 # CORS allowed origins — only needed if the frontend is served from
 # a DIFFERENT host than the API. The bundled frontend is served by
 # the FastAPI app itself (same-origin), so no override is needed for
@@ -1095,11 +1103,19 @@ if [[ ! -f "$APP_CONFIG_DIR/updater.env" ]]; then
     cat > "$APP_CONFIG_DIR/updater.env" <<EOF
 # Auditarr updater configuration (bare-metal install).
 #
-# Auto-updates are OPT-IN. Uncomment and set the URLs below to enable.
-# %s is substituted with the requested version, e.g. "1.4.0".
+# v1.8.2: auto-updates work out of the box when AUDITARR_UPDATE_FEED_URL
+# (in $APP_CONFIG_DIR/auditarr.env) points at a GitHub
+# api.github.com/repos/<owner>/<repo>/releases/latest URL. The watcher
+# derives a release tarball URL from the feed URL using GitHub's
+# auto-generated source-tarball endpoint:
+#   https://github.com/<owner>/<repo>/archive/refs/tags/v<ver>.tar.gz
 #
-# AUDITARR_RELEASE_TARBALL_URL=https://github.com/auditarr/auditarr/releases/download/v%s/auditarr-%s.tar.gz
-# AUDITARR_RELEASE_CHECKSUM_URL=https://github.com/auditarr/auditarr/releases/download/v%s/auditarr-%s.tar.gz.sha256
+# Operators with a private mirror or non-GitHub feed should uncomment
+# and set AUDITARR_RELEASE_TARBALL_URL explicitly. %s is substituted
+# with the requested version, e.g. "1.8.2".
+#
+# AUDITARR_RELEASE_TARBALL_URL=https://github.com/ShogyX/Auditarr/archive/refs/tags/v%s.tar.gz
+# AUDITARR_RELEASE_CHECKSUM_URL=https://example.com/auditarr-%s.sha256
 #
 # Reuse install settings so the helper finds the right paths.
 AUDITARR_STATE_DIR=$APP_STATE_DIR
@@ -1111,7 +1127,7 @@ AUDITARR_GROUP=$APP_GROUP
 EOF
     chown root:"$APP_GROUP" "$APP_CONFIG_DIR/updater.env"
     chmod 0640 "$APP_CONFIG_DIR/updater.env"
-    ok "Wrote $APP_CONFIG_DIR/updater.env (auto-updates DISABLED by default)"
+    ok "Wrote $APP_CONFIG_DIR/updater.env (auto-updates use feed-derived tarball URL by default)"
 fi
 
 # systemd unit for the watcher.
@@ -1131,6 +1147,12 @@ Group=root
 # rsyncs into /opt/auditarr. Defence-in-depth: hardening below
 # restricts what root can write.
 EnvironmentFile=$APP_CONFIG_DIR/updater.env
+# v1.8.2: also source the main app env file so AUDITARR_UPDATE_FEED_URL
+# (set in auditarr.env) reaches the watcher. The watcher uses it to
+# derive a default release tarball URL when AUDITARR_RELEASE_TARBALL_URL
+# is unset. The trailing ``-`` marks the file optional so the unit
+# doesn't fail-start if the main env file isn't present.
+EnvironmentFile=-$APP_CONFIG_DIR/auditarr.env
 
 ExecStart=$APP_HOME/updater/auditarr-update-bare-metal.sh
 

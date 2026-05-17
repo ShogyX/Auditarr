@@ -14,7 +14,7 @@ app instance:
      answers (empty vocabulary on a fresh install).
   8. GET ``/api/v1/rules`` — empty list, but the endpoint
      answers.
-  9. Version check — assert ``__version__`` is ``1.8.1``.
+  9. Version check — assert ``__version__`` is ``1.8.2``.
 
 If a real Docker stack is available, plan §682 says the test
 *may* bring it up; we don't gate on that. The in-memory ASGI
@@ -189,12 +189,12 @@ async def test_release_smoke_full_walk(smoke_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_version_is_1_8_1(smoke_client: AsyncClient) -> None:
-    """The release artifact ships at 1.8.1 — verified at the
+async def test_release_version_is_1_8_2(smoke_client: AsyncClient) -> None:
+    """The release artifact ships at 1.8.2 — verified at the
     Python ``__version__`` level (the source of truth) and via
     the application log on startup."""
-    assert __version__ == "1.8.1", (
-        f"expected __version__=\'1.8.1\', got {__version__!r}"
+    assert __version__ == "1.8.2", (
+        f"expected __version__=\'1.8.2\', got {__version__!r}"
     )
 
 
@@ -211,7 +211,7 @@ async def test_health_reports_version(smoke_client: AsyncClient) -> None:
     body = resp.json()
     # The health envelope is allowed to vary across versions;
     # we only assert the version field is present + 1.7.0.
-    assert body.get("version") == "1.8.1", (
+    assert body.get("version") == "1.8.2", (
         f"health.version should be 1.7.0; got {body.get('version')!r}"
     )
 

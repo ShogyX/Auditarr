@@ -222,15 +222,15 @@ else
 fi
 
 # Version stamp — Stage 16 bumped to 1.7.0.
-if grep -q '__version__ = "1.8.1"' "${REPO_ROOT}/backend/app/__init__.py" 2>/dev/null; then
-    src_check "backend __version__ == 1.8.1 (Stage 16)" "ok"
+if grep -q '__version__ = "1.8.2"' "${REPO_ROOT}/backend/app/__init__.py" 2>/dev/null; then
+    src_check "backend __version__ == 1.8.2 (Stage 16)" "ok"
 else
-    src_check "backend __version__ == 1.8.1 (Stage 16)" "version mismatch"
+    src_check "backend __version__ == 1.8.2 (Stage 16)" "version mismatch"
 fi
-if grep -q '"version": "1.8.1"' "${REPO_ROOT}/frontend/package.json" 2>/dev/null; then
-    src_check "frontend package.json version == 1.8.1 (Stage 16)" "ok"
+if grep -q '"version": "1.8.2"' "${REPO_ROOT}/frontend/package.json" 2>/dev/null; then
+    src_check "frontend package.json version == 1.8.2 (Stage 16)" "ok"
 else
-    src_check "frontend package.json version == 1.8.1 (Stage 16)" "version mismatch"
+    src_check "frontend package.json version == 1.8.2 (Stage 16)" "version mismatch"
 fi
 
 echo

@@ -18,6 +18,21 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+def _default_app_version() -> str:
+    """Read ``app.__version__`` at call time so the Settings default
+    tracks the package version automatically. Falls back to
+    ``"0.0.0-dev"`` if the import fails (e.g. settings imported from
+    a context where ``app`` isn't on the path yet — shouldn't happen
+    in production but is friendly to tests).
+    """
+    try:
+        from app import __version__
+
+        return __version__
+    except ImportError:
+        return "0.0.0-dev"
+
+
 class Settings(BaseSettings):
     """Top-level Auditarr configuration."""
 
@@ -75,16 +90,24 @@ class Settings(BaseSettings):
     frontend_dist: Path | None = None
 
     # ── Updater (Stage 11) ─────────────────────────────────────
-    # The version this build identifies as. Operators don't normally set
-    # this — the image-build pipeline writes it into the environment. Dev
-    # builds keep ``0.0.0-dev`` so the comparison never claims an update
-    # is available against a real release tag.
-    app_version: str = "1.6.0"
+    # The version this build identifies as. v1.8.1: defaults to the
+    # ``app.__version__`` constant so we don't drift — pre-1.8.1 the
+    # default was a hardcoded "1.6.0" that every release forgot to
+    # bump, with the result that the updater always reported "update
+    # available" for any newer feed value AND wrote a stale
+    # ``from_version`` into the apply sentinel.
+    #
+    # Operators can still override via AUDITARR_APP_VERSION if their
+    # deployment tooling needs a different value (e.g. ``rc-<git-sha>``
+    # for staging environments).
+    app_version: str = Field(
+        default_factory=lambda: _default_app_version()
+    )
     # Where the updater pulls release metadata from. The default points
     # at the project's GitHub Releases JSON; operators can swap to a
     # private mirror by setting AUDITARR_UPDATE_FEED_URL.
     update_feed_url: str = (
-        "https://api.github.com/repos/auditarr/auditarr/releases/latest"
+        "https://api.github.com/repos/ShogyX/Auditarr/releases/latest"
     )
     # Polling interval for the cron tick that checks the feed.
     update_check_interval_minutes: int = 60

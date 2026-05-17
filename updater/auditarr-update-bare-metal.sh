@@ -41,10 +41,23 @@ APP_USER="${AUDITARR_USER:-auditarr}"
 APP_GROUP="${AUDITARR_GROUP:-auditarr}"
 
 # ``%s`` is substituted with the requested version, e.g.
-#   "https://github.com/auditarr/auditarr/releases/download/v%s/auditarr-%s.tar.gz"
+#   "https://github.com/ShogyX/Auditarr/releases/download/v%s/auditarr-%s.tar.gz"
 # Operators on private mirrors set this to point at their artifact store.
+#
+# v1.8.2: if AUDITARR_RELEASE_TARBALL_URL is unset, fall back to
+# GitHub's auto-generated source-tarball URL for the configured
+# update-feed repo. This means the bare-metal apply path works
+# out of the box for any deployment whose feed URL points at a
+# real GitHub repo — operators no longer have to manually set
+# the tarball URL just to enable the update workflow.
 RELEASE_URL_TEMPLATE="${AUDITARR_RELEASE_TARBALL_URL:-}"
 CHECKSUM_URL_TEMPLATE="${AUDITARR_RELEASE_CHECKSUM_URL:-}"
+
+# Feed URL: used only to derive the default tarball URL when
+# RELEASE_URL_TEMPLATE is empty. We parse it lazily — if the feed
+# URL isn't a github.com URL, we leave RELEASE_URL_TEMPLATE empty
+# and the apply will surface a clear "URL not configured" error.
+UPDATE_FEED_URL="${AUDITARR_UPDATE_FEED_URL:-}"
 
 POLL_INTERVAL="${AUDITARR_UPDATE_POLL_SECONDS:-5}"
 
@@ -99,10 +112,25 @@ apply_update() {
 
     log "apply requested: id=$apply_id to=$to_version"
 
+    # v1.8.2: derive a default RELEASE_URL_TEMPLATE from the feed URL
+    # if the operator hasn't set one explicitly. Recognised feed shape:
+    # ``https://api.github.com/repos/<owner>/<repo>/releases/latest``.
+    # We map it to GitHub's auto-generated source tarball:
+    #   https://github.com/<owner>/<repo>/archive/refs/tags/v<ver>.tar.gz
+    # This means the bare-metal apply path works out of the box for any
+    # ``api.github.com/repos/...`` feed without the operator needing to
+    # configure anything beyond the feed URL.
+    if [[ -z "$RELEASE_URL_TEMPLATE" && "$UPDATE_FEED_URL" =~ ^https://api\.github\.com/repos/([^/]+)/([^/]+)/releases/latest$ ]]; then
+        local owner="${BASH_REMATCH[1]}"
+        local repo="${BASH_REMATCH[2]}"
+        RELEASE_URL_TEMPLATE="https://github.com/${owner}/${repo}/archive/refs/tags/v%s.tar.gz"
+        log "derived release URL template from feed: $RELEASE_URL_TEMPLATE"
+    fi
+
     if [[ -z "$RELEASE_URL_TEMPLATE" ]]; then
         write_status "$apply_id" "failed" \
-            "AUDITARR_RELEASE_TARBALL_URL is not configured." \
-            "Set this in /etc/auditarr/updater.env to enable bare-metal auto-updates."
+            "AUDITARR_RELEASE_TARBALL_URL is not configured and could not be derived from the feed URL." \
+            "Set AUDITARR_RELEASE_TARBALL_URL explicitly in /etc/auditarr/updater.env, or set AUDITARR_UPDATE_FEED_URL to a GitHub api.github.com/repos/.../releases/latest URL so the watcher can derive one."
         return
     fi
 

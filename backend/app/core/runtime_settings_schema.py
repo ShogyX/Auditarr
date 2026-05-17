@@ -240,7 +240,7 @@ RUNTIME_EDITABLE: tuple[RuntimeFieldSpec, ...] = (
         ),
         category="updater",
         field_type=str,
-        field_default="https://api.github.com/repos/auditarr/auditarr/releases/latest",
+        field_default="https://api.github.com/repos/ShogyX/Auditarr/releases/latest",
         field_constraints={
             "min_length": 1,
             "max_length": 1024,

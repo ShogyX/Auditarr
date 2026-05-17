@@ -3,6 +3,172 @@
 All notable changes to Auditarr. Dates reflect the day the stage was
 shipped from the workspace.
 
+## [1.8.2] — 2026-05-17 — Updater wiring fixes for bare-metal install
+
+Patch release fixing four overlapping defects that prevented the
+"Check for updates" → "Apply update" flow from working on a fresh
+bare-metal install, even after the operator correctly set the feed
+URL to `https://api.github.com/repos/ShogyX/Auditarr/releases/latest`
+in the UI.
+
+### What was wrong
+
+1. **`Settings.app_version` defaulted to `"1.6.0"` and never drifted
+   forward.** Every release since v1.7.0 bumped `app.__version__`
+   but the `Settings` field stayed at 1.6.0. The updater compared
+   feed responses against this stale value, so it always reported
+   "update available" for any release ≥ 1.6.0 AND wrote a stale
+   `from_version` into the apply sentinel. Operators who clicked
+   "Check now" with the latest version already installed would see
+   a phantom update available.
+2. **Default `update_feed_url` pointed at the wrong repo.**
+   `app/core/settings.py` and `app/core/runtime_settings_schema.py`
+   both defaulted to `https://api.github.com/repos/auditarr/auditarr/releases/latest`
+   — a non-existent repo. Fresh installs hit a 404 on the first
+   check until the operator overrode it via the UI.
+3. **Bare-metal updater script required an explicit
+   `AUDITARR_RELEASE_TARBALL_URL`** to do anything. The watcher
+   was opt-in by design, but the only example URL in the
+   installer-written `updater.env` also pointed at the wrong repo,
+   so operators who uncommented it would still 404 on download.
+4. **The watcher didn't see the feed URL.** Even if the operator
+   set `AUDITARR_UPDATE_FEED_URL` correctly in `auditarr.env`, the
+   `auditarr-update-watcher.service` unit only sourced `updater.env`,
+   so the watcher had no way to derive a tarball URL from the
+   feed URL.
+
+### Fixes
+
+**Backend:**
+
+- `Settings.app_version` now uses `default_factory=lambda: _default_app_version()`
+  which imports `from app import __version__`. The default automatically
+  tracks the package version on every release. Operators can still override
+  via `AUDITARR_APP_VERSION` for non-standard deployment tooling
+  (staging builds with git-SHA suffixes, etc.).
+- Default `update_feed_url` in `settings.py` AND the runtime
+  settings schema now points at the correct upstream repo:
+  `https://api.github.com/repos/ShogyX/Auditarr/releases/latest`.
+
+**Bare-metal updater script (`updater/auditarr-update-bare-metal.sh`):**
+
+- Auto-derives `RELEASE_URL_TEMPLATE` from `UPDATE_FEED_URL` when
+  the operator hasn't set one explicitly. The regex
+  `^https://api\.github\.com/repos/([^/]+)/([^/]+)/releases/latest$`
+  matches against the feed URL and produces a GitHub
+  source-tarball URL of the form
+  `https://github.com/<owner>/<repo>/archive/refs/tags/v%s.tar.gz`.
+  Operators with a private mirror or non-GitHub feed can still
+  override `AUDITARR_RELEASE_TARBALL_URL` explicitly.
+- Failure message updated to name the new behaviour: if the feed
+  URL isn't a GitHub `releases/latest` URL AND no explicit tarball
+  URL was set, the apply fails with clear recovery instructions
+  pointing at both env vars.
+
+**Bare-metal installer (`install-bare-metal.sh`):**
+
+- Writes `AUDITARR_UPDATE_FEED_URL=https://api.github.com/repos/ShogyX/Auditarr/releases/latest`
+  to the generated `auditarr.env` so the watcher sees it (rather
+  than relying on the backend default).
+- `auditarr-update-watcher.service` unit now has a second
+  `EnvironmentFile=-$APP_CONFIG_DIR/auditarr.env` directive
+  (the leading `-` marks it optional). The watcher process now
+  sees both `updater.env` AND the main app env file, so
+  `AUDITARR_UPDATE_FEED_URL` reaches the derivation logic.
+- `updater.env` template updated: comment block describes v1.8.2's
+  feed-URL-derived default and the example URLs point at
+  `ShogyX/Auditarr` instead of the non-existent `auditarr/auditarr`.
+
+### Test counts
+
+  * Backend unit: **552/552** (+3 settings tests pinning `app_version`
+    factory + ShogyX/Auditarr feed URL default)
+  * Backend integration updater: 12/12 (unchanged)
+  * Backend integration full (scan + reaper + playback + session manager): 48/48
+  * Backend e2e: 4/4 (with bumped 1.8.2 pin)
+  * Frontend: 432/432 (unchanged)
+  * Smoke source-tree: 8/8 with 1.8.2 stamps
+  * Ruff F-rules: clean
+  * **NEW: bash unit tests for the watcher's URL derivation:**
+    `updater/tests/test_url_derivation.sh` — 10/10 covering
+    happy path, edge cases (trailing slash, http vs https,
+    hyphenated repo names), and the explicit-template-wins
+    override.
+
+### Upgrade from v1.8.1
+
+No DB migration needed. The bare-metal install path benefits from
+a fresh `auditarr.env` regeneration; the installer's auditarr.env
+heredoc is idempotent (regenerated each run, with `SECRET_KEY`
+preserved from an existing file).
+
+```bash
+sudo systemctl stop auditarr-api auditarr-worker auditarr-update-watcher
+# Extract v1.8.2 over /opt/auditarr
+sudo bash /opt/auditarr/install-bare-metal.sh   # regenerates env files
+sudo systemctl start auditarr-api auditarr-worker auditarr-update-watcher
+sudo journalctl -u auditarr-update-watcher -f
+```
+
+You should see at watcher startup:
+
+```
+[auditarr-update] <ts> watching /var/lib/auditarr/updater/apply.request (interval=5s)
+[auditarr-update] <ts> release URL template: <not configured>
+```
+
+The "not configured" is fine — the watcher derives the URL on
+demand when an apply request comes in. Click "Apply update" in the
+UI; you should then see:
+
+```
+[auditarr-update] <ts> apply requested: id=... to=1.8.3
+[auditarr-update] <ts> derived release URL template: https://github.com/ShogyX/Auditarr/archive/refs/tags/v%s.tar.gz
+[auditarr-update] <ts> fetching https://github.com/ShogyX/Auditarr/archive/refs/tags/v1.8.3.tar.gz
+```
+
+### Diagnostic methodology
+
+For the next operator hitting "Apply update does nothing on bare-metal":
+
+1. **Check `journalctl -u auditarr-update-watcher | grep "release URL template"`.**
+   On a healthy install you'll see either an explicit
+   `AUDITARR_RELEASE_TARBALL_URL` value or `<not configured>` (the
+   watcher derives lazily). If the line is missing, the watcher
+   isn't running.
+2. **Check the systemd unit's `EnvironmentFile=` directives:**
+   `systemctl cat auditarr-update-watcher | grep EnvironmentFile`.
+   v1.8.2 expects two lines: `EnvironmentFile=/etc/auditarr/updater.env`
+   AND `EnvironmentFile=-/etc/auditarr/auditarr.env`. If only one
+   is present, re-run `install-bare-metal.sh` to regenerate.
+3. **Verify the feed URL reaches the watcher:**
+   `systemctl show auditarr-update-watcher --property=Environment | grep AUDITARR_UPDATE_FEED_URL`.
+   If this is empty, `auditarr.env` doesn't have the var set, or
+   the second `EnvironmentFile=` directive is missing from the unit.
+4. **Click "Check now"** and inspect the `UpdateCheck` row via
+   `GET /api/v1/updater/checks`. `ok=true` and a non-null
+   `latest_version` confirms the feed pathway is working
+   end-to-end.
+
+### Backwards compatibility
+
+- No DB schema changes.
+- `Settings.app_version` factory: explicit override via
+  `AUDITARR_APP_VERSION` still works, so any tooling that pinned a
+  version env var is unaffected.
+- Watcher script's explicit `AUDITARR_RELEASE_TARBALL_URL` still
+  takes precedence over the new derivation; existing private-mirror
+  configurations keep working.
+- Installer-generated `updater.env` is only written when the file
+  doesn't exist, so existing installs keep their config. The new
+  `AUDITARR_UPDATE_FEED_URL` line is appended only on fresh
+  installs OR an idempotent re-run that detects the absence of the
+  key (caveat: the current installer regenerates the full
+  `auditarr.env` heredoc — operators who hand-edited that file
+  should diff their changes back in after re-running).
+
+---
+
 ## [1.8.1] — 2026-05-17 — Scan trigger reliability
 
 Patch release fixing the "sometimes works, sometimes doesn't, no

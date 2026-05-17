@@ -175,7 +175,7 @@ class PlexProvider(IntegrationProvider):
                 "Accept": "application/json",
                 "X-Plex-Client-Identifier": "auditarr",
                 "X-Plex-Product": "Auditarr",
-                "X-Plex-Version": "1.8.1",
+                "X-Plex-Version": "1.8.2",
             },
         }
         # Only pass verify=False when the operator explicitly
@@ -916,7 +916,7 @@ class PlexProvider(IntegrationProvider):
             "X-Plex-Token": token,
             "X-Plex-Client-Identifier": "auditarr",
             "X-Plex-Product": "Auditarr",
-            "X-Plex-Version": "1.8.1",
+            "X-Plex-Version": "1.8.2",
             # NB: Accept defaults to text/event-stream inside
             # stream_events; we don't need to set it here.
         }
