@@ -50,11 +50,12 @@ async def client(
     monkeypatch.setenv(
         "AUDITARR_UPDATE_APPLY_STATUS_PATH", str(status_path)
     )
-    # Stage 19: existing tests predate install-mode gating, so pin them
-    # to "docker" — they're exercising the sentinel/apply flow which is
-    # docker-shaped. The new bare-metal + unmanaged paths get their
-    # own dedicated tests below.
-    monkeypatch.setenv("AUDITARR_UPDATE_INSTALL_MODE", "docker")
+    # Stage 19: existing tests predate install-mode gating; they
+    # exercise the sentinel/apply flow which is now bare-metal-only.
+    # v1.9.1 Stage 1.6 moved this from "docker" to "bare-metal"
+    # because the in-container apply path was removed — Docker installs
+    # now return a manual command set instead.
+    monkeypatch.setenv("AUDITARR_UPDATE_INSTALL_MODE", "bare-metal")
 
     from app.core.settings import get_settings
     from app.updater.install_mode import reset_cache_for_tests
@@ -409,9 +410,12 @@ async def test_status_exposes_install_mode_and_apply_enabled(
     body = r.json()
     assert "install_mode" in body
     assert "apply_enabled" in body
-    # The fixture pins install_mode=docker so apply must be enabled.
-    assert body["install_mode"] == "docker"
+    # The fixture pins install_mode=bare-metal so apply must be enabled.
+    assert body["install_mode"] == "bare-metal"
     assert body["apply_enabled"] is True
+    # Bare-metal doesn't surface a manual command set — the UI's Apply
+    # button does the work via the watcher.
+    assert body.get("manual_apply_command") is None
 
 
 @pytest.mark.asyncio
@@ -505,6 +509,102 @@ async def test_apply_refused_when_install_mode_unmanaged(
         # The error envelope uses ``message`` (not ``detail``) per the
         # app's standard error shape.
         assert "unmanaged" in body.get("message", "").lower()
+
+    async with db.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await db.disconnect()
+    get_settings.cache_clear()
+    reset_cache_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_apply_refused_when_install_mode_docker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage 1.6 (v1.9.1) — Docker installs no longer auto-apply.
+
+    The status endpoint must report ``apply_enabled=False`` and surface
+    ``manual_apply_command`` with the host commands. ``POST /apply``
+    must reject with 409 and a Docker-specific error message.
+    """
+    from httpx import ASGITransport, AsyncClient as _Async
+    from app.core.settings import get_settings
+    from app.updater.install_mode import reset_cache_for_tests
+
+    db_path = tmp_path / "u.db"
+    monkeypatch.setenv("AUDITARR_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv(
+        "AUDITARR_SECRET_KEY", "test-key-must-be-at-least-sixteen-chars"
+    )
+    monkeypatch.setenv("AUDITARR_APP_VERSION", "1.0.0")
+    monkeypatch.setenv(
+        "AUDITARR_UPDATE_FEED_URL", "https://example.test/feed"
+    )
+    monkeypatch.setenv(
+        "AUDITARR_UPDATE_APPLY_SENTINEL", str(tmp_path / "apply.request")
+    )
+    monkeypatch.setenv(
+        "AUDITARR_UPDATE_APPLY_STATUS_PATH", str(tmp_path / "apply.status")
+    )
+    monkeypatch.setenv("AUDITARR_UPDATE_INSTALL_MODE", "docker")
+    get_settings.cache_clear()
+    reset_cache_for_tests()
+
+    from app.main import create_app
+    from app.storage.database import get_database
+
+    app = create_app()
+    db = get_database()
+    db._engine = None  # type: ignore[attr-defined]
+    db._sessionmaker = None  # type: ignore[attr-defined]
+    await db.connect()
+    async with db.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    transport = ASGITransport(app=app)
+    async with _Async(transport=transport, base_url="http://t") as c:
+        await c.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "admin@example.com",
+                "username": "admin",
+                "password": "supersecret-password-1!",
+            },
+        )
+        login = await c.post(
+            "/api/v1/auth/login",
+            json={"login": "admin", "password": "supersecret-password-1!"},
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        from sqlalchemy import select
+        async with db.session() as session:
+            user = (
+                await session.execute(
+                    select(User).where(User.username == "admin")
+                )
+            ).scalar_one()
+            user.role = "admin"
+            await session.commit()
+
+        status = await c.get("/api/v1/updater/status", headers=headers)
+        body = status.json()
+        assert body["install_mode"] == "docker"
+        assert body["apply_enabled"] is False
+        # Operator gets a copy-paste-ready command set in the panel.
+        assert body["manual_apply_command"] is not None
+        assert "docker compose pull" in body["manual_apply_command"]
+        assert "git pull" in body["manual_apply_command"]
+        assert "force-recreate" in body["manual_apply_command"]
+
+        apply = await c.post(
+            "/api/v1/updater/apply",
+            headers=headers,
+            json={"to_version": "9.9.9"},
+        )
+        assert apply.status_code == 409
+        assert "docker" in apply.json().get("message", "").lower()
 
     async with db.engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)

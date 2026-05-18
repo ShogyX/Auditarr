@@ -63,10 +63,35 @@ class UpdaterStatus:
     # to show appropriate "Updating <docker|systemd>…" copy and to
     # disable the Apply button when no helper is wired up.
     install_mode: str
-    # When install_mode == "unmanaged", apply is disabled regardless
-    # of feed result. Surfacing this as a separate flag (rather than
-    # making the UI derive it) keeps the contract explicit.
+    # When apply_enabled is False the UI grays out the Apply button.
+    # Docker and unmanaged installs both set this False — Docker
+    # because the in-container apply path was removed (see
+    # ``manual_apply_command`` below), unmanaged because there's no
+    # helper to consume the sentinel.
     apply_enabled: bool
+    # Populated for ``install_mode == "docker"`` with the canonical
+    # copy-paste-ready command set the operator must run on the host
+    # to pull the latest release and recreate the container. None for
+    # bare-metal (where the in-UI Apply button does the work) and
+    # unmanaged (where the operator's external config tool drives the
+    # upgrade).
+    manual_apply_command: str | None
+
+
+# Stage 1.6 (v1.9.1) — Docker install update instructions surfaced
+# verbatim by the status endpoint AND by the docs. Single source of
+# truth so the two can't drift. ``%(version)s`` is interpolated when
+# we know which version the operator is upgrading to.
+DOCKER_MANUAL_APPLY_COMMAND = (
+    "# In the directory containing your docker-compose.yml:\n"
+    "cd /path/to/auditarr\n"
+    "git pull origin main          "
+    "# or: git fetch && git checkout v%(version)s\n"
+    "docker compose pull\n"
+    "docker compose up -d --force-recreate\n"
+    "docker compose ps             "
+    "# confirm app + worker are 'running'"
+)
 
 
 class UpdaterService:
@@ -141,6 +166,17 @@ class UpdaterService:
             timeout_seconds=self._settings.update_apply_timeout_seconds,
         )
         install_mode = detect_install_mode(self._settings.update_install_mode)
+        # Stage 1.6 (v1.9.1) — Docker installs no longer auto-apply.
+        # The container reaching out to a host watcher to recreate
+        # itself defeats Docker's isolation model. Operators get a
+        # copy-paste-ready set of host commands instead.
+        apply_enabled = install_mode == "bare-metal"
+        manual_apply_command = (
+            DOCKER_MANUAL_APPLY_COMMAND
+            % {"version": latest_version or "<new-version>"}
+            if install_mode == "docker"
+            else None
+        )
         return UpdaterStatus(
             installed_version=self._settings.app_version,
             latest_version=latest_version,
@@ -151,7 +187,8 @@ class UpdaterService:
             feed_url=self._settings.update_feed_url,
             apply_in_progress=in_progress,
             install_mode=install_mode,
-            apply_enabled=install_mode != "unmanaged",
+            apply_enabled=apply_enabled,
+            manual_apply_command=manual_apply_command,
         )
 
     # ── Apply ───────────────────────────────────────────────────
@@ -175,6 +212,17 @@ class UpdaterService:
                 "Update apply is disabled: install environment is "
                 "'unmanaged'. Configure AUDITARR_UPDATE_INSTALL_MODE "
                 "or update Auditarr by hand."
+            )
+        if install_mode == "docker":
+            # Stage 1.6 (v1.9.1) — the in-container apply path was
+            # removed. The status endpoint returns the host commands
+            # the operator should run instead via
+            # ``manual_apply_command``.
+            raise ValueError(
+                "Update apply is disabled for Docker installs. Run "
+                "`git pull && docker compose pull && docker compose "
+                "up -d --force-recreate` on the host (full commands "
+                "in the Updates panel)."
             )
         if await self._applies.has_open(
             timeout_seconds=self._settings.update_apply_timeout_seconds,

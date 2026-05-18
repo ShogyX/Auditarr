@@ -1095,6 +1095,19 @@ else
     warn "Auto-updates from the UI will be disabled."
 fi
 
+# v1.9.1 Stage 1.6 — preflight helper sourced by the watcher AND
+# runnable standalone by operators who want to validate the host
+# before clicking Apply.
+if [[ -f "$SCRIPT_DIR/updater/auditarr-update-preflight.sh" ]]; then
+    install -m 0755 -o root -g root \
+        "$SCRIPT_DIR/updater/auditarr-update-preflight.sh" \
+        "$APP_HOME/updater/auditarr-update-preflight.sh"
+    ok "Installed update preflight script"
+else
+    warn "updater/auditarr-update-preflight.sh not found in tarball"
+    warn "Watcher will skip preflight (install-bare-metal.sh still catches most problems)."
+fi
+
 # Updater env file (kept separate from auditarr.env so operators can
 # enable / disable / repoint update sources without touching app
 # config). Default disables auto-updates — the operator must set
@@ -1248,16 +1261,39 @@ fi
 # ── Final status + next steps ─────────────────────────────────
 step "Verifying the API is up"
 
-# Give it a moment to bind, then probe /health.
+# Give it a moment to bind, then probe /health. We poll for up to
+# 60s in --auto mode (the watcher invokes us this way) so the
+# installer's exit code accurately reflects whether the API came up;
+# this lets the watcher fail-and-rollback instead of declaring
+# success on a crashlooping unit. In interactive mode we keep the
+# old advisory behavior so an operator who knows the API takes
+# longer to bind doesn't see a spurious failure.
 # Use LOCAL_HOST (127.0.0.1 when bound to 0.0.0.0) — curl can't
 # actually connect to a 0.0.0.0 destination.
-sleep 2
 HEALTH_URL="http://${LOCAL_HOST}:${LISTEN_PORT}/api/v1/health"
-if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
-    ok "API responded to $HEALTH_URL"
+if [[ "${AUTO_MODE:-0}" == "1" ]]; then
+    HEALTH_DEADLINE=$((SECONDS + 60))
+    HEALTH_OK=0
+    while (( SECONDS < HEALTH_DEADLINE )); do
+        if curl -sf --max-time 5 "$HEALTH_URL" >/dev/null 2>&1; then
+            HEALTH_OK=1
+            break
+        fi
+        sleep 3
+    done
+    if (( HEALTH_OK == 1 )); then
+        ok "API responded to $HEALTH_URL"
+    else
+        die "API didn't respond at $HEALTH_URL within 60s. Check: journalctl -u auditarr-api -n 100 --no-pager"
+    fi
 else
-    warn "API didn't respond at $HEALTH_URL yet."
-    warn "Check: journalctl -u auditarr-api -n 50 --no-pager"
+    sleep 2
+    if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+        ok "API responded to $HEALTH_URL"
+    else
+        warn "API didn't respond at $HEALTH_URL yet."
+        warn "Check: journalctl -u auditarr-api -n 50 --no-pager"
+    fi
 fi
 
 cat <<NEXT

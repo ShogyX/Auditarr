@@ -134,12 +134,14 @@ class Settings(BaseSettings):
     # ``requested`` or ``running`` before the reaper considers it
     # stale and force-marks it ``failed``. The host helper writes
     # status transitions at the end of the apply, so a healthy run
-    # is typically tens of seconds to a few minutes; 30 minutes
-    # leaves generous headroom for slow networks pulling a fresh
-    # image. The reaper runs on every ``has_open()`` poll so the
-    # next ``request_apply`` after a wedge can succeed instead of
-    # 409-ing forever.
-    update_apply_timeout_seconds: int = 1800
+    # is typically tens of seconds to a few minutes.
+    #
+    # v1.9.1 Stage 1.6 — dropped from 30 min to 15 min. The
+    # installer-driven flow has its own ``AUDITARR_APPLY_DEADLINE_SECONDS``
+    # hard ceiling (1800s) inside the watcher, and shaving the DB-side
+    # reaper window means an operator who clicks Apply and watches the
+    # UI doesn't wait 30 min to see a wedged apply get cleared.
+    update_apply_timeout_seconds: int = 900
 
     # ── Plugin gallery (Stage 12) ──────────────────────────────
     # JSON manifest URL listing community plugins. Default points at
