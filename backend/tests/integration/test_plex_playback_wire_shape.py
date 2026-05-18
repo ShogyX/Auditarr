@@ -475,3 +475,298 @@ async def test_fetch_live_playbacks_logs_even_when_metadata_missing(
     assert fetched_record.get("count") == 0
     assert fetched_record.get("raw_count") == 0
     assert fetched_record.get("metadata_present") is False
+
+
+# ── Test 8 (2026-05-19) — lightweight history entries must be
+# augmented with a follow-up /library/metadata batch call.
+#
+# Plex's ``/status/sessions/history/all`` returns entries with
+# ratingKey + viewedAt + title but NO ``Media[]``. The pre-fix
+# mapper required ``Media[0].Part[0].file`` and silently dropped
+# every history event for that reason — the integration looked
+# alive (poll succeeded, count > 0) but no row ever landed in
+# ``playback_events``. Post-fix, the provider follows up with
+# ``/library/metadata/{rk1,rk2,…}`` (batched, comma-separated)
+# and merges the Media tree back into each entry before mapping.
+
+
+class _PathRoutingTransport(httpx.AsyncBaseTransport):
+    """Route requests to different scripted responses by URL path
+    prefix. Used to exercise the two-stage history → metadata
+    fetch."""
+
+    def __init__(self, routes: dict[str, dict[str, Any]]) -> None:
+        self._routes = routes
+        self.requests: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        for prefix, body in self._routes.items():
+            if path.startswith(prefix):
+                return httpx.Response(
+                    200,
+                    content=json.dumps(body).encode(),
+                    headers={"content-type": "application/json"},
+                    request=request,
+                )
+        return httpx.Response(
+            404,
+            content=b'{"error":"no route"}',
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+
+def _install_routing_transport(
+    monkeypatch: pytest.MonkeyPatch, transport: _PathRoutingTransport
+) -> None:
+    real_client = httpx.AsyncClient
+
+    def _patched(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("plugins.plex.backend.httpx.AsyncClient", _patched)
+
+
+@pytest.mark.asyncio
+async def test_fetch_playback_events_follows_up_with_library_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plex's history endpoint returns lightweight entries (no
+    Media). The provider must batch-fetch ``/library/metadata``
+    for those ratingKeys and merge the Media tree back before
+    mapping. Without this follow-up, 100% of real-world Plex
+    history events are dropped on the floor."""
+
+    # ``viewedAt`` must be recent enough to clear the default
+    # ``since`` cutoff (now − 1 day). Use ``now`` and ``now − 1h``.
+    now_unix = int(_dt.datetime.now(_dt.UTC).timestamp())
+    transport = _PathRoutingTransport(
+        {
+            "/status/sessions/history/all": {
+                "MediaContainer": {
+                    "Metadata": [
+                        # Lightweight — no Media, no Part, no file.
+                        {
+                            "ratingKey": "2598",
+                            "viewedAt": now_unix,
+                            "title": "How to Make a Killing",
+                            "type": "movie",
+                        },
+                        {
+                            "ratingKey": "1234",
+                            "viewedAt": now_unix - 3600,
+                            "title": "Some Other Movie",
+                            "type": "movie",
+                        },
+                    ]
+                }
+            },
+            "/library/metadata/": {
+                # Returns BOTH ratingKeys in one MediaContainer —
+                # the batched form is ``/library/metadata/2598,1234``.
+                "MediaContainer": {
+                    "Metadata": [
+                        {
+                            "ratingKey": "2598",
+                            "title": "How to Make a Killing",
+                            "Media": [
+                                {
+                                    "videoCodec": "av1",
+                                    "bitrate": 8387,
+                                    "width": 3836,
+                                    "height": 1604,
+                                    "container": "mkv",
+                                    "Part": [
+                                        {
+                                            "file": "/mnt/Movies/How to Make a Killing.mkv",
+                                            "videoDecision": "directplay",
+                                            "audioDecision": "directplay",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        {
+                            "ratingKey": "1234",
+                            "Media": [
+                                {
+                                    "videoCodec": "hevc",
+                                    "Part": [
+                                        {
+                                            "file": "/mnt/Movies/Other.mkv",
+                                            "videoDecision": "transcode",
+                                            "audioDecision": "directplay",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ]
+                }
+            },
+        }
+    )
+    _install_routing_transport(monkeypatch, transport)
+
+    rec_log = _RecordingLog()
+    provider = PlexProvider(log=rec_log)
+    events = await provider.fetch_playback_events(_plex_config(), None)
+
+    paths = {e.source_path for e in events}
+    assert paths == {
+        "/mnt/Movies/How to Make a Killing.mkv",
+        "/mnt/Movies/Other.mkv",
+    }, f"expected both events to map; got {paths}"
+    decisions = {e.upstream_id.split(":")[1]: e.decision for e in events}
+    assert decisions["2598"] == "direct_play"
+    assert decisions["1234"] == "transcode"
+
+    # Both endpoints were called.
+    request_paths = [str(r.url.path) for r in transport.requests]
+    assert request_paths[0] == "/status/sessions/history/all"
+    assert any(p.startswith("/library/metadata/") for p in request_paths)
+    # The batched call carries both ratingKeys.
+    metadata_url = next(
+        str(r.url) for r in transport.requests if r.url.path.startswith("/library/metadata/")
+    )
+    assert "2598" in metadata_url and "1234" in metadata_url
+
+    # The poll outcome log records the metadata gap statistic.
+    fetched_record = next(
+        kwargs
+        for lvl, event, kwargs in rec_log.records
+        if event == "plex.playback.fetched"
+    )
+    assert fetched_record.get("metadata_missing") == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_playback_events_skips_metadata_call_when_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If Plex (or a mocked test payload) already includes Media
+    inline on each history entry, the metadata follow-up is
+    skipped — no wasted HTTP round trip."""
+    transport = _PathRoutingTransport(
+        {
+            "/status/sessions/history/all": {
+                "MediaContainer": {
+                    "Metadata": [
+                        {
+                            "ratingKey": "1",
+                            "viewedAt": int(
+                                _dt.datetime.now(_dt.UTC).timestamp()
+                            ),
+                            "Media": [
+                                {
+                                    "videoCodec": "h264",
+                                    "Part": [{"file": "/m/x.mkv"}],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+            # No /library/metadata route — the test fails with 404
+            # if the provider tries to call it unnecessarily.
+        }
+    )
+    _install_routing_transport(monkeypatch, transport)
+
+    provider = PlexProvider(log=_RecordingLog())
+    events = await provider.fetch_playback_events(_plex_config(), None)
+    assert len(events) == 1
+    assert events[0].source_path == "/m/x.mkv"
+    request_paths = [r.url.path for r in transport.requests]
+    assert request_paths == ["/status/sessions/history/all"], (
+        f"expected only the history call; got {request_paths}"
+    )
+
+
+# ── Test 9 (2026-05-19) — live session with two Media entries.
+#
+# Plex's ``/status/sessions`` for a transcoded session typically
+# returns two ``Media`` entries: one with the source library file
+# (carries ``Part[0].file``) and one describing the output
+# transcode stream (carries ``decision``/``protocol`` but NO
+# ``file``). Order is not guaranteed across PMS versions. The
+# live mapper must scan every Media/Part for one that has a real
+# file path, not blindly use ``Media[0].Part[0]``.
+
+
+@pytest.mark.asyncio
+async def test_live_session_with_transcode_finds_source_in_second_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = _CaptureTransport(
+        response_body={
+            "MediaContainer": {
+                "Metadata": [
+                    {
+                        "sessionKey": "290",
+                        "type": "episode",
+                        "title": "The Frenchman, the Female, and the Man Called Mother's Milk",
+                        "viewOffset": 600000,
+                        "duration": 6000000,
+                        "Media": [
+                            # OUTPUT: transcoded stream with no file
+                            # path. Pre-fix, the mapper picked
+                            # this and dropped the session.
+                            {
+                                "videoCodec": "h264",
+                                "container": "mpegts",
+                                "Part": [
+                                    {
+                                        "decision": "transcode",
+                                        "protocol": "hls",
+                                        "container": "mpegts",
+                                        "videoProfile": "high",
+                                        "bitrate": 4000,
+                                        "width": 1920,
+                                        "height": 1080,
+                                        "optimizedForStreaming": True,
+                                        "selected": True,
+                                    }
+                                ],
+                            },
+                            # SOURCE: the library file with the
+                            # actual path.
+                            {
+                                "videoCodec": "hevc",
+                                "container": "mkv",
+                                "Part": [
+                                    {
+                                        "file": "/mnt/TV/The Boys/S03E08.mkv",
+                                        "container": "mkv",
+                                    }
+                                ],
+                            },
+                        ],
+                        "Player": {"state": "playing", "platform": "tvOS"},
+                        "User": {"title": "alice"},
+                        "TranscodeSession": {
+                            "videoDecision": "transcode",
+                            "audioDecision": "directplay",
+                        },
+                    }
+                ]
+            }
+        }
+    )
+    _install_transport(monkeypatch, transport)
+
+    rec_log = _RecordingLog()
+    provider = PlexProvider(log=rec_log)
+    sessions = await provider.fetch_live_playbacks(_plex_config())
+
+    assert len(sessions) == 1, (
+        f"expected the transcode session to map; saw drop records "
+        f"{[r for r in rec_log.records if 'live.session_dropped' in r[1]]}"
+    )
+    s = sessions[0]
+    assert s.upstream_id == "290"
+    assert s.source_path == "/mnt/TV/The Boys/S03E08.mkv"
+    assert s.decision == "transcode"
