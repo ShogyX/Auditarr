@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -84,6 +84,13 @@ class Settings(BaseSettings):
 
     # ── Paths ──────────────────────────────────────────────────
     data_dir: Path = Path("./data")
+    # v1.9.x — separate "state" directory for runtime state that
+    # is shared between the API server and host-side helper scripts
+    # (notably the bare-metal update watcher). On bare-metal installs
+    # the installer sets ``AUDITARR_STATE_DIR=/var/lib/auditarr`` and
+    # both sides agree. Defaults to the same value as ``data_dir`` for
+    # back-compat with Docker installs that don't separate the two.
+    state_dir: Path = Path("./data")
     plugin_dir: Path = Path("./plugins")
     builtin_plugin_dir: Path = Path("./plugins")
     docs_dir: Path = Path("./docs")
@@ -111,11 +118,24 @@ class Settings(BaseSettings):
     )
     # Polling interval for the cron tick that checks the feed.
     update_check_interval_minutes: int = 60
-    # Inside-container path where the apply request sentinel is written.
-    # The host-side helper (docker/updater/auditarr-update.sh) watches
-    # this and runs the actual ``docker compose pull && up -d``.
-    update_apply_sentinel: Path = Path("./data/updater/apply.request")
-    update_apply_status_path: Path = Path("./data/updater/apply.status")
+    # Where the host-side helper (Docker: docker/updater/auditarr-update.sh;
+    # bare-metal: updater/auditarr-update-bare-metal.sh) watches for the
+    # apply request file the API writes when the operator clicks "Apply
+    # update" in the UI. Defaults to ``None``; the after-validator below
+    # derives ``<state_dir>/updater/apply.request`` (and the parallel
+    # status path) so the API and the watcher agree without either side
+    # needing to know the other's absolute path. Operators can still
+    # override either path explicitly via the corresponding env var.
+    #
+    # The previous hard-coded ``./data/updater/apply.request`` default
+    # produced silent breakage on bare-metal installs: the API server's
+    # WorkingDirectory was ``/opt/auditarr/backend`` so the sentinel
+    # landed at ``/opt/auditarr/backend/data/updater/apply.request``
+    # while the watcher polled ``/var/lib/auditarr/updater/apply.request``.
+    # Every apply hit the 15-minute reaper with "host helper never
+    # reported back".
+    update_apply_sentinel: Path | None = None
+    update_apply_status_path: Path | None = None
     # Stage 19: which install environment we're running under, so the
     # backend can return appropriate copy and the appropriate helper
     # script knows it should respond to apply requests.
@@ -300,6 +320,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "data_dir",
+        "state_dir",
         "plugin_dir",
         "builtin_plugin_dir",
         "docs_dir",
@@ -308,8 +329,44 @@ class Settings(BaseSettings):
         mode="after",
     )
     @classmethod
-    def _resolve_path(cls, v: Path) -> Path:
+    def _resolve_path(cls, v: Path | None) -> Path | None:
+        # ``update_apply_sentinel`` / ``update_apply_status_path`` default
+        # to None and are filled in by the after-model-validator below
+        # using ``state_dir`` — preserve None through the field-level
+        # validator so the model-level validator can see it.
+        if v is None:
+            return None
         return v.expanduser().resolve()
+
+    @model_validator(mode="after")
+    def _derive_updater_sentinel_paths(self) -> "Settings":
+        """Default the apply-request and apply-status sentinel paths
+        to ``<state_dir>/updater/...`` when the operator hasn't set
+        them explicitly.
+
+        This is the bare-metal vs Docker reconciliation: the API and
+        the host-side update helper agree on the sentinel location
+        whenever they share ``state_dir`` (set via
+        ``AUDITARR_STATE_DIR`` on bare-metal, defaults to ``./data``
+        in Docker where both sides see the same in-container path).
+
+        Operators who pinned ``AUDITARR_UPDATE_APPLY_SENTINEL`` /
+        ``AUDITARR_UPDATE_APPLY_STATUS_PATH`` explicitly keep that
+        value; the after-validator only fills the None slot.
+        """
+        if self.update_apply_sentinel is None:
+            self.update_apply_sentinel = (
+                (self.state_dir / "updater" / "apply.request")
+                .expanduser()
+                .resolve()
+            )
+        if self.update_apply_status_path is None:
+            self.update_apply_status_path = (
+                (self.state_dir / "updater" / "apply.status")
+                .expanduser()
+                .resolve()
+            )
+        return self
 
     @property
     def plugin_directories(self) -> list[Path]:

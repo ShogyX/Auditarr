@@ -246,7 +246,9 @@ class UpdaterService:
 
         # Write the sentinel after the DB row so the host helper can
         # always cross-reference its work with an audit row.
-        sentinel: Path = self._settings.update_apply_sentinel
+        # Non-None is guaranteed by Settings._derive_updater_sentinel_paths.
+        sentinel = self._settings.update_apply_sentinel
+        assert sentinel is not None
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         sentinel.write_text(
             json.dumps(
@@ -278,7 +280,9 @@ class UpdaterService:
         We delete the status file after consuming it so subsequent ticks
         don't re-fire events for the same outcome.
         """
-        status_path: Path = self._settings.update_apply_status_path
+        # Non-None is guaranteed by Settings._derive_updater_sentinel_paths.
+        status_path = self._settings.update_apply_status_path
+        assert status_path is not None
         if not status_path.exists():
             return None
         try:
