@@ -92,7 +92,11 @@ export function NotificationChannelDialog({
       size="md"
     >
       <ModalHead title={`Add ${kind.label} channel`} onClose={onClose} />
-      <form onSubmit={onSubmit}>
+      {/* autoComplete="off" + per-field new-password below prevents the
+          browser's saved-credential autofill from layering a dropdown
+          over the secret inputs (which otherwise captures clicks /
+          keystrokes and makes the field appear unfocusable). */}
+      <form onSubmit={onSubmit} autoComplete="off">
         <ModalBody className="flex flex-col gap-3">
           <Field label="Name">
             <Input
@@ -125,6 +129,8 @@ export function NotificationChannelDialog({
             <Field key={field} label={field}>
               <Input
                 type="password"
+                autoComplete="new-password"
+                name={`channel-secret-${kind.kind}-${field}`}
                 value={secrets[field] ?? ""}
                 onChange={(e) =>
                   setSecrets({ ...secrets, [field]: e.target.value })
