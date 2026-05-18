@@ -24,7 +24,7 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select as _select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
@@ -47,6 +47,12 @@ class HousekeepingReport:
     update_checks: int = 0
     rule_evaluations: int = 0
     job_runs: int = 0
+    # v1.9 OP-10 (caveat 7) — count of PlaybackSession rows
+    # found stuck in a non-stopped state past the TTL and
+    # forcibly marked stopped so the analyzer can ingest them
+    # and operators don't see ghost "now playing" entries
+    # for sessions whose SSE listener died mid-play.
+    stuck_sessions_swept: int = 0
 
     @property
     def total(self) -> int:
@@ -55,6 +61,7 @@ class HousekeepingReport:
             + self.update_checks
             + self.rule_evaluations
             + self.job_runs
+            + self.stuck_sessions_swept
         )
 
 
@@ -111,6 +118,31 @@ class HousekeepingService:
                     delete(JobRun).where(JobRun.started_at < cutoff)
                 )
                 report.job_runs = result.rowcount or 0
+
+            # v1.9 OP-10 (caveat 7) — sweep playback sessions
+            # stuck in playing/paused/buffering for more than 24h.
+            # An SSE listener that disconnected mid-play (worker
+            # restart, network hiccup, Plex crash) won't ever
+            # send a "stopped" event, so without this sweep the
+            # row sits as live forever, the analyzer never picks
+            # it up, and the live-tile endpoint surfaces a ghost.
+            # 24h is conservative: a real long binge-watch fits
+            # well under that; a stale row past 24h is definitely
+            # dead.
+            session_ttl = now - _dt.timedelta(hours=24)
+            from app.models.playback import PlaybackSession
+
+            stuck = await self._session.execute(
+                _select(PlaybackSession).where(
+                    PlaybackSession.state != "stopped",
+                    PlaybackSession.last_event_at < session_ttl,
+                )
+            )
+            stuck_rows = list(stuck.scalars().all())
+            for row in stuck_rows:
+                row.state = "stopped"
+                row.stopped_at = row.last_event_at
+            report.stuck_sessions_swept = len(stuck_rows)
         except Exception as exc:  # noqa: BLE001
             # Stage 14 (audit follow-up): record the failure on the
             # run row so the Settings page surfaces it. Re-raise so
@@ -146,6 +178,7 @@ class HousekeepingService:
             update_checks=report.update_checks,
             rule_evaluations=report.rule_evaluations,
             job_runs=report.job_runs,
+            stuck_sessions=report.stuck_sessions_swept,
         )
         return report
 

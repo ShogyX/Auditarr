@@ -38,6 +38,7 @@ import {
 import { cn } from "@/lib/cn";
 import { fmtNum } from "@/lib/format";
 import { useUiStore } from "@/stores/uiStore";
+import { useDashboardCardDisabled } from "@/hooks/useDashboardCardDisabled";
 
 const HEURISTIC_LABEL: Record<string, string> = {
   high_transcode_codec: "Transcode codec",
@@ -66,7 +67,7 @@ export function SuggestionsCard({
   const hidden = useUiStore((s) => s.dashboardHidden.includes("suggestions"));
   // Stage 13 (plan §606) — when the operator moves this
   // card to the disabled rail, skip the whole render.
-  const disabled = useUiStore((s) => s.dashboardDisabled.includes("suggestions"));
+  const [disabled] = useDashboardCardDisabled("suggestions");
   const toggle = useUiStore((s) => s.toggleDashboardSection);
 
   // Show at most 5 by default; the user can expand to see the rest.
@@ -222,6 +223,8 @@ function SuggestionRow({
   const confidenceTone =
     confidencePct >= 80 ? "text-sev-ok" : confidencePct >= 50 ? "text-sev-info" : "text-muted-2";
 
+  const isAI = suggestion.heuristic.startsWith("ai_");
+
   return (
     <div className="px-4 py-3 border-b border-border last:border-b-0 flex items-start gap-3">
       <div className="min-w-0 flex-1">
@@ -229,6 +232,18 @@ function SuggestionRow({
           <Pill className="text-[10px] text-muted-2 border-border bg-surface-2">
             {HEURISTIC_LABEL[suggestion.heuristic] ?? suggestion.heuristic}
           </Pill>
+          {/* v1.9 Stage 9.3 — AI-sourced suggestions get an extra
+              badge so operators see at a glance which suggestions
+              came from an LLM vs the data-driven heuristics. */}
+          {isAI ? (
+            <Pill
+              sev="info"
+              className="text-[10px]"
+              data-testid="ai-suggestion-badge"
+            >
+              AI
+            </Pill>
+          ) : null}
           <button
             onClick={onReview}
             className="text-[13px] font-medium truncate hover:underline text-left"

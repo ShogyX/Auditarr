@@ -135,6 +135,37 @@ async def request_apply(
     return UpdateApplyRead.model_validate(row)
 
 
+# ── Force-clear (v1.9 Stage 1.2) ───────────────────────────────
+@router.post(
+    "/applies/{apply_id}/force-clear",
+    response_model=UpdateApplyRead,
+    summary="Force-clear a stuck apply (admin)",
+)
+async def force_clear_apply(
+    apply_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
+    bus: EventBusDep,
+) -> UpdateApplyRead:
+    """Operator escape hatch when a host helper never reported back.
+
+    The status endpoint's authoritative reaper picks up stale rows
+    automatically after ``update_apply_timeout_seconds`` (default
+    30 min), but if an operator doesn't want to wait, this endpoint
+    flips the row to ``failed`` immediately.
+    """
+    service = UpdaterService(session=session, settings=settings, event_bus=bus)
+    try:
+        row = await service.force_clear(apply_id)
+    except ValueError as exc:
+        message = str(exc)
+        if "Unknown apply" in message:
+            raise NotFoundError(message) from exc
+        raise ValidationError(message) from exc
+    return UpdateApplyRead.model_validate(row)
+
+
 # ── Rollback ───────────────────────────────────────────────────
 @router.post(
     "/applies/{apply_id}/rollback",

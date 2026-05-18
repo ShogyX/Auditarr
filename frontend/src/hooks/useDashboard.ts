@@ -183,3 +183,80 @@ export function useDashboardCategories(limit = 12) {
     staleTime: 60_000,
   });
 }
+
+// ── v1.9 Stage 3.3 — library composition ──────────────────────
+
+export interface CompositionRow {
+  key: string;
+  label: string;
+  count: number;
+  total_size_bytes: number;
+}
+
+export interface BitrateMatrixRow {
+  library_id: string | null;
+  library_name: string | null;
+  resolution_key: string;
+  video_codec: string | null;
+  container: string | null;
+  file_count: number;
+  median_bitrate_kbps: number;
+}
+
+export interface Composition {
+  resolutions: CompositionRow[];
+  extensions: CompositionRow[];
+  containers: CompositionRow[];
+  subtitle_formats: CompositionRow[];
+  subtitle_languages: CompositionRow[];
+  audio_languages: CompositionRow[];
+  unknown_tracks: { video_unknown_count: number; audio_unknown_count: number };
+  subtitles_internal_external: { internal: number; external: number };
+  orphan_count: number;
+  bitrate_matrix: BitrateMatrixRow[];
+}
+
+/** v1.9 Stage 3.3 — the redesigned Categories card calls this in
+ *  one shot instead of spraying nine GETs at the server. */
+export function useDashboardComposition(libraryId: string | null = null) {
+  const qs = libraryId
+    ? `?library_id=${encodeURIComponent(libraryId)}`
+    : "";
+  return useQuery({
+    queryKey: ["dashboard", "composition", libraryId],
+    queryFn: () => apiClient.get<Composition>(`/dashboard/composition${qs}`),
+    staleTime: 60_000,
+  });
+}
+
+// ── v1.9 Stage 9.5.7 (OP-8 / OP-9) — language-preference surfaces ─
+
+export interface ForeignAudioSummary {
+  count: number;
+  sample_ids: string[];
+  preferred_audio_languages: string[];
+  preferred_subtitle_languages: string[];
+}
+
+export interface IncompatibleMediaSummary {
+  count: number;
+  sample_ids: string[];
+}
+
+export function useDashboardForeignAudio() {
+  return useQuery({
+    queryKey: ["dashboard", "foreign-audio"],
+    queryFn: () =>
+      apiClient.get<ForeignAudioSummary>("/dashboard/foreign-audio"),
+    staleTime: 60_000,
+  });
+}
+
+export function useDashboardIncompatibleMedia() {
+  return useQuery({
+    queryKey: ["dashboard", "incompatible-media"],
+    queryFn: () =>
+      apiClient.get<IncompatibleMediaSummary>("/dashboard/incompatible-media"),
+    staleTime: 60_000,
+  });
+}

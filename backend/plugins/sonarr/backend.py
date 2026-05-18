@@ -19,11 +19,16 @@ import httpx
 
 from app.core.http import async_client
 
+from app.integrations.path_mapping import (
+    TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+    TAG_DENYLIST_SCHEMA_FRAGMENT,
+)
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
     IntegrationProvider,
+    SearchTriggerResult,
     TagSync,
 )
 from app.plugins import Plugin, PluginContext
@@ -55,6 +60,12 @@ class SonarrProvider(IntegrationProvider):
                 "default": True,
                 "description": "When enabled, every file under a tagged series gets a TagSync entry.",
             },
+            # v1.9 Stage 7.2 — tag allowlist/denylist. Filters
+            # apply BEFORE writes to media_tags; flipping a tag
+            # from allowed → denied + running a sync removes the
+            # MediaTag rows on the next reconcile pass.
+            "tag_allowlist": TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+            "tag_denylist": TAG_DENYLIST_SCHEMA_FRAGMENT,
             "source_whitelist": {
                 "type": "array",
                 "title": "Inbound webhook source whitelist",
@@ -151,6 +162,73 @@ class SonarrProvider(IntegrationProvider):
 
         return _tags_for_arr_series(series_list, tag_index)
 
+    # ── v1.9 Stage 5.1 — search trigger ─────────────────────────
+    async def trigger_search(
+        self,
+        config: IntegrationConfig,
+        media_file_path: str,
+    ) -> SearchTriggerResult:
+        """Trigger a Sonarr SeriesSearch for the series owning
+        ``media_file_path``.
+
+        Resolution: GET /api/v3/series, then pick the entry whose
+        ``path`` is a prefix of ``media_file_path``. If multiple
+        candidates match (nested libraries), the LONGEST prefix
+        wins — that's the most specific path and the right series.
+        If nothing matches, return ``status="not_found"``.
+
+        On match: POST /api/v3/command { "name": "SeriesSearch",
+        "seriesId": <id> }. The command is fire-and-forget on
+        Sonarr's side; we record submission, not completion.
+        """
+        try:
+            async with self._client(config) as client:
+                series_response = await client.get("/api/v3/series")
+                series_response.raise_for_status()
+                series_list = series_response.json()
+
+                series_id = _find_arr_id_by_path_prefix(
+                    series_list, media_file_path
+                )
+                if series_id is None:
+                    return SearchTriggerResult(
+                        status="not_found",
+                        detail=(
+                            f"No Sonarr series path is a prefix of "
+                            f"{media_file_path!r}"
+                        ),
+                    )
+
+                cmd_response = await client.post(
+                    "/api/v3/command",
+                    json={"name": "SeriesSearch", "seriesId": series_id},
+                )
+                if cmd_response.status_code >= 400:
+                    return SearchTriggerResult(
+                        status="error",
+                        upstream_id=str(series_id),
+                        detail=(
+                            f"Sonarr rejected SeriesSearch command "
+                            f"(HTTP {cmd_response.status_code})"
+                        ),
+                    )
+                cmd_payload = cmd_response.json() if cmd_response.content else {}
+                return SearchTriggerResult(
+                    status="submitted",
+                    upstream_id=str(series_id),
+                    detail="SeriesSearch command queued",
+                    metadata={
+                        "command_id": cmd_payload.get("id"),
+                        "command_name": "SeriesSearch",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            return SearchTriggerResult(
+                status="error", detail=f"HTTP error: {exc}"
+            )
+        except ValueError as exc:
+            return SearchTriggerResult(status="error", detail=str(exc))
+
 
 def register(context: PluginContext) -> Plugin:
     context.register_integration(SonarrProvider(log=context.logger()))
@@ -197,3 +275,41 @@ def _tags_for_arr_series(items: list[dict], tag_index: dict[int, str]) -> list[T
                 )
             )
     return out
+
+
+# v1.9 Stage 5.1 — path-prefix resolver shared by Sonarr + Bazarr.
+def _find_arr_id_by_path_prefix(
+    items: list[dict], media_file_path: str
+) -> int | None:
+    """Find the arr id whose ``path`` is the longest prefix of
+    ``media_file_path``.
+
+    Sonarr / Radarr / Bazarr all expose series / movies with a
+    ``path`` field on each entry. Given a file path like
+    ``/data/tv/Show/Season 01/episode.mkv``, the matching series
+    is the entry whose ``path`` is ``/data/tv/Show``. We anchor
+    the prefix match on a directory boundary so
+    ``/data/tv/Show A`` doesn't accidentally match
+    ``/data/tv/Show Anniversary`` (same anchoring rule
+    ``tag_sync.py`` uses).
+
+    Returns the upstream integer ``id`` or ``None`` if nothing
+    matches. When multiple entries' paths match (nested
+    libraries), the longest one wins — the most specific match
+    is the right answer.
+    """
+    target = os.fspath(media_file_path)
+    best_id: int | None = None
+    best_len = -1
+    for entry in items:
+        ep = entry.get("path")
+        eid = entry.get("id")
+        if not ep or eid is None:
+            continue
+        prefix = os.fspath(ep).rstrip("/") + "/"
+        if target.startswith(prefix) or target == os.fspath(ep).rstrip("/"):
+            plen = len(prefix)
+            if plen > best_len:
+                best_len = plen
+                best_id = int(eid)
+    return best_id

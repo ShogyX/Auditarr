@@ -18,6 +18,7 @@ from app.api.v1 import (
     path_mappings,
     playback,
     plugins,
+    rule_templates,
     rules,
     runtime_settings,
     scans,
@@ -39,6 +40,7 @@ api_v1_router.include_router(media.router)
 api_v1_router.include_router(scans.router)
 api_v1_router.include_router(integrations.router)
 api_v1_router.include_router(rules.router)
+api_v1_router.include_router(rule_templates.router)
 api_v1_router.include_router(automation.router)
 api_v1_router.include_router(dashboard.router)
 api_v1_router.include_router(notifications.router)

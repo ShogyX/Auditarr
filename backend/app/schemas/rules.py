@@ -104,6 +104,12 @@ class RuleEvaluateLibraryResponse(BaseModel):
     files_evaluated: int
 
 
+# v1.9 OP-15 — single-rule evaluation across all libraries.
+class RuleEvaluateRuleResponse(BaseModel):
+    rule_id: str
+    files_evaluated: int
+
+
 # ── Stage 15: rule vocabulary ────────────────────────────────
 class RuleVocabularyField(BaseModel):
     """One condition-field the visual builder can offer."""

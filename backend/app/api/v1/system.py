@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import platform
 import sys
 from datetime import UTC
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import __version__
 from app.api.auth_deps import AdminUser, CurrentUser
@@ -325,3 +328,268 @@ async def last_housekeeping_run(
         "job_runs_deleted": row.job_runs_deleted,
         "error": row.error,
     }
+
+
+# ── v1.9 Stage 2.6 — Factory reset ─────────────────────────────
+
+
+class FactoryResetRequest(BaseModel):
+    """Body for ``POST /system/factory-reset``.
+
+    ``confirm_phrase`` MUST equal the constant
+    :data:`app.services.factory_reset_service.CONFIRM_PHRASE`. We
+    don't expose the constant here as a Pydantic regex because the
+    service layer is the source of truth — the router stays thin
+    and forwards the value as-is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_phrase: str = Field(min_length=1, max_length=64)
+
+
+class FactoryResetResponse(BaseModel):
+    tables_truncated: int
+    trash_purged: bool
+
+
+@router.post(
+    "/factory-reset",
+    response_model=FactoryResetResponse,
+    summary="Wipe Auditarr back to a fresh-install state (admin)",
+)
+async def factory_reset(
+    body: FactoryResetRequest,
+    user: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
+) -> FactoryResetResponse:
+    """Truncate every application table except ``users``,
+    ``audit_log``, and ``alembic_version``; purge ``data_dir/trash/``;
+    and write an audit-log entry recording the reset.
+
+    The operator's own session keeps working because we don't
+    touch ``users``; other open browser tabs may need to re-auth
+    when their token expires because ``refresh_sessions`` IS
+    truncated.
+    """
+    from app.core.exceptions import ValidationError
+    from app.services.factory_reset_service import FactoryResetService
+
+    service = FactoryResetService(session=session, settings=settings)
+    try:
+        result = await service.reset(
+            actor_id=user.id,
+            confirm_phrase=body.confirm_phrase,
+        )
+    except ValueError as exc:
+        # Wrong phrase — surface a 422 so the UI's typed-confirm
+        # field can show "wrong phrase" without a 500-style error
+        # toast.
+        raise ValidationError(str(exc)) from exc
+    await session.commit()
+    return FactoryResetResponse(
+        tables_truncated=result.tables_truncated,
+        trash_purged=result.trash_purged,
+    )
+
+
+# ── v1.9 Stage 8.1 — log inspection ─────────────────────────────
+
+
+def _apply_log_filters(
+    records: list,
+    *,
+    service: str = "all",
+    since: str | None = None,
+    level: str | None = None,
+) -> list:
+    """v1.9 audit fix (LOG-4): shared filter pipeline for the
+    /system/logs and /system/logs/export endpoints. Keeps the
+    two surfaces in lock-step.
+
+    v1.9 audit fix (LOG-1): when ``since`` parses to a tz-naive
+    datetime (operator omitted the offset), assume UTC. The
+    comparison with tz-aware record timestamps would otherwise
+    raise TypeError and 500 the whole request.
+    """
+    if service and service != "all":
+        records = [r for r in records if r.category == service]
+    if level:
+        rank = {"debug": 0, "info": 1, "warning": 2, "error": 3, "critical": 4}
+        threshold = rank.get(level.lower(), 0)
+        records = [r for r in records if rank.get(r.level, 0) >= threshold]
+    if since:
+        try:
+            since_dt = _dt.datetime.fromisoformat(_normalize_iso(since))
+        except ValueError:
+            since_dt = None
+        if since_dt is not None:
+            # LOG-1: coerce tz-naive → UTC-aware before compare.
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=_dt.UTC)
+            records = [
+                r
+                for r in records
+                if _parse_record_ts(r.timestamp) > since_dt
+            ]
+    return records
+
+
+def _last_error_at_of(records: list) -> _dt.datetime | None:
+    """v1.9 audit fix (LOG-3): compute the most-recent error/
+    critical timestamp from the request's FILTERED records, not
+    the buffer's global tracker. Operators filtering "show API
+    logs" shouldn't see a worker-category error in the pill."""
+    latest: _dt.datetime | None = None
+    for r in records:
+        if r.level in ("error", "critical"):
+            ts = _parse_record_ts(r.timestamp)
+            if latest is None or ts > latest:
+                latest = ts
+    return latest
+
+
+@router.get("/logs", summary="Recent log records from the ring buffer")
+async def list_logs(
+    _admin: AdminUser,
+    service: str = "all",
+    since: str | None = None,
+    level: str | None = None,
+    limit: int = 200,
+    cursor: int | None = None,
+) -> dict[str, Any]:
+    """Return recent log records from the in-memory ring buffer.
+
+    Filters:
+      * ``service`` — match ``record.category``. ``"all"`` (the
+        default) returns every category.
+      * ``since``   — ISO timestamp; only records strictly
+        after this point are returned.
+      * ``level``   — minimum log level. ``"warning"`` returns
+        warning / error / critical; ``"error"`` returns
+        error / critical. Levels below ``info`` are
+        normally filtered out by the structlog wrapper.
+      * ``limit``   — max records (default 200, capped at 1000).
+      * ``cursor``  — opaque cursor for pagination. The cursor
+        is a record index into the latest snapshot — callers
+        pass the ``next_cursor`` from a previous response to
+        page backwards through history.
+
+    Result is admin-only because log lines can contain
+    operator-visible context (rule names, integration IDs,
+    request paths) that's reasonable for an admin to see but
+    isn't appropriate for a regular user role.
+    """
+    from app.core.log_buffer import get_log_buffer
+
+    buffer = get_log_buffer()
+    records = _apply_log_filters(
+        buffer.snapshot(),
+        service=service,
+        since=since,
+        level=level,
+    )
+
+    # Cap + paginate. We serve newest first; the cursor
+    # represents "the offset in newest-first ordering of the
+    # oldest record returned on the previous page". Subsequent
+    # pages return older records.
+    # v1.9 audit fix (LOG-2): clamp cursor / limit to non-negative.
+    capped = min(max(int(limit), 1), 1000)
+    newest_first = list(reversed(records))
+    start = max(0, int(cursor or 0))
+    page = newest_first[start : start + capped]
+    next_cursor = (
+        start + capped if start + capped < len(newest_first) else None
+    )
+
+    # v1.9 audit fix (LOG-3): last_error_at reflects the filtered
+    # request, not the buffer-global state.
+    filtered_last_error = _last_error_at_of(records)
+    return {
+        "records": [r.to_dict() for r in page],
+        "count": len(page),
+        "total_buffered": len(records),
+        "next_cursor": next_cursor,
+        "last_error_at": (
+            filtered_last_error.isoformat()
+            if filtered_last_error is not None
+            else None
+        ),
+        "buffer_capacity": buffer.capacity,
+    }
+
+
+@router.get(
+    "/logs/export",
+    summary="Stream recent logs as newline-delimited JSON",
+)
+async def export_logs(
+    _admin: AdminUser,
+    service: str = "all",
+    since: str | None = None,
+    level: str | None = None,
+) -> StreamingResponse:
+    """v1.9 Stage 8.1 — NDJSON export. The frontend triggers
+    this as a save-to-disk download; the operator gets one
+    record per line in JSON format suitable for grep / jq.
+
+    The same filter knobs as ``GET /logs`` apply. No pagination
+    cursor — the operator wants the full filtered snapshot.
+
+    Streaming avoids holding the entire serialized payload in
+    memory at once when the buffer is full (5000 records ≈
+    1MB; small but no reason to be wasteful).
+    """
+    from app.core.log_buffer import get_log_buffer
+
+    buffer = get_log_buffer()
+    records = _apply_log_filters(
+        buffer.snapshot(),
+        service=service,
+        since=since,
+        level=level,
+    )
+
+    def _generate():
+        import json as _json
+
+        for record in records:
+            yield _json.dumps(record.to_dict()) + "\n"
+
+    filename = f"auditarr-logs-{_dt.datetime.now(_dt.UTC).strftime('%Y%m%dT%H%M%SZ')}.ndjson"
+    return StreamingResponse(
+        _generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )
+
+
+def _parse_record_ts(ts: str) -> _dt.datetime:
+    """Parse an ISO timestamp; on failure return UTC minimum so
+    the record is filtered out by any ``since`` filter.
+
+    v1.9 Stage 8.1 — be lenient about the ``+`` → space mangling
+    that happens when an ISO timestamp travels through a URL
+    query string (``+00:00`` becomes `` 00:00``). The
+    ``_normalize_iso`` helper undoes that before parsing."""
+    try:
+        return _dt.datetime.fromisoformat(_normalize_iso(ts))
+    except ValueError:
+        return _dt.datetime.min.replace(tzinfo=_dt.UTC)
+
+
+def _normalize_iso(ts: str) -> str:
+    """Repair ISO timestamps that lost their ``+`` to URL
+    decoding. Idempotent on well-formed inputs."""
+    # If the string contains " 00:00" (space before HH:MM
+    # offset) and not "+00:00", restore the plus.
+    if ts and " " in ts and "+" not in ts:
+        # Find the last space — that's where the offset starts.
+        head, _, tail = ts.rpartition(" ")
+        if tail and (tail[:1].isdigit() or tail.startswith("-")):
+            return head + "+" + tail
+    return ts

@@ -26,11 +26,16 @@ import httpx
 
 from app.core.http import async_client
 
+from app.integrations.path_mapping import (
+    TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+    TAG_DENYLIST_SCHEMA_FRAGMENT,
+)
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
     IntegrationProvider,
+    SearchTriggerResult,
     TagSync,
 )
 from app.plugins import Plugin, PluginContext
@@ -61,6 +66,15 @@ class BazarrProvider(IntegrationProvider):
                 "title": "Mirror missing-subtitle tags",
                 "default": True,
             },
+            # v1.9 Stage 7.2 — see Sonarr backend for the longer
+            # comment on tag allowlist/denylist semantics. For
+            # Bazarr, the tags carry the shape
+            # "missing-subs:<langcode>" (e.g. "missing-subs:en"),
+            # so an operator denying "missing-subs:fr" filters
+            # out only French missing-subtitle markers without
+            # affecting English / other languages.
+            "tag_allowlist": TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+            "tag_denylist": TAG_DENYLIST_SCHEMA_FRAGMENT,
         },
     }
     secret_fields: tuple[str, ...] = ("api_key",)
@@ -155,6 +169,126 @@ class BazarrProvider(IntegrationProvider):
                     )
                 )
         return out
+
+    # ── v1.9 Stage 5.1 — search trigger ─────────────────────────
+    async def trigger_search(
+        self,
+        config: IntegrationConfig,
+        media_file_path: str,
+    ) -> SearchTriggerResult:
+        """Trigger a Bazarr subtitle search for the series or
+        movie owning ``media_file_path``.
+
+        Resolution: GET /api/series + /api/movies, pick the entry
+        whose ``path`` is the longest prefix match. Series vs
+        movies branch matters because Bazarr's search command
+        targets differ:
+
+          * Series → POST /api/subtitles?action=search&type=series&id=<id>
+          * Movie  → POST /api/subtitles?action=search&type=movie&id=<id>
+
+        We try series first (the more common case for Auditarr
+        installs that pair Bazarr with Sonarr) then movies. If
+        no path matches in either list, return ``not_found``.
+
+        Older Bazarr versions don't expose the unified
+        ``/api/subtitles`` endpoint — they use
+        ``/api/episodes/wanted`` flows. We fall back to those if
+        the primary endpoint returns 404, so the trigger keeps
+        working across versions.
+        """
+        try:
+            async with self._client(config) as client:
+                series_response, movies_response = await asyncio.gather(
+                    client.get("/api/series"),
+                    client.get("/api/movies"),
+                )
+                series_response.raise_for_status()
+                movies_response.raise_for_status()
+                series_list = (series_response.json() or {}).get("data") or []
+                movies_list = (movies_response.json() or {}).get("data") or []
+
+                from plugins.sonarr.backend import (
+                    _find_arr_id_by_path_prefix,
+                )
+
+                series_id = _find_arr_id_by_path_prefix(
+                    series_list, media_file_path
+                )
+                movie_id = (
+                    _find_arr_id_by_path_prefix(movies_list, media_file_path)
+                    if series_id is None
+                    else None
+                )
+
+                if series_id is not None:
+                    cmd_response = await client.post(
+                        "/api/subtitles",
+                        params={
+                            "action": "search",
+                            "type": "series",
+                            "id": series_id,
+                        },
+                    )
+                    return _bazarr_search_result(
+                        cmd_response,
+                        upstream_id=str(series_id),
+                        target_kind="series",
+                    )
+                if movie_id is not None:
+                    cmd_response = await client.post(
+                        "/api/subtitles",
+                        params={
+                            "action": "search",
+                            "type": "movie",
+                            "id": movie_id,
+                        },
+                    )
+                    return _bazarr_search_result(
+                        cmd_response,
+                        upstream_id=str(movie_id),
+                        target_kind="movie",
+                    )
+
+                return SearchTriggerResult(
+                    status="not_found",
+                    detail=(
+                        f"No Bazarr series or movie path is a prefix "
+                        f"of {media_file_path!r}"
+                    ),
+                )
+        except httpx.HTTPError as exc:
+            return SearchTriggerResult(
+                status="error", detail=f"HTTP error: {exc}"
+            )
+        except ValueError as exc:
+            return SearchTriggerResult(status="error", detail=str(exc))
+
+
+def _bazarr_search_result(
+    response: "httpx.Response",
+    *,
+    upstream_id: str,
+    target_kind: str,
+) -> SearchTriggerResult:
+    """Map a Bazarr ``/api/subtitles?action=search`` response to
+    a ``SearchTriggerResult``. Factored out because the series and
+    movie branches use identical mapping."""
+    if response.status_code >= 400:
+        return SearchTriggerResult(
+            status="error",
+            upstream_id=upstream_id,
+            detail=(
+                f"Bazarr rejected subtitle search "
+                f"(HTTP {response.status_code})"
+            ),
+        )
+    return SearchTriggerResult(
+        status="submitted",
+        upstream_id=upstream_id,
+        detail=f"Subtitle search queued for {target_kind} {upstream_id}",
+        metadata={"target_kind": target_kind},
+    )
 
 
 def register(context: PluginContext) -> Plugin:

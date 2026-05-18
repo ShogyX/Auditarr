@@ -171,3 +171,67 @@ async def test_housekeeping_trims_old_update_checks_and_job_runs(
     # default: update_check retention 90d, job_run retention 60d.
     assert report.update_checks == 1
     assert report.job_runs == 1
+
+
+@pytest.mark.asyncio
+async def test_housekeeping_sweeps_stuck_playback_sessions(
+    session_and_settings,
+) -> None:
+    """v1.9 OP-10 caveat 7: a PlaybackSession stuck in non-stopped
+    state with last_event_at > 24h ago gets forcibly marked
+    stopped so the analyzer can ingest it and operators don't
+    see a ghost "now playing" row."""
+    from app.models.integration import Integration
+    from app.models.playback import PlaybackSession
+
+    session, settings = session_and_settings
+    now = utcnow()
+
+    ig = Integration(
+        name="Plex", kind="plex", enabled=True,
+        poll_interval_seconds=900,
+        config={"base_url": "http://stub/"},
+        health_status="ok",
+    )
+    session.add(ig)
+    await session.flush()
+    ig_id = ig.id
+
+    # Stuck row: state=playing, last_event_at 25h ago.
+    session.add(
+        PlaybackSession(
+            integration_id=ig_id,
+            session_key="sk-stuck",
+            state="playing",
+            decision="direct_play",
+            started_at=now - _dt.timedelta(hours=26),
+            last_event_at=now - _dt.timedelta(hours=25),
+        )
+    )
+    # Fresh row: state=playing, last_event_at 30 min ago — must NOT be swept.
+    session.add(
+        PlaybackSession(
+            integration_id=ig_id,
+            session_key="sk-fresh",
+            state="playing",
+            decision="direct_play",
+            started_at=now - _dt.timedelta(minutes=45),
+            last_event_at=now - _dt.timedelta(minutes=30),
+        )
+    )
+    await session.commit()
+
+    service = HousekeepingService(session=session, settings=settings)
+    report = await service.run()
+    assert report.stuck_sessions_swept == 1
+
+    rows = (
+        (await session.execute(select(PlaybackSession)))
+        .scalars()
+        .all()
+    )
+    by_key = {r.session_key: r for r in rows}
+    assert by_key["sk-stuck"].state == "stopped"
+    assert by_key["sk-stuck"].stopped_at is not None
+    assert by_key["sk-fresh"].state == "playing"
+    assert by_key["sk-fresh"].stopped_at is None

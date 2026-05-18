@@ -33,8 +33,8 @@ fields. Self-hosted mirrors should emit this shape:
 
 ```json
 {
-  "version": "1.4.0",
-  "changelog": "Big rewrite of the optimization queue.\n..."
+ "version": "1.4.0",
+ "changelog": "Big rewrite of the optimization queue.\n..."
 }
 ```
 
@@ -56,12 +56,12 @@ comparison rules:
 
 - Pure semver `MAJOR.MINOR.PATCH` compares numerically.
 - A release version beats a prerelease with the same numeric trio
-  (`1.2.0` > `1.2.0-rc.1`).
+ (`1.2.0` > `1.2.0-rc.1`).
 - The dev sentinel `0.0.0-dev` is older than every real release, so dev
-  builds always see "update available". This is intentional — it nudges
-  contributors to test against the shipped release flow.
+ builds always see "update available". This is intentional — it nudges
+ contributors to test against the shipped release flow.
 - Unknown shapes fall back to "different = upgrade", which keeps the
-  notification visible if you pin an unusual tag.
+ notification visible if you pin an unusual tag.
 
 ## Applying an update
 
@@ -71,24 +71,24 @@ needs. So the apply path is split:
 
 1. Operator clicks **Apply** (or hits `POST /api/v1/updater/apply`).
 2. The updater writes a sentinel JSON file at
-   `./data/updater/apply.request` and persists an `update_applies`
-   row in status `requested`.
+ `./data/updater/apply.request` and persists an `update_applies`
+ row in status `requested`.
 3. The host-side helper (`docker/updater/auditarr-update.sh`) watches
-   that path. When it sees the sentinel, it deletes it, runs
-   `docker compose pull && docker compose up -d <service>`, and writes
-   a status JSON to `./data/updater/apply.status`.
+ that path. When it sees the sentinel, it deletes it, runs
+ `docker compose pull && docker compose up -d <service>`, and writes
+ a status JSON to `./data/updater/apply.status`.
 4. On the next cron tick the updater consumes the status file and
-   transitions the row to `completed` or `failed`, emitting
-   `update.installed` or `update.failed` on the event bus.
+ transitions the row to `completed` or `failed`, emitting
+ `update.installed` or `update.failed` on the event bus.
 
 ### Setting up the helper
 
 The helper ships with two files:
 
 - `docker/updater/auditarr-update.sh` — the polling loop. Depends only
-  on `bash`, `docker`, and `python3` (for tiny JSON escapes).
+ on `bash`, `docker`, and `python3` (for tiny JSON escapes).
 - `docker/updater/auditarr-update.service` — a systemd unit you can
-  drop into `/etc/systemd/system/`.
+ drop into `/etc/systemd/system/`.
 
 Required env:
 
@@ -133,15 +133,15 @@ exists on the registry; the updater does not pin tags itself.
 | `POST /api/v1/updater/applies/{id}/rollback` | Roll back a completed apply (admin) |
 | `GET /api/v1/system/version` | Lightweight version probe used by the sidebar |
 
-## What's NOT in Stage 11
+## What's NOT in 
 
 - **Auto-apply**. The updater never deploys without an operator click.
-  Even with a passing healthcheck, automatic deployment of new code
-  isn't something a self-hosted box should do at 3am unattended.
+ Even with a passing healthcheck, automatic deployment of new code
+ isn't something a self-hosted box should do at 3am unattended.
 - **Multi-container coordination**. The helper recreates one compose
-  service (default `app`). If you've stitched extra workers in front,
-  set `AUDITARR_COMPOSE_SERVICE` per environment or run the helper
-  multiple times.
+ service (default `app`). If you've stitched extra workers in front,
+ set `AUDITARR_COMPOSE_SERVICE` per environment or run the helper
+ multiple times.
 - **Image signature verification**. The updater trusts the registry the
-  compose file points at. If you need supply-chain assurance, use a
-  private registry with cosign and configure containerd appropriately.
+ compose file points at. If you need supply-chain assurance, use a
+ private registry with cosign and configure containerd appropriately.

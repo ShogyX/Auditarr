@@ -41,7 +41,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.integrations.path_mapping import PathMapping, remap_path_chain
 from app.integrations.types import LivePlaybackDTO
+from app.models.path_mapping import GlobalPathMapping
 from app.models.playback import PlaybackSession
 
 log = get_logger("auditarr.playback.session_manager", category="playback")
@@ -91,7 +93,13 @@ class SessionStateManager:
     1:1 with the integration).
     """
 
-    def __init__(self, *, integration_id: str, db_session_factory: Any) -> None:
+    def __init__(
+        self,
+        *,
+        integration_id: str,
+        db_session_factory: Any,
+        path_mappings: list[PathMapping] | None = None,
+    ) -> None:
         self._integration_id = integration_id
         # ``db_session_factory`` is a zero-arg callable returning an
         # AsyncSession context manager (typically ``db.session``).
@@ -99,6 +107,15 @@ class SessionStateManager:
         # one open across the listener's lifetime — SSE listeners
         # run for hours, but DB connections shouldn't.
         self._db_session_factory = db_session_factory
+        # v1.9 OP-10 — per-integration path mappings. The worker
+        # parses these from the Integration row's secrets via
+        # ``parse_mappings`` (the same shape the poller already
+        # uses) and hands them to us. ``None`` is treated as "no
+        # mappings" so existing tests that construct the manager
+        # without this kwarg keep working unchanged.
+        self._integration_mappings: list[PathMapping] = (
+            list(path_mappings) if path_mappings else []
+        )
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -109,6 +126,7 @@ class SessionStateManager:
         state: str,
         view_offset_ms: int | None,
         enrichment: SessionEnrichment | None,
+        rating_key: str | None = None,
     ) -> None:
         """Process one SSE state event.
 
@@ -119,6 +137,10 @@ class SessionStateManager:
         snapshot fetch failed or the session was already gone
         from Plex by the time we asked; we still record the
         state transition with what we know.
+
+        ``rating_key`` (v1.9 OP-10) — the upstream's stable media
+        id. When non-None, written to the row so the history
+        poller can later reconcile against it.
 
         State transitions:
 
@@ -153,6 +175,8 @@ class SessionStateManager:
             "last_event_at": now,
             "stopped_at": stopped_at,
         }
+        if rating_key:
+            values["rating_key"] = str(rating_key)
         if enrichment is not None:
             values.update(
                 {
@@ -176,6 +200,31 @@ class SessionStateManager:
             )
 
         async with self._db_session_factory() as session:
+            # v1.9 OP-10 — apply path mappings + resolve
+            # media_file_id BEFORE persisting. Both global and
+            # per-integration mappings flow through
+            # ``remap_path_chain`` (the same helper the poller
+            # uses). A failed lookup (path not in media_files)
+            # leaves ``media_file_id`` NULL — analyzer filters on
+            # NOT NULL so unmapped sessions don't pollute
+            # downstream stats.
+            if enrichment is not None and enrichment.source_path:
+                global_mappings = await self._load_global_mappings(session)
+                mapped_path = remap_path_chain(
+                    enrichment.source_path,
+                    self._integration_mappings,
+                    global_mappings,
+                )
+                values["source_path"] = mapped_path
+                # Lazy import — avoids a circular dependency
+                # between poller and session_manager at import
+                # time (poller imports SessionEnrichment for the
+                # legacy code path).
+                from app.services.playback.poller import resolve_media_path
+
+                values["media_file_id"] = await resolve_media_path(
+                    session, mapped_path
+                )
             await self._upsert(session, values)
             await session.commit()
 
@@ -186,7 +235,31 @@ class SessionStateManager:
             state=state,
             view_offset_ms=view_offset_ms,
             enriched=enrichment is not None,
+            media_file_id=values.get("media_file_id"),
+            rating_key=values.get("rating_key"),
         )
+
+    async def _load_global_mappings(
+        self, session: AsyncSession
+    ) -> list[PathMapping]:
+        """Load enabled global path mappings, sorted by priority
+        then created_at (same query shape the poller uses at
+        ``poller.py:149-158``)."""
+        rows = await session.execute(
+            select(GlobalPathMapping)
+            .where(GlobalPathMapping.enabled.is_(True))
+            .order_by(
+                GlobalPathMapping.priority.asc(),
+                GlobalPathMapping.created_at.asc(),
+            )
+        )
+        return [
+            PathMapping(
+                src_prefix=row.from_path,
+                dst_prefix=row.to_path,
+            )
+            for row in rows.scalars().all()
+        ]
 
     async def handle_reconnect(self) -> None:
         """Called when the SSE transport reconnected.
@@ -263,6 +336,14 @@ class SessionStateManager:
                 "target_codec",
                 "target_bitrate_kbps",
                 "duration_ms",
+                # v1.9 OP-10 — media_file_id and rating_key
+                # follow the same "only overwrite when non-None"
+                # discipline. Allowing media_file_id to update
+                # on existing rows means a path-mapping change
+                # mid-session retroactively heals the row the
+                # next time we see an event for it.
+                "media_file_id",
+                "rating_key",
             ):
                 if values.get(field) is not None:
                     setattr(row, field, values[field])

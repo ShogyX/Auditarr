@@ -21,9 +21,9 @@ A rule has three top-level keys:
 
 ```json
 {
-  "name": "Human-readable rule name",
-  "match": { /* condition tree, see below */ },
-  "actions": [ /* one or more actions, see below */ ]
+ "name": "Human-readable rule name",
+ "match": { /* condition tree, see below */ },
+ "actions": [ /* one or more actions, see below */ ]
 }
 ```
 
@@ -58,28 +58,28 @@ Available **ops**:
 
 - `eq`, `ne` — equal / not equal. Works for every field.
 - `lt`, `lte`, `gt`, `gte` — numeric comparisons. For
-  numeric fields only.
+ numeric fields only.
 - `in`, `not_in` — value is in / not in a provided array.
-  For scalar fields; the `value` is an array.
+ For scalar fields; the `value` is an array.
 - `contains`, `not_contains` — substring / array-contains.
-  For string and string-array fields.
+ For string and string-array fields.
 - `matches`, `not_matches` — regex match. For string fields;
-  the `value` is a regex pattern.
+ the `value` is a regex pattern.
 
 Combinators — wrap children in `all` (AND) or `any` (OR),
 nestable to any depth:
 
 ```json
 {
-  "all": [
-    { "field": "video_codec", "op": "eq", "value": "hevc" },
-    {
-      "any": [
-        { "field": "width", "op": "gte", "value": 3840 },
-        { "field": "bitrate_kbps", "op": "gte", "value": 25000 }
-      ]
-    }
-  ]
+ "all": [
+ { "field": "video_codec", "op": "eq", "value": "hevc" },
+ {
+ "any": [
+ { "field": "width", "op": "gte", "value": 3840 },
+ { "field": "bitrate_kbps", "op": "gte", "value": 25000 }
+ ]
+ }
+ ]
 }
 ```
 
@@ -89,27 +89,27 @@ Each action is `{ "type": "...", ...params }`. Available
 action types:
 
 - `{ "type": "set_severity", "severity": "ok|info|warn|high|error|crit" }` —
-  classify the file's severity.
+ classify the file's severity.
 - `{ "type": "tag", "tag": "string" }` — apply an
-  Auditarr-side tag to the file.
+ Auditarr-side tag to the file.
 - `{ "type": "untag", "tag": "string" }` — remove a tag.
 - `{ "type": "delete", "acknowledged_destructive": true }` —
-  mark the file for deletion on disk. **Requires the
-  `acknowledged_destructive: true` flag** or the engine
-  refuses the rule (Stage 06 safeguard).
+ mark the file for deletion on disk. **Requires the
+ `acknowledged_destructive: true` flag** or the engine
+ refuses the rule .
 - `{ "type": "notify", "channel_id": "string" }` — send a
-  notification through a configured channel.
+ notification through a configured channel.
 
 ### Optional metadata
 
 ```json
 {
-  "name": "HEVC 4K — flag for review",
-  "description": "Optional human description.",
-  "enabled": true,
-  "priority": 100,
-  "match": { ... },
-  "actions": [ ... ]
+ "name": "HEVC 4K — flag for review",
+ "description": "Optional human description.",
+ "enabled": true,
+ "priority": 100,
+ "match": { ... },
+ "actions": [ ... ]
 }
 ```
 
@@ -120,21 +120,21 @@ multiple rules match. Lower = earlier.
 
 ```json
 {
-  "name": "Lossless audio that won't direct-play",
-  "description": "TrueHD and DTS-HD MA tracks that transcode on most Plex clients.",
-  "enabled": true,
-  "priority": 50,
-  "match": {
-    "any": [
-      { "field": "audio_codec", "op": "eq", "value": "truehd" },
-      { "field": "audio_codec", "op": "eq", "value": "dts-hd ma" },
-      { "field": "audio_codec", "op": "matches", "value": "^dts-x$" }
-    ]
-  },
-  "actions": [
-    { "type": "set_severity", "severity": "warn" },
-    { "type": "tag", "tag": "plex:audio-transcode-likely" }
-  ]
+ "name": "Lossless audio that won't direct-play",
+ "description": "TrueHD and DTS-HD MA tracks that transcode on most Plex clients.",
+ "enabled": true,
+ "priority": 50,
+ "match": {
+ "any": [
+ { "field": "audio_codec", "op": "eq", "value": "truehd" },
+ { "field": "audio_codec", "op": "eq", "value": "dts-hd ma" },
+ { "field": "audio_codec", "op": "matches", "value": "^dts-x$" }
+ ]
+ },
+ "actions": [
+ { "type": "set_severity", "severity": "warn" },
+ { "type": "tag", "tag": "plex:audio-transcode-likely" }
+ ]
 }
 ```
 
@@ -172,9 +172,9 @@ the **mass-import** flow described below.
 >
 > ```json
 > {
->   "name": "...",
->   "match": { ... },
->   "actions": [ ... ]
+> "name": "...",
+> "match": { ... },
+> "actions": [ ... ]
 > }
 > ```
 >
@@ -193,30 +193,30 @@ of rule documents:
 
 ```json
 [
-  {
-    "name": "Rule one",
-    "match": { ... },
-    "actions": [ ... ]
-  },
-  {
-    "name": "Rule two",
-    "match": { ... },
-    "actions": [ ... ]
-  }
+ {
+ "name": "Rule one",
+ "match": { ... },
+ "actions": [ ... ]
+ },
+ {
+ "name": "Rule two",
+ "match": { ... },
+ "actions": [ ... ]
+ }
 ]
 ```
 
 The importer:
 
 - Validates each rule against the schema. If one rule is
-  malformed, the whole import is rejected and an error
-  describes which rule failed and why.
+ malformed, the whole import is rejected and an error
+ describes which rule failed and why.
 - Resolves name collisions according to the `On conflict`
-  picker in the dialog: **rename** (the imported rule gets
-  a suffix), **replace** (the existing rule is overwritten),
-  or **skip** (the imported rule is ignored).
+ picker in the dialog: **rename** (the imported rule gets
+ a suffix), **replace** (the existing rule is overwritten),
+ or **skip** (the imported rule is ignored).
 - Returns a summary: how many rules were created, how many
-  were renamed/replaced/skipped.
+ were renamed/replaced/skipped.
 
 The `acknowledged_destructive: true` flag is enforced on
 import — a bundle containing a `delete` action without that
@@ -235,7 +235,7 @@ than you intended.
 
 - [rules/reference](reference) — the formal rule reference.
 - [rules/conditions](conditions) — the conditions vocabulary
-  in depth.
+ in depth.
 - [rules/actions](actions) — the actions vocabulary in depth.
 - [rules/severity](severity) — the severity values and what
-  each one means.
+ each one means.

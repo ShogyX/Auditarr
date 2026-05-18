@@ -28,6 +28,11 @@ export const CORE_NAV: readonly CoreNavItem[] = [
   { key: "integrations", label: "Integrations", icon: "integrations", path: "/integrations" },
   { key: "notifications", label: "Notifications", icon: "notifications", path: "/notifications" },
   { key: "plugins", label: "Plugins", icon: "folder", path: "/plugins" },
+  // v1.9 audit fix (OP-12): expose the Logs page so admins can
+  // find it. Stage 8.1 added the page but no nav entry surfaced
+  // it. Admin-only at the API layer; non-admins still see the
+  // entry but the page itself renders a 403 message.
+  { key: "logs", label: "Logs", icon: "server", path: "/system/logs" },
   { key: "settings", label: "Settings", icon: "settings", path: "/settings" },
   // Stage 12 audit fix (Issue 17): label was "Help & updates"
   // — updates have moved to the new Changelog entry below, so

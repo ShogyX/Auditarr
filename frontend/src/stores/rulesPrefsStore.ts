@@ -36,18 +36,25 @@ export const RULES_COLUMNS = [
 
 export type RulesColumnKey = (typeof RULES_COLUMNS)[number]["key"];
 
-/** Default column widths (px). Tuned for a 1440px viewport with
- *  the Name column getting the lion's share since it carries the
- *  rule's title + description. */
+/** Default column widths (px). v1.9 Stage 9.5.1 (OP-1): retuned
+ *  to fill a 1920px-class viewport rather than leaving ~800px of
+ *  empty space on the right of the table. The previous values
+ *  summed to ~1110px; the new values sum to ~1620px, giving the
+ *  Name column (which carries the rule title + description) and
+ *  Actions column (which lists each action's badge) enough room
+ *  to render without truncation on common rule shapes.
+ *
+ *  Operators with persisted widths keep them — the store only
+ *  consults defaults for keys without a persisted value. */
 const DEFAULT_COLUMN_WIDTHS: Record<RulesColumnKey, number> = {
-  state: 70,
-  name: 360,
-  severity: 110,
-  actions: 180,
-  priority: 90,
-  matches: 90,
-  last_eval: 110,
-  row_actions: 100,
+  state: 80,
+  name: 560,
+  severity: 130,
+  actions: 280,
+  priority: 100,
+  matches: 100,
+  last_eval: 140,
+  row_actions: 120,
 };
 
 export const RULES_COLUMN_MIN_WIDTH = 48;

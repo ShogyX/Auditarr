@@ -6,8 +6,9 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.auth_deps import AdminUser, CurrentUser
-from app.api.dependencies import EventBusDep, RegistryDep, SessionDep
+from app.api.dependencies import EventBusDep, RegistryDep, SessionDep, SettingsDep
 from app.core.exceptions import NotFoundError, ValidationError
+from app.models.media import MediaFile
 from app.schemas.media import (
     MatchedRuleSummary as SchemaMatchedRuleSummary,
     MediaFileDetail,
@@ -17,6 +18,7 @@ from app.schemas.media import (
 )
 from app.schemas.rules import RuleEvaluationRead
 from app.services.media import Scanner, get_ffprobe_service
+from app.services.media_delete_service import MediaDeleteService
 from app.services.repositories import (
     MediaFilter,
     MediaRepository,
@@ -311,6 +313,216 @@ async def get_media_vocabulary(
     return payload
 
 
+# ── v1.9 Stage 3.1 — Distinct values for per-column filters ───
+
+
+# Whitelist of columns the operator can ask for distinct values
+# of. Anything outside this list is rejected as a 422. Two reasons
+# we whitelist rather than allow any column:
+#
+#   * Free-form column names would let a caller probe internal
+#     columns (``hash_sha256``, ``probe`` JSON blob) that aren't
+#     meant to surface in a filter popover.
+#   * Several columns store JSON lists (``subtitle_languages``,
+#     ``audio_languages``) and need a different aggregation path
+#     than scalar columns; routing inside this set makes that
+#     explicit rather than a runtime branch on type.
+#
+# The frontend ColumnFilterPopover passes the column key from the
+# table header; both sides MUST agree on the set.
+_DISTINCT_SCALAR_FIELDS: dict[str, object] = {
+    "severity": MediaFile.severity,
+    "category": MediaFile.category,
+    "extension": MediaFile.extension,
+    "video_codec": MediaFile.video_codec,
+    "audio_codec": MediaFile.audio_codec,
+    "subtitle_codec": MediaFile.subtitle_codec,
+    "container": MediaFile.container,
+    "library_id": MediaFile.library_id,
+    "width": MediaFile.width,
+    "height": MediaFile.height,
+    # ``framerate`` is a float; aggregating distinct floats is
+    # noisy. The popover's UX (a single "30 / 60 / 23.976 / …"
+    # picklist) still benefits from grouping, so we expose it
+    # here. Buckets are the consumer's responsibility.
+    "framerate": MediaFile.framerate,
+}
+
+_DISTINCT_JSON_LIST_FIELDS: dict[str, object] = {
+    # JSON-list columns — aggregated in Python like the
+    # composition service does for language counts.
+    "subtitle_languages": MediaFile.subtitle_languages,
+    "audio_languages": MediaFile.audio_languages,
+}
+
+DISTINCT_FIELDS: frozenset[str] = frozenset(
+    {*_DISTINCT_SCALAR_FIELDS.keys(), *_DISTINCT_JSON_LIST_FIELDS.keys()}
+)
+
+
+class DistinctValueRead(BaseModel):
+    """One row in the distinct-values list."""
+
+    value: str | None
+    """``None`` represents the NULL bucket (files with no value
+    in this column). The UI renders NULL as "(none)"."""
+
+    count: int
+
+
+class DistinctValuesResponse(BaseModel):
+    field: str
+    values: list[DistinctValueRead]
+    """At most 200 rows, sorted by descending count then ascending
+    value. The cap keeps the popover responsive; if the operator
+    needs to find a value not in the top 200, the ``prefix`` query
+    param narrows the result set first."""
+
+    truncated: bool
+    """True if there were more distinct values than the 200-row
+    cap. The UI can surface a "more results — narrow your search"
+    hint."""
+
+
+@router.get(
+    "/distinct",
+    response_model=DistinctValuesResponse,
+    summary="Distinct values + counts for a column (filter popover)",
+)
+async def media_distinct(
+    field: str,
+    _user: CurrentUser,
+    session: SessionDep,
+    library_id: str | None = Query(default=None),
+    prefix: str | None = Query(default=None, max_length=128),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> DistinctValuesResponse:
+    """Return the top distinct values for a column, with counts.
+
+    Used by the v1.9 Stage 3.1 ColumnFilterPopover on every
+    filterable column header. The popover queries here on open
+    and on each search-input keystroke (debounced), so the
+    response shape is intentionally compact:
+
+      * ``values`` is up to ``limit`` rows (default 200, capped 500).
+      * Each row is just ``{value, count}``. The popover renders
+        the value as the checkbox label and the count as a
+        muted-text suffix.
+      * NULL values surface as ``value=None`` — the popover
+        renders them as "(none)" so the operator can filter on
+        "files with no codec".
+      * ``library_id`` scopes the aggregation; ``prefix`` is a
+        case-insensitive prefix match on the column value.
+
+    ``field`` must be in ``DISTINCT_FIELDS`` (the whitelist
+    documented inline above). Anything else returns 422.
+    """
+    if field not in DISTINCT_FIELDS:
+        raise ValidationError(
+            f"field {field!r} not in distinct whitelist: "
+            f"{sorted(DISTINCT_FIELDS)}"
+        )
+
+    if field in _DISTINCT_SCALAR_FIELDS:
+        column = _DISTINCT_SCALAR_FIELDS[field]
+        rows, truncated = await _distinct_scalar(
+            session, column, library_id=library_id, prefix=prefix, limit=limit
+        )
+    else:
+        column = _DISTINCT_JSON_LIST_FIELDS[field]
+        rows, truncated = await _distinct_json_list(
+            session, column, library_id=library_id, prefix=prefix, limit=limit
+        )
+
+    return DistinctValuesResponse(
+        field=field,
+        values=[
+            DistinctValueRead(value=v, count=c) for v, c in rows
+        ],
+        truncated=truncated,
+    )
+
+
+async def _distinct_scalar(
+    session,
+    column,
+    *,
+    library_id: str | None,
+    prefix: str | None,
+    limit: int,
+) -> tuple[list[tuple[str | None, int]], bool]:
+    """Scalar-column distinct: GROUP BY column, ORDER BY count desc."""
+    from sqlalchemy import func, select
+
+    stmt = (
+        select(column, func.count(MediaFile.id))
+        .where(MediaFile.category == "media")
+        .group_by(column)
+    )
+    if library_id is not None:
+        stmt = stmt.where(MediaFile.library_id == library_id)
+    if prefix and prefix.strip():
+        # Case-insensitive prefix match. Using ``lower(col)``
+        # rather than ILIKE keeps the query portable across
+        # sqlite + postgres.
+        p = prefix.strip().lower()
+        stmt = stmt.where(func.lower(column).like(f"{p}%"))
+    # Ask for one extra row so we know whether to set ``truncated``.
+    stmt = stmt.order_by(func.count(MediaFile.id).desc()).limit(limit + 1)
+    rows = (await session.execute(stmt)).all()
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    out: list[tuple[str | None, int]] = []
+    for value, count in rows:
+        if value is None:
+            out.append((None, int(count)))
+        else:
+            out.append((str(value), int(count)))
+    return out, truncated
+
+
+async def _distinct_json_list(
+    session,
+    column,
+    *,
+    library_id: str | None,
+    prefix: str | None,
+    limit: int,
+) -> tuple[list[tuple[str | None, int]], bool]:
+    """JSON-list distinct: fetch raw lists, aggregate in Python.
+
+    See the composition service's ``_language_counts`` for the
+    same pattern. The cardinality is bounded by per-file list
+    length (3-5 entries typical) so the streaming cost is fine.
+    """
+    from sqlalchemy import select
+
+    stmt = select(column).where(
+        MediaFile.category == "media", column.isnot(None)
+    )
+    if library_id is not None:
+        stmt = stmt.where(MediaFile.library_id == library_id)
+    rows = (await session.execute(stmt)).all()
+    counts: dict[str, int] = {}
+    p = (prefix.strip().lower() if prefix and prefix.strip() else None)
+    for (values,) in rows:
+        if not values:
+            continue
+        for v in values:
+            if not isinstance(v, str) or not v:
+                continue
+            key = v.strip().lower()
+            if not key:
+                continue
+            if p is not None and not key.startswith(p):
+                continue
+            counts[key] = counts.get(key, 0) + 1
+    # Sort by count desc, then value asc for stable ordering.
+    sorted_items = sorted(
+        counts.items(), key=lambda kv: (-kv[1], kv[0])
+    )
+    truncated = len(sorted_items) > limit
+    return [(k, v) for k, v in sorted_items[:limit]], truncated
 @router.get("/{media_id}", response_model=MediaFileDetail, summary="Media file detail")
 async def get_media(
     media_id: str,
@@ -649,3 +861,140 @@ async def reprobe_media(
 # (v1.7) removed both alongside the rest of the quarantine
 # workflow (Section A.0 — "delete means delete"). The drawer's
 # quarantine button is gone in the frontend portion of this stage.
+
+
+# ── v1.9 Stage 2.4 — Operator-initiated delete ─────────────────
+
+
+class DeleteOneRequest(BaseModel):
+    """Body for ``DELETE /media/{media_id}``.
+
+    ``remove_from_disk`` defaults to False — index-only delete is
+    the safe default; the file on disk is untouched and the next
+    scan will re-index it. Set to True to also move the file to
+    the trash dir.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    remove_from_disk: bool = False
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class BulkDeleteRequest(BaseModel):
+    """Body for ``POST /media/bulk-delete``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: list[str] = Field(min_length=1, max_length=500)
+    remove_from_disk: bool = False
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class DeleteResultRead(BaseModel):
+    """One file's outcome from a delete call."""
+
+    media_id: str
+    path: str
+    removed_from_disk: bool
+    trash_path: str | None
+
+
+class BulkDeleteResponse(BaseModel):
+    deleted: list[DeleteResultRead]
+    requested: int
+    not_found: list[str]
+
+
+@router.delete(
+    "/{media_id}",
+    response_model=DeleteResultRead,
+    summary="Delete a single media file (admin)",
+)
+async def delete_media(
+    media_id: str,
+    body: DeleteOneRequest,
+    user: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
+    bus: EventBusDep,
+) -> DeleteResultRead:
+    """Delete one media file's index row, optionally also moving the
+    on-disk file to ``data_dir/trash/<yyyy-mm-dd>/<uuid>/...``.
+
+    The audit log captures who triggered the delete, when, the
+    original path, and the trash path (if any). 404 if the row
+    doesn't exist.
+    """
+    service = MediaDeleteService(
+        session=session, settings=settings, event_bus=bus
+    )
+    try:
+        result = await service.delete_one(
+            media_id,
+            actor_id=user.id,
+            remove_from_disk=body.remove_from_disk,
+            reason=body.reason,
+        )
+    except LookupError as exc:
+        raise NotFoundError(f"Media file {media_id!r} not found") from exc
+    await session.commit()
+    return DeleteResultRead(
+        media_id=result.media_id,
+        path=result.path,
+        removed_from_disk=result.removed_from_disk,
+        trash_path=result.trash_path,
+    )
+
+
+@router.post(
+    "/bulk-delete",
+    response_model=BulkDeleteResponse,
+    summary="Delete multiple media files in one call (admin)",
+)
+async def bulk_delete_media(
+    body: BulkDeleteRequest,
+    user: AdminUser,
+    session: SessionDep,
+    settings: SettingsDep,
+    bus: EventBusDep,
+) -> BulkDeleteResponse:
+    """Bulk variant of ``DELETE /media/{id}``.
+
+    All files in a single bulk call share one trash bucket when
+    ``remove_from_disk=true``, so the operator can recover the
+    whole batch by moving one directory. Unknown ids are silently
+    skipped and reported in ``not_found``; the call doesn't fail
+    just because the operator selected a stale row that another
+    process already cleaned up.
+    """
+    if len(set(body.ids)) != len(body.ids):
+        # Duplicates in the list almost always indicate a client
+        # bug aggregating the selection; surface it loudly.
+        raise ValidationError("ids must not contain duplicates")
+
+    service = MediaDeleteService(
+        session=session, settings=settings, event_bus=bus
+    )
+    results = await service.bulk_delete(
+        body.ids,
+        actor_id=user.id,
+        remove_from_disk=body.remove_from_disk,
+        reason=body.reason,
+    )
+    await session.commit()
+    deleted_ids = {r.media_id for r in results}
+    not_found = [mid for mid in body.ids if mid not in deleted_ids]
+    return BulkDeleteResponse(
+        deleted=[
+            DeleteResultRead(
+                media_id=r.media_id,
+                path=r.path,
+                removed_from_disk=r.removed_from_disk,
+                trash_path=r.trash_path,
+            )
+            for r in results
+        ],
+        requested=len(body.ids),
+        not_found=not_found,
+    )

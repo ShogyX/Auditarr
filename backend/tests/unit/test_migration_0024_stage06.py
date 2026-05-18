@@ -84,7 +84,13 @@ def test_full_chain_reaches_head_without_errors(fresh_db: Path) -> None:
     # adding the must_change_password + must_change_on_use flags.
     # Stage 17 (v1.8.0) bumps to 0027_stage17_playback_sessions
     # for the SSE-driven session lifecycle table.
-    assert row[0] == "0027_stage17_playback_sessions"
+    # v1.9 Stage 4.4 bumps to 0028_stage4_4_rule_templates for
+    # the new rule_templates reference table.
+    # v1.9 Stage 9.1 bumps to 0029_stage9_1_playback_devices for
+    # the device index table.
+    # v1.9 OP-10 bumps to 0030_playback_session_rating_key for
+    # the reconciliation column + composite index.
+    assert row[0] == "0030_playback_session_rating_key"
 
 
 def test_vt_status_column_exists(fresh_db: Path) -> None:

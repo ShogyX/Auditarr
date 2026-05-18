@@ -61,6 +61,9 @@ import { useUiStore } from "@/stores/uiStore";
 import { PlaybackStatsCard } from "@/features/playback/PlaybackStatsCard";
 
 import { CategoriesCard } from "./CategoriesCard";
+import { DevicesCard } from "./DevicesCard";
+import { ForeignAudioCard } from "./ForeignAudioCard";
+import { IncompatibleMediaCard } from "./IncompatibleMediaCard";
 import {
   DashboardCardMenu,
   DashboardDisabledRail,
@@ -425,11 +428,24 @@ export function DashboardPage() {
         {/* ── Stage 26: library composition ── */}
         <CategoriesCard />
 
+        {/* ── v1.9 Stage 9.5.7 (OP-8 / OP-9) — language-pref +
+              rule-flagged incompatibility surfaces. Two narrow
+              tiles side-by-side on xl; stacked on smaller. Each
+              tile self-hides on empty state so a clean library
+              doesn't show empty rectangles. */}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <ForeignAudioCard />
+          <IncompatibleMediaCard />
+        </div>
+
         {/* ── Stage 09 (v1.7): live playback ── */}
         <LiveNowCard />
 
         {/* ── Stage 12 (audit follow-up): playback insights ── */}
         <PlaybackStatsCard />
+
+        {/* ── v1.9 Stage 9.1: device index ── */}
+        <DevicesCard />
 
         {/* ── Stage 16: rule suggestions ── */}
         <SuggestionsCard onReview={(s) => setReviewing(s)} />
@@ -449,6 +465,7 @@ export function DashboardPage() {
               : "xl:grid-cols-2",
           )}
         >
+          {!isDisabled("libraries") ? (
           <Card>
             <CardHead
               title="Libraries"
@@ -488,7 +505,9 @@ export function DashboardPage() {
               </CardBodyFlush>
             ) : null}
           </Card>
+          ) : null}
 
+          {!isDisabled("integrations") ? (
           <Card>
             <CardHead
               title="Integrations"
@@ -551,9 +570,11 @@ export function DashboardPage() {
               </CardBodyFlush>
             ) : null}
           </Card>
+          ) : null}
         </div>
 
         {/* ── Top rules ── */}
+        {!isDisabled("top-rules") ? (
         <Card>
           <CardHead
             title="Top rules by match count"
@@ -603,6 +624,7 @@ export function DashboardPage() {
             </CardBodyFlush>
           ) : null}
         </Card>
+        ) : null}
 
         {/* ── Recent activity ──
             Stage 6 (audit follow-up): same dynamic-col logic as
@@ -615,19 +637,29 @@ export function DashboardPage() {
               : "xl:grid-cols-2",
           )}
         >
-          <RecentScansCard
-            data={recentScans.data}
-            isLoading={recentScans.isLoading}
-            hidden={isHidden("recent-scans")}
-            onToggle={() => toggleSection("recent-scans")}
-            onSelect={(id) => navigate(`/scans/${encodeURIComponent(id)}`)}
-          />
-          <RecentJobsCard
-            data={recentJobs.data}
-            isLoading={recentJobs.isLoading}
-            hidden={isHidden("recent-jobs")}
-            onToggle={() => toggleSection("recent-jobs")}
-          />
+          {/* v1.9 Stage 2.5 — uniform disable wiring. Pre-1.9 these
+              two cards lacked a DashboardCardMenu in their head so
+              the operator couldn't move them to the disabled rail;
+              every other card on the page already had one. Adding
+              the gate here AND the menu inside each card brings
+              them in line with the other six top-level cards. */}
+          {!isDisabled("recent-scans") ? (
+            <RecentScansCard
+              data={recentScans.data}
+              isLoading={recentScans.isLoading}
+              hidden={isHidden("recent-scans")}
+              onToggle={() => toggleSection("recent-scans")}
+              onSelect={(id) => navigate(`/scans/${encodeURIComponent(id)}`)}
+            />
+          ) : null}
+          {!isDisabled("recent-jobs") ? (
+            <RecentJobsCard
+              data={recentJobs.data}
+              isLoading={recentJobs.isLoading}
+              hidden={isHidden("recent-jobs")}
+              onToggle={() => toggleSection("recent-jobs")}
+            />
+          ) : null}
         </div>
       </div>
 
@@ -773,11 +805,17 @@ function RecentScansCard({
       <CardHead
         title="Recent scans"
         actions={
-          <CollapseChevron
-            hidden={hidden}
-            onClick={onToggle}
-            label="Recent scans"
-          />
+          <>
+            <CollapseChevron
+              hidden={hidden}
+              onClick={onToggle}
+              label="Recent scans"
+            />
+            {/* v1.9 Stage 2.5 — surface the disable affordance on
+                this card so it matches every other top-level
+                dashboard card. */}
+            <DashboardCardMenu cardKey="recent-scans" />
+          </>
         }
       />
       {!hidden ? (
@@ -865,11 +903,15 @@ function RecentJobsCard({
       <CardHead
         title="Recent automation runs"
         actions={
-          <CollapseChevron
-            hidden={hidden}
-            onClick={onToggle}
-            label="Recent automation runs"
-          />
+          <>
+            <CollapseChevron
+              hidden={hidden}
+              onClick={onToggle}
+              label="Recent automation runs"
+            />
+            {/* v1.9 Stage 2.5 — disable affordance. */}
+            <DashboardCardMenu cardKey="recent-jobs" />
+          </>
         }
       />
       {!hidden ? (

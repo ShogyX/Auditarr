@@ -114,7 +114,11 @@ afterEach(() => {
 });
 
 describe("Stage 7 — SettingsPage restructure", () => {
-  it("renders all four top-level tabs", () => {
+  it("renders the three top-level tabs (v1.9 dropped the Integrations sub-tab)", () => {
+    // v1.9 Stage 2.1 — the "Integrations" tab on /settings was
+    // retired; its content (PathMappingsPanel) moved to
+    // /integrations. The Settings tabstrip is now three buttons:
+    // Workspace, System, Security.
     render(wrap(<SettingsPage />));
     const tablist = screen.getByRole("tablist", { name: /settings sections/i });
     expect(
@@ -124,11 +128,12 @@ describe("Stage 7 — SettingsPage restructure", () => {
       within(tablist).getByRole("tab", { name: /system/i }),
     ).toBeInTheDocument();
     expect(
-      within(tablist).getByRole("tab", { name: /integrations/i }),
-    ).toBeInTheDocument();
-    expect(
       within(tablist).getByRole("tab", { name: /security/i }),
     ).toBeInTheDocument();
+    // No Integrations tab inside the settings strip.
+    expect(
+      within(tablist).queryByRole("tab", { name: /integrations/i }),
+    ).toBeNull();
   });
 
   it("clicking System tab reveals the sub-tab strip", () => {
@@ -186,24 +191,15 @@ describe("Stage 7 — SettingsPage restructure", () => {
     ).toBe("false");
   });
 
-  it("Workspace tab includes a Path-mappings summary card that jumps to Integrations", () => {
+  it("Workspace tab includes a Path-mappings summary card that links to /integrations", () => {
+    // v1.9 Stage 2.1 — what used to be an in-page tab toggle is now
+    // a navigation link to /integrations (the PathMappingsPanel's
+    // new home).
     render(wrap(<SettingsPage />));
-    // Workspace is the default — assert the summary card visible.
-    const openButton = screen.getByRole("button", {
-      name: /jump to path mappings/i,
+    const link = screen.getByRole("link", {
+      name: /open path mappings on the integrations page/i,
     });
-    fireEvent.click(openButton);
-
-    // The button toggles the outer tab; the Integrations tab should
-    // now show aria-selected=true.
-    const outerList = screen.getByRole("tablist", {
-      name: /settings sections/i,
-    });
-    expect(
-      within(outerList)
-        .getByRole("tab", { name: /integrations/i })
-        .getAttribute("aria-selected"),
-    ).toBe("true");
+    expect(link.getAttribute("href")).toBe("/integrations");
   });
 
   it("Security tab renders the AccountSecurityCard with a link to /account", () => {

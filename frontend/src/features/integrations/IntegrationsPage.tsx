@@ -40,6 +40,11 @@ import { ConfiguredIntegrationsCard } from "./ConfiguredIntegrationsCard";
 import { ConnectorDirectoryCard } from "./ConnectorDirectoryCard";
 import { IntegrationConnectDialog } from "./IntegrationConnectDialog";
 import { VirusTotalCard } from "./VirusTotalCard";
+// v1.9 Stage 2.1 — path-mappings editor moved here from
+// Settings → Integrations. The Settings tab is gone; this is now
+// the canonical home for the surface (and the page is the natural
+// place: path mappings exist BECAUSE integrations exist).
+import { PathMappingsPanel } from "@/features/settings/PathMappingsPanel";
 
 export function IntegrationsPage() {
   useHelpKey("integrations.overview");
@@ -72,7 +77,22 @@ export function IntegrationsPage() {
         sub="Connect to Plex, Sonarr, Radarr, and other services"
         helpKey="integrations.overview"
       />
-      <div className="p-6 flex flex-col gap-6 max-w-4xl">
+      {/* v1.9 Stage 9.5.5 (OP-5) — drop the ``max-w-4xl`` cap
+          and rearrange into a 2-column grid on xl. The page
+          previously stacked four cards vertically in a 896px
+          column on wide screens, leaving ~half the viewport
+          unused.
+
+          Layout shape:
+            - ConnectorDirectoryCard spans both columns
+              (rendered as a horizontal grid of connector kinds,
+              wants full width)
+            - ConfiguredIntegrationsCard spans both columns
+              (table-like list of configured rows; rows would
+              truncate at half-width)
+            - VirusTotalCard + PathMappingsPanel sit side-by-
+              side on xl (they're roughly equal weight) */}
+      <div className="p-6 flex flex-col gap-6 max-w-4xl xl:max-w-none">
         <ConnectorDirectoryCard
           kinds={kinds.data ?? []}
           isLoading={kinds.isLoading}
@@ -96,8 +116,19 @@ export function IntegrationsPage() {
           }}
         />
 
-        {/* Stage 10 (v1.7) — VirusTotal quota + queue card. */}
-        <VirusTotalCard />
+        {/* VirusTotal and Path Mappings are independent panels;
+            on xl they sit side-by-side. */}
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          {/* Stage 10 (v1.7) — VirusTotal quota + queue card. */}
+          <VirusTotalCard />
+
+          {/* v1.9 Stage 2.1 — path-mappings editor. Moved from
+              Settings → Integrations sub-tab; this is now its only
+              home. The panel surfaces every integration's
+              ``config.path_mappings`` and the global mapping layer
+              in one editor. */}
+          <PathMappingsPanel />
+        </div>
       </div>
 
       {connectingKind ? (

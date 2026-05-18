@@ -29,6 +29,7 @@ import {
 import {
   useCreateRule,
   useDuplicateRule,
+  useEvaluateRule,
   useRuleVocabulary,
   useUpdateRule,
   type Rule,
@@ -75,6 +76,16 @@ export interface UseRuleEditorState {
   error: string | null;
   formRef: RefObject<HTMLFormElement>;
   onSubmit: (e: FormEvent) => Promise<void>;
+  // v1.9 OP-15 — companion save+evaluate flow. Saves the rule
+  // (same as onSubmit) then fires it against existing media via
+  // POST /rules/{id}/evaluate-now. UI surfaces both buttons so
+  // the operator picks "Save" for a config change or "Save &
+  // Evaluate" for a rule whose effect should be visible
+  // immediately (the typical case for vt_lookup / search_upstream
+  // actions targeting existing files).
+  onSaveAndEvaluate: () => Promise<void>;
+  isEvaluating: boolean;
+  evaluateResult: { files_evaluated: number } | null;
   onDuplicate: () => Promise<void>;
   title: string;
 }
@@ -88,6 +99,7 @@ export function useRuleEditorState({
 }): UseRuleEditorState {
   const create = useCreateRule();
   const update = useUpdateRule();
+  const evaluate = useEvaluateRule();
   const duplicateMutation = useDuplicateRule();
   const vocabulary = useRuleVocabulary();
   const isBuiltin = !!rule?.is_builtin;
@@ -109,6 +121,12 @@ export function useRuleEditorState({
   );
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<EditorTab>("visual");
+  // v1.9 OP-15 — most recent result from saveAndEvaluate's
+  // evaluate leg. Surfaces the file count back in the editor UI
+  // (toast carries the same info but disappears).
+  const [evaluateResult, setEvaluateResult] = useState<
+    { files_evaluated: number } | null
+  >(null);
   // Stage 30: the Save button lives in the PageHeader actions
   // (outside the form's DOM subtree), so a ref to the form gives
   // the header button a direct handle to .requestSubmit() it.
@@ -209,7 +227,88 @@ export function useRuleEditorState({
     }
   }
 
+  // v1.9 OP-15 — Save + immediate evaluate-against-existing-files
+  // flow. Saves the rule (create OR update path) and, on
+  // success, fires POST /rules/{id}/evaluate-now. The most
+  // valuable case is a rule with vt_lookup / search_upstream
+  // actions whose effect operators expect to see against the
+  // existing library, not just files scanned after the rule was
+  // saved.
+  //
+  // Failures: a save failure stops the flow (no evaluate); an
+  // evaluate failure surfaces as an error toast but the save is
+  // preserved. We deliberately do NOT call onDone() until both
+  // legs complete — operators expect to stay on the editor while
+  // the evaluate is running so they can see the result.
+  async function onSaveAndEvaluate() {
+    setError(null);
+    if (!parsedDefinition.ok) {
+      setError(`Invalid JSON: ${parsedDefinition.error}`);
+      return;
+    }
+    if (!enabled) {
+      // Evaluating a disabled rule is a 422 from the backend.
+      // Catch it client-side with a clearer message.
+      setError(
+        "Enable the rule before clicking 'Save & Evaluate' — a disabled rule won't fire.",
+      );
+      return;
+    }
+    const finalDef = parsedDefinition.value ?? definition;
+    let savedRuleId: string | null = null;
+    try {
+      if (rule) {
+        await update.mutateAsync({
+          id: rule.id,
+          patch: {
+            name,
+            description: description || undefined,
+            priority,
+            enabled,
+            definition: finalDef,
+          },
+        });
+        savedRuleId = rule.id;
+        toast(`Saved ${name}`, "ok");
+      } else {
+        const created = await create.mutateAsync({
+          name,
+          description: description || undefined,
+          priority,
+          enabled,
+          definition: finalDef,
+        });
+        savedRuleId = created.id;
+        toast(`Created ${name}`, "ok");
+      }
+    } catch (err) {
+      setError((err as Error).message);
+      return;
+    }
+    if (savedRuleId === null) return;
+    try {
+      const result = await evaluate.mutateAsync(savedRuleId);
+      setEvaluateResult({ files_evaluated: result.files_evaluated });
+      toast(
+        `Evaluated ${result.files_evaluated} file${
+          result.files_evaluated === 1 ? "" : "s"
+        }`,
+        "ok",
+      );
+      onDone();
+    } catch (err) {
+      toast(
+        `Saved, but evaluation failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        "error",
+        5000,
+      );
+    }
+  }
+
   const isPending = create.isPending || update.isPending;
+  const isEvaluating = evaluate.isPending;
   const title = rule ? `Edit rule · ${rule.name}` : "New rule";
 
   return {
@@ -236,6 +335,9 @@ export function useRuleEditorState({
     error,
     formRef,
     onSubmit,
+    onSaveAndEvaluate,
+    isEvaluating,
+    evaluateResult,
     onDuplicate,
     title,
   };

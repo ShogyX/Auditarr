@@ -13,6 +13,7 @@ import datetime as _dt
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -109,17 +110,35 @@ class Scanner:
         # per file. ``vt_enabled`` is True iff at least one
         # integration row with ``kind="virustotal"`` and
         # ``enabled=True`` exists.
+        #
+        # v1.9 Stage 4.6 — also fetch the integration's options
+        # dict so we can apply the scan-scope filter
+        # (vt_scan_extensions / categories / required_tags) before
+        # enqueuing. Cheap: same query, one extra column.
         from sqlalchemy import select as _select
 
         from app.models.integration import Integration as _Integration
 
         _vt_check = await self._session.execute(
-            _select(_Integration.id)
+            _select(_Integration.id, _Integration.config)
             .where(_Integration.kind == "virustotal")
             .where(_Integration.enabled.is_(True))
             .limit(1)
         )
-        vt_enabled = _vt_check.scalar_one_or_none() is not None
+        _vt_row = _vt_check.first()
+        vt_enabled = _vt_row is not None
+        # ``config`` is the JSONB blob keyed under
+        # ``options`` / ``secrets``. The scope filter lives under
+        # options. NoneType-safe so a config from a pre-1.9
+        # install (missing the keys entirely) doesn't trip the
+        # filter.
+        vt_options: dict[str, Any] | None = None
+        if _vt_row is not None:
+            _vt_config = _vt_row[1] or {}
+            if isinstance(_vt_config, dict):
+                _opts = _vt_config.get("options")
+                if isinstance(_opts, dict):
+                    vt_options = _opts
         # Counter so the scan report can surface "N files
         # enqueued for VT lookup" in a future stage. Tracked
         # locally; not persisted on the ScanRun row to avoid
@@ -128,12 +147,27 @@ class Scanner:
 
         # Stage 8 (audit follow-up): emit a progress event every
         # PROGRESS_EVERY files so the UI gets a real progress bar
-        # rather than just start/complete. 100 is small enough that
-        # a 50k-file library still emits ~500 events (cheap on the
-        # WS side; tens of bytes each) but large enough that we
-        # don't flood. The first emit happens AFTER ``_enumerate``
-        # so the UI has both a numerator and a denominator.
-        PROGRESS_EVERY = 100
+        # rather than just start/complete. v1.9 Stage 1 tuned this
+        # down from 100 to 25 because operators on large libraries
+        # reported the bar feeling stuck for tens of seconds at a
+        # time; at 25 a 50k-file library emits ~2000 events
+        # (still cheap on the WS side; tens of bytes each) and the
+        # bar visibly moves between every modulo boundary. The first
+        # emit happens AFTER ``_enumerate`` so the UI has both a
+        # numerator and a denominator.
+        PROGRESS_EVERY = 25
+        # v1.9 Stage 1.1 — emit a heartbeat progress event every
+        # HEARTBEAT_SECONDS even when ``seen`` hasn't crossed a
+        # modulo boundary. This handles the case where a single
+        # very-slow ffprobe (mounted-NFS share, oversized file)
+        # stalls the loop for longer than the WS keepalive window
+        # — without a heartbeat the UI's progress bar appears
+        # frozen, indistinguishable from a worker crash. 5 s is
+        # short enough to feel alive, long enough not to spam.
+        HEARTBEAT_SECONDS = 5.0
+        import time as _time
+
+        _last_progress_emit = _time.monotonic()
         # Stage 9 (audit follow-up): load per-extension dispositions
         # once at scan-start. Operators rarely have more than a few
         # dozen rules, so the map is tiny; the dict lookup per file
@@ -253,6 +287,15 @@ class Scanner:
                 # by the (future) drain worker; this layer just
                 # makes the work visible to the operator via the
                 # status endpoint's ``queue_size`` field.
+                #
+                # v1.9 Stage 4.6 — apply the scan-scope filter
+                # (vt_scan_extensions / categories /
+                # required_tags) from the VT integration config.
+                # Extension + category are both on ``saved``
+                # already (no extra query). ``required_tags`` IS
+                # a per-file SELECT against ``media_tags``; we
+                # only pay that cost when the operator explicitly
+                # configured required tags (default empty list).
                 if (
                     vt_enabled
                     and saved.hash_sha256 is not None
@@ -260,13 +303,32 @@ class Scanner:
                 ):
                     from plugins.virustotal.backend import (
                         enqueue_for_vt_lookup,
+                        file_passes_vt_scan_scope,
                     )
 
-                    inserted = await enqueue_for_vt_lookup(
-                        self._session, media_file_id=saved.id
-                    )
-                    if inserted:
-                        vt_enqueued += 1
+                    # Tag fetch only when required.
+                    file_tags: list[str] = []
+                    if vt_options and vt_options.get("vt_scan_required_tags"):
+                        from app.models.tag import MediaTag
+
+                        tag_rows = await self._session.execute(
+                            _select(MediaTag.tag).where(
+                                MediaTag.media_file_id == saved.id
+                            )
+                        )
+                        file_tags = [r[0] for r in tag_rows.all()]
+
+                    if file_passes_vt_scan_scope(
+                        extension=saved.extension,
+                        category=saved.category,
+                        tags=file_tags,
+                        vt_options=vt_options,
+                    ):
+                        inserted = await enqueue_for_vt_lookup(
+                            self._session, media_file_id=saved.id
+                        )
+                        if inserted:
+                            vt_enqueued += 1
 
                 # Stage 8 (audit follow-up): periodic progress emit.
                 # Every PROGRESS_EVERY files we ship a snapshot so the
@@ -274,7 +336,18 @@ class Scanner:
                 # boundary AND on the final iteration via the
                 # post-loop emit below — the latter covers libraries
                 # whose total isn't a multiple of PROGRESS_EVERY.
-                if seen % PROGRESS_EVERY == 0:
+                # v1.9 Stage 1.1 — also emit a heartbeat every
+                # HEARTBEAT_SECONDS even if ``seen`` hasn't crossed a
+                # modulo boundary, so a single very-slow probe doesn't
+                # make the bar look frozen. ``_now`` is computed once
+                # so both branches see the same instant; the heartbeat
+                # branch resets ``_last_progress_emit`` so the next
+                # tick measures from when this one fired.
+                _now = _time.monotonic()
+                if (
+                    seen % PROGRESS_EVERY == 0
+                    or (_now - _last_progress_emit) >= HEARTBEAT_SECONDS
+                ):
                     await self._bus.emit(
                         "scan.progress",
                         {
@@ -285,6 +358,7 @@ class Scanner:
                         },
                         source="scanner",
                     )
+                    _last_progress_emit = _now
 
             # Stage 8: final progress event so the bar lands at 100%
             # even when the total isn't a multiple of PROGRESS_EVERY.

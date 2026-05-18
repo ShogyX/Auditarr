@@ -211,3 +211,34 @@ PATH_MAPPINGS_SCHEMA_FRAGMENT: dict[str, object] = {
         },
     },
 }
+
+
+# v1.9 Stage 7.2 — shared tag allowlist / denylist schema for
+# Sonarr/Radarr/Bazarr. Comparison in the filter is
+# case-insensitive (operators don't think in case), so the
+# stored canonical form is whatever the operator typed —
+# downstream code lowercases at compare time.
+TAG_ALLOWLIST_SCHEMA_FRAGMENT: dict[str, object] = {
+    "type": "array",
+    "title": "Tag allowlist",
+    "description": (
+        "If set, only these tags from the upstream are imported. "
+        "Empty list = no allowlist (all tags accepted). Matching "
+        "is case-insensitive."
+    ),
+    "default": [],
+    "items": {"type": "string"},
+}
+
+TAG_DENYLIST_SCHEMA_FRAGMENT: dict[str, object] = {
+    "type": "array",
+    "title": "Tag denylist",
+    "description": (
+        "Tags listed here are NEVER imported, even if they pass "
+        "the allowlist. Useful for excluding noise tags (e.g. "
+        "Sonarr's 'monitored' / 'unmonitored' housekeeping "
+        "labels). Matching is case-insensitive."
+    ),
+    "default": [],
+    "items": {"type": "string"},
+}

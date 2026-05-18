@@ -447,3 +447,76 @@ async def list_live_playbacks(
         unresolved=len(out) - resolved,
         polled_at=utcnow(),
     )
+
+
+# ── v1.9 Stage 9.1 — Device index ──────────────────────────────
+
+
+@router.get(
+    "/devices",
+    summary="List observed playback devices ranked by play count",
+)
+async def list_devices(
+    _user: CurrentUser,
+    session: SessionDep,
+    limit: int = 50,
+) -> dict[str, object]:
+    """Return the device index. Default 50 rows; sorted by total
+    ``playback_count`` desc so the dashboard's "Devices observed"
+    card surfaces the most active devices first.
+
+    Returns ``{devices: [...], total: N}`` so the dashboard
+    knows when more rows exist than the limit shows.
+
+    Each device row carries the decision-split counters so the
+    dashboard can render a transcode-ratio bar without
+    additional queries:
+
+        transcode_count / playback_count = ratio
+    """
+    from sqlalchemy import func, select
+
+    from app.models.playback_device import PlaybackDevice
+
+    capped = max(1, min(int(limit), 500))
+    total = (
+        await session.execute(
+            select(func.count()).select_from(PlaybackDevice)
+        )
+    ).scalar_one()
+
+    rows = (
+        (
+            await session.execute(
+                select(PlaybackDevice)
+                .order_by(PlaybackDevice.playback_count.desc())
+                .limit(capped)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    devices = [
+        {
+            "id": d.id,
+            "integration_id": d.integration_id,
+            "client_key": d.client_key,
+            "name": d.name,
+            "platform": d.platform,
+            "product": d.product,
+            "device_model": d.device_model,
+            "first_seen_at": (
+                d.first_seen_at.isoformat() if d.first_seen_at else None
+            ),
+            "last_seen_at": (
+                d.last_seen_at.isoformat() if d.last_seen_at else None
+            ),
+            "playback_count": d.playback_count,
+            "transcode_count": d.transcode_count,
+            "direct_play_count": d.direct_play_count,
+            "direct_stream_count": d.direct_stream_count,
+        }
+        for d in rows
+    ]
+    return {"devices": devices, "total": total}

@@ -25,7 +25,7 @@ related: [rules/conditions, integrations/plex]
 
 ## What the built-in rule actually checks
 
-The rule (shipped as a built-in in Stage 03) matches on
+The rule (shipped as a built-in in) matches on
 `video_codec` and `audio_codec`. The current trigger list,
 chosen for the **majority of clients** (Chromecast, smart TV
 apps, mobile, Plex Web on older browsers):
@@ -40,7 +40,7 @@ apps, mobile, Plex Web on older browsers):
 - `truehd` (TV apps transcode to AC3)
 - `dts-hd ma`, `dts-x` (lossless DTS variants, narrow support)
 - `eac3` with `> 6 channels` (mobile apps fall back to stereo
-  mix-down, which is technically a transcode)
+ mix-down, which is technically a transcode)
 
 The rule does **not** flag `h264` / `hevc` / `aac` / `ac3` /
 `flac` — these direct-play on the broad majority of clients.
@@ -79,17 +79,17 @@ a single Apple TV in the living room), the codec list above
 is likely too broad. To narrow it:
 
 1. **Edit the rule** in Settings → Rules → "Plex transcode
-   compatibility". The visual editor exposes the
-   `video_codec` / `audio_codec` condition.
+ compatibility". The visual editor exposes the
+ `video_codec` / `audio_codec` condition.
 2. **Remove codecs your client direct-plays.** For an
-   Apple-TV-only setup, remove `vp9` from the video list
-   (newer Apple TVs handle it). For a Roku-only setup,
-   remove `eac3` from the audio list.
+ Apple-TV-only setup, remove `vp9` from the video list
+ (newer Apple TVs handle it). For a Roku-only setup,
+ remove `eac3` from the audio list.
 3. **Add codecs your client doesn't handle**, if any. The
-   rule's flag list isn't exhaustive — it's a starting
-   point.
+ rule's flag list isn't exhaustive — it's a starting
+ point.
 
-The dry-run preview (Stage 06) shows you exactly which files
+The dry-run preview shows you exactly which files
 the new conditions would flag before you save. Use it to
 sanity-check that the narrowed rule isn't dragging in files
 that play fine on your setup.
@@ -104,7 +104,7 @@ rules don't fire on scans; the column will go silent.
 ## Related
 
 - [rules/conditions](conditions) — the condition vocabulary
-  the rule uses.
+ the rule uses.
 - [rules/actions](actions) — what actions a rule can take.
 - [integrations/plex](../integrations/plex) — wiring your
-  Plex server to Auditarr.
+ Plex server to Auditarr.

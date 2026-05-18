@@ -44,6 +44,9 @@ import {
 } from "@/components/ui/Modal";
 import {
   useCreateIntegration,
+  makeDiscoverPathMappings,
+  makeDiscoverUpstreamTags,
+  makeDiscoverWebhookSources,
   useGenerateWebhookSecret,
   useTestIntegration,
   useUpdateIntegration,
@@ -191,6 +194,22 @@ export function IntegrationConnectDialog({
                 meta={meta}
                 value={config[key]}
                 onChange={(v) => setConfig({ ...config, [key]: v })}
+                fieldKey={key}
+                onAutoDiscoverPathMappings={
+                  integration
+                    ? makeDiscoverPathMappings(integration.id)
+                    : undefined
+                }
+                onAutoDiscoverWebhookSources={
+                  integration
+                    ? makeDiscoverWebhookSources(integration.id)
+                    : undefined
+                }
+                onAutoDiscoverTags={
+                  integration
+                    ? makeDiscoverUpstreamTags(integration.id)
+                    : undefined
+                }
               />
               {meta.description ? (
                 <span className="text-[11px] text-muted-2">

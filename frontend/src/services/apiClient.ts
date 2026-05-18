@@ -116,8 +116,15 @@ class ApiClient {
     });
   }
 
-  delete<T>(path: string): Promise<T> {
-    return this.request<T>(path, { method: "DELETE" });
+  delete<T>(path: string, body?: unknown): Promise<T> {
+    // v1.9 Stage 2.4 — DELETE with a JSON body. FastAPI accepts
+    // request bodies on DELETE; we use that for the media delete
+    // endpoint which carries ``remove_from_disk`` + ``reason``.
+    // Pre-1.9 callers continue to work since ``body`` is optional.
+    return this.request<T>(path, {
+      method: "DELETE",
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
   }
 
   /** Coalesce concurrent refresh attempts. */

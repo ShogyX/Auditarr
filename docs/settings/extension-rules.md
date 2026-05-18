@@ -16,7 +16,7 @@ the right tool when you want **policy by file type** independent of
 content matching.
 
 The rules live at `/api/v1/system/extension-rules` and are admin-managed.
-The UI panel for them ships in a later stage (Stage 14); until then,
+The UI panel for them ships in a later stage ; until then,
 manage them via the API — `curl`, an OpenAPI client, or the
 auto-generated `/docs` Swagger page all work.
 
@@ -51,8 +51,8 @@ reason. This bypasses the rule engine's normal escalation —
 operators see the file flagged from the moment of scan and can
 take action via the rules page or the file detail drawer.
 
-> **Note (v1.7).** Pre-v1.7 this disposition also "quarantined"
-> the file via a dedicated quarantine column. Stage 05 removed
+> **Note (v1.7).** this disposition also "quarantined"
+> the file via a dedicated quarantine column. removed
 > the quarantine surface; the disposition now flags at `crit`
 > only. To take action (delete, move, etc.) write a rule that
 > matches on the `malicious-extension` tag — see
@@ -75,10 +75,10 @@ Use for: subtitle sidecar files, intentional thumbnails, etc.
 
 ```json
 {
-  "id": "uuid",
-  "extension": "exe",
-  "disposition": "malicious",
-  "enabled": true
+ "id": "uuid",
+ "extension": "exe",
+ "disposition": "malicious",
+ "enabled": true
 }
 ```
 
@@ -91,10 +91,10 @@ spellings.
 ## API reference
 
 ```
-GET    /api/v1/system/extension-rules         # list
-POST   /api/v1/system/extension-rules         # create (admin)
-PATCH  /api/v1/system/extension-rules/{id}    # update (admin)
-DELETE /api/v1/system/extension-rules/{id}    # delete (admin)
+GET /api/v1/system/extension-rules # list
+POST /api/v1/system/extension-rules # create (admin)
+PATCH /api/v1/system/extension-rules/{id} # update (admin)
+DELETE /api/v1/system/extension-rules/{id} # delete (admin)
 ```
 
 `POST` with an extension that already exists returns `409` with
@@ -111,7 +111,7 @@ hundreds of thousands of files, the cost is negligible.
 ## See also
 
 - [Rule actions](/help/rules/actions) — the action vocabulary
-  (set_severity, tag, delete, notify). The pre-v1.7 `quarantine`
-  action was removed in Stage 05.
+ (set_severity, tag, delete, notify). The `quarantine`
+ action was removed in .
 - [Severity levels](/help/rules/severity) — what `info`, `crit`,
-  etc. mean for the rest of the pipeline.
+ etc. mean for the rest of the pipeline.

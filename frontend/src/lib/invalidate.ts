@@ -244,4 +244,35 @@ export function invalidateMany(
  *      immediately by a fresh login, which goes through the
  *      shell-remount path. The intermediate UI shows static
  *      "password reset successful" copy.
+ *
+ * ── v1.9 Stage 1.3 re-audit ────────────────────────────────────
+ *
+ * Fresh walk against every ``useMutation`` in
+ * ``frontend/src/hooks/`` (86 occurrences across 12 hook files
+ * as of v1.9). The 9 above remain the only mutations that skip
+ * invalidation entirely. The new ``useForceClearApply`` (v1.9
+ * Stage 1.2) calls ``invalidateRelated(qc, "updater")``, so it
+ * does NOT belong on the exception list.
+ *
+ * Several hooks call ``qc.invalidateQueries({ queryKey: [...] })``
+ * directly instead of going through ``invalidateRelated`` /
+ * ``invalidateMany``. This is acceptable when the invalidation
+ * key isn't part of the central dependency graph in this file —
+ * the hook is still invalidating, just with finer surgical
+ * precision. The cases:
+ *
+ *   * ``useRunHousekeeping`` / ``useReloadDocs`` (useSystem.ts)
+ *     — keys ``["system","housekeeping"]`` and ``["docs"]`` are
+ *     orphan namespaces not consumed elsewhere; the direct call
+ *     is the right tool.
+ *   * ``useSyncTags`` (useIntegrations.ts) — invalidates both
+ *     ``["media"]`` and ``["integrations"]``; the helper graph
+ *     would still pull "media" via the "integration" edge but
+ *     listing both makes the intent explicit at the call site.
+ *   * ``useGenerateWebhookSecret`` (useIntegrations.ts) — only
+ *     touches ``["integrations"]``; the helper would do the
+ *     same plus drag along media/scan/path-mapping unnecessarily.
+ *
+ * No regression found. No new exception added. The audit is
+ * green for v1.9.
  */

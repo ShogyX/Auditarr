@@ -39,7 +39,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
-from app.models.playback import PlaybackEvent
+from app.models.playback import PlaybackEvent, PlaybackSession
 from app.models.rule_suggestion import RuleSuggestion
 from app.services.repositories.rule_suggestion import (
     RuleSuggestionRepository,
@@ -47,6 +47,16 @@ from app.services.repositories.rule_suggestion import (
 from app.utils.datetime import utcnow
 
 log = get_logger("auditarr.playback.analyzer", category="playback")
+
+
+# v1.9 OP-10 — heuristics work over either ``PlaybackEvent`` (history
+# scrape) or ``PlaybackSession`` (SSE-tracked plays). Both expose the
+# same attribute surface for the fields the heuristics consult
+# (``source_codec``, ``decision``, ``source_bitrate_kbps``,
+# ``source_container``, ``source_width``, ``source_height``,
+# ``reason_code``, ``media_file_id``). A union alias documents the
+# intent rather than reading as Any at every call site.
+_PlaybackRow = PlaybackEvent | PlaybackSession
 
 
 # ── Thresholds ───────────────────────────────────────────────
@@ -131,26 +141,84 @@ class PlaybackAnalyzer:
         # state copy: operators need to see the true count
         # (not just resolved) so a path-mapping problem doesn't
         # look like "no playbacks happened at all".
-        total_in_window = (
+        # v1.9 OP-10 — read sessions as the PRIMARY source +
+        # events as the fallback. The SSE writer captures every
+        # play (including short ones Plex never records as
+        # history); the history poller fills in plays that
+        # ended before SSE was connected (e.g. after a worker
+        # restart).
+        #
+        # Caveat 6 of the audit: primary is
+        #   PlaybackSession WHERE state='stopped'
+        #                     AND started_at >= cutoff
+        #                     AND media_file_id IS NOT NULL
+        # Fallback is
+        #   PlaybackEvent   WHERE started_at >= cutoff
+        #                     AND media_file_id IS NOT NULL
+        #                     AND reconciled_with_session_id IS NULL
+        # The reconciled-event guard prevents double-counting a
+        # play that appears in BOTH tables (the SSE row is the
+        # source of truth; the event row exists for diagnosability
+        # per caveat 4).
+        #
+        # Caveat 10 (concurrency): the two reads happen back-to-
+        # back inside the analyzer's session. The SSE writer may
+        # be writing concurrently; we tolerate this by treating
+        # the sessions snapshot and events snapshot as
+        # point-in-time reads. A session that gets reconciled
+        # between the two reads still produces correct output
+        # because the event's reconciled_with_session_id guard
+        # ensures it's filtered from the fallback set.
+        total_events_in_window = (
             await self._session.execute(
                 select(func.count())
                 .select_from(PlaybackEvent)
                 .where(PlaybackEvent.started_at >= cutoff)
             )
         ).scalar_one()
-        outcome.examined_events_total = int(total_in_window or 0)
+        total_sessions_in_window = (
+            await self._session.execute(
+                select(func.count())
+                .select_from(PlaybackSession)
+                .where(
+                    PlaybackSession.started_at >= cutoff,
+                    PlaybackSession.state == "stopped",
+                )
+            )
+        ).scalar_one()
+        outcome.examined_events_total = int(total_events_in_window or 0) + int(
+            total_sessions_in_window or 0
+        )
 
-        rows = (
+        session_rows = (
+            await self._session.execute(
+                select(PlaybackSession)
+                .where(
+                    PlaybackSession.state == "stopped",
+                    PlaybackSession.started_at >= cutoff,
+                    PlaybackSession.media_file_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+        event_rows = (
             await self._session.execute(
                 select(PlaybackEvent)
                 .where(PlaybackEvent.started_at >= cutoff)
-                # Only events that actually resolved to a MediaFile
-                # can drive rule suggestions — the rule engine reads
-                # MediaFile attributes, so an unresolved event has
-                # nothing for a rule to match against.
                 .where(PlaybackEvent.media_file_id.is_not(None))
+                # Caveat 5 (analyzer dedup): events flagged as
+                # reconciled-against-a-session are represented by
+                # their session row; skip them in the fallback
+                # read to avoid double-counting.
+                .where(PlaybackEvent.reconciled_with_session_id.is_(None))
             )
         ).scalars().all()
+
+        # Combine. Heuristics treat both shapes uniformly because
+        # PlaybackSession and PlaybackEvent share the field names
+        # the heuristics read (source_codec, decision,
+        # source_bitrate_kbps, source_container, source_width,
+        # source_height, reason_code, media_file_id).
+        rows: list[_PlaybackRow] = [*session_rows, *event_rows]
 
         outcome.examined_events = len(rows)
         outcome.examined_events_resolved = len(rows)
@@ -238,7 +306,7 @@ class PlaybackAnalyzer:
 
 # ── Heuristic 1: high-transcode codecs ───────────────────────
 def _high_transcode_codec(
-    events: Sequence[PlaybackEvent],
+    events: Sequence[_PlaybackRow],
 ) -> list[SuggestionCandidate]:
     """Codec families where the majority of plays transcoded.
 
@@ -329,7 +397,7 @@ def _high_transcode_codec(
 
 # ── Heuristic 2: bitrate ceiling ─────────────────────────────
 def _bitrate_ceiling(
-    events: Sequence[PlaybackEvent],
+    events: Sequence[_PlaybackRow],
 ) -> list[SuggestionCandidate]:
     """Files whose source bitrate is consistently above what client
     devices can direct-play.
@@ -400,7 +468,7 @@ def _bitrate_ceiling(
 
 # ── Heuristic 3: container compatibility ─────────────────────
 def _container_compatibility(
-    events: Sequence[PlaybackEvent],
+    events: Sequence[_PlaybackRow],
 ) -> list[SuggestionCandidate]:
     """Container formats where transcodes consistently fire because
     the container itself is unsupported.
@@ -463,7 +531,7 @@ def _container_compatibility(
 
 # ── Heuristic 4: resolution mismatch ─────────────────────────
 def _resolution_mismatch(
-    events: Sequence[PlaybackEvent],
+    events: Sequence[_PlaybackRow],
 ) -> list[SuggestionCandidate]:
     """Resolution classes where transcodes consistently fire.
 
@@ -548,7 +616,7 @@ def _resolution_mismatch(
 
 # ── Heuristic 5: failed playback ─────────────────────────────
 def _failed_playback(
-    events: Sequence[PlaybackEvent],
+    events: Sequence[_PlaybackRow],
 ) -> list[SuggestionCandidate]:
     """Files that failed playback outright in the analysis window.
 

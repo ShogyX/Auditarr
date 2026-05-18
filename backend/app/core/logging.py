@@ -74,8 +74,35 @@ def configure_logging(settings: Settings) -> None:
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(formatter)
 
+    # v1.9 — install the ring-buffer capture handler alongside
+    # the stderr stream handler. The two are separate so the
+    # operator's tail-stderr-style consumption still works
+    # exactly as before; the buffer is an additional sink, not
+    # a replacement.
+    #
+    # v1.9.1 fix — order matters here. structlog's
+    # ProcessorFormatter mutates record.msg from the original
+    # event-dict into a rendered string when it formats. If the
+    # stderr handler runs first, the capture handler sees the
+    # string version and loses category + context (silently
+    # capturing record.event="<the rendered line>" and
+    # record.context={}). Operators landed on an "in-memory
+    # ring buffer" page that looked completely empty because
+    # every record stored had the wrong shape and category
+    # filters dropped them. Capture FIRST, then format for
+    # stderr.
+    #
+    # We also DO NOT attach the formatter to the capture handler.
+    # The handler reads the raw structlog dict from record.msg
+    # directly via LogRecord.emit; running the formatter would
+    # again mutate record.msg to a string before the dict-detect
+    # branch fires.
+    from app.core.log_buffer import LogCaptureHandler
+
+    capture_handler = LogCaptureHandler()
+
     root = logging.getLogger()
-    root.handlers = [handler]
+    root.handlers = [capture_handler, handler]
     root.setLevel(level)
 
     # Quiet noisy libraries unless debug.

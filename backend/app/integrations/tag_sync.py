@@ -62,8 +62,32 @@ class IntegrationTagSync:
 
         ``integration.kind`` is the ``source`` we own. Tags from other
         sources are left alone.
+
+        v1.9 Stage 7.2: respects optional
+        ``integration.config['tag_allowlist']`` and
+        ``integration.config['tag_denylist']``. Filtering is applied
+        BEFORE the desired-set computation so a tag the operator
+        excluded is treated as if upstream never emitted it. Any
+        existing MediaTag rows for filtered tags will be cleaned up
+        as part of the normal "existing minus desired" diff at the
+        end of the function — flipping a tag from allowed → denied
+        in the config + running a sync deletes its MediaTag rows.
+
+        Allowlist semantics:
+          - Empty list = no allowlist (all tags pass the allow gate).
+          - Non-empty list = only these tags pass the gate.
+          - Match is case-insensitive (operators don't think in case).
+
+        Denylist always applies AFTER allowlist, so a tag in BOTH is
+        rejected. This matches how operators read the two together
+        ("show me allowed minus denied").
         """
         source = integration.kind
+        tags = _filter_tags_by_lists(
+            tags,
+            allowlist=integration.config.get("tag_allowlist") or [],
+            denylist=integration.config.get("tag_denylist") or [],
+        )
         skipped_no_path = sum(1 for t in tags if not t.media_path)
 
         # Resolve each title path to its set of media_file ids.
@@ -136,3 +160,42 @@ class IntegrationTagSync:
                 source="integrations",
             )
         return report
+
+
+# v1.9 Stage 7.2 — tag allowlist / denylist filter shared by the
+# tag-sync reconciler. Pulled out as a free function so other
+# callers (provider-side prefilter, tests) can use the same
+# semantics without taking a dependency on the class.
+def _filter_tags_by_lists(
+    tags: list[TagSync],
+    *,
+    allowlist: list[str],
+    denylist: list[str],
+) -> list[TagSync]:
+    """Filter a list of TagSync entries by case-insensitive
+    allowlist / denylist comparison.
+
+    Allowlist is "must be in this set"; denylist is "must NOT be
+    in this set". When both are empty (the default), every tag
+    passes through unchanged — preserves pre-Stage-7.2 behavior
+    for installs that haven't touched the new config fields.
+    """
+    if not allowlist and not denylist:
+        return tags
+    allow_lower = {str(a).strip().lower() for a in allowlist if a}
+    deny_lower = {str(d).strip().lower() for d in denylist if d}
+    out: list[TagSync] = []
+    for entry in tags:
+        tag_lower = str(entry.tag).strip().lower()
+        # Allow gate: only when allowlist is non-empty.
+        if allow_lower and tag_lower not in allow_lower:
+            continue
+        # Deny gate: applied after allow. Denylist of an
+        # allowlisted tag still rejects it.
+        if tag_lower in deny_lower:
+            continue
+        out.append(entry)
+    return out
+
+
+__all__ = ["IntegrationTagSync", "TagSyncReport", "_filter_tags_by_lists"]

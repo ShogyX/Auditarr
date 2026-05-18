@@ -14,6 +14,7 @@ Pins the contract:
 
 from __future__ import annotations
 
+import datetime as _dt
 from pathlib import Path
 
 import pytest
@@ -269,3 +270,197 @@ async def test_handle_reconnect_does_not_raise(session_setup) -> None:
     reconnect."""
     manager = session_setup["manager"]
     await manager.handle_reconnect()
+
+
+# ── v1.9 OP-10 — SSE writer path mapping + media resolution ─────
+
+
+@pytest.mark.asyncio
+async def test_sse_writer_applies_path_mappings_and_resolves_media_file(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1.9 OP-10: SSE writer maps the upstream path through the
+    configured PathMappings and looks up the matching MediaFile,
+    persisting both the rewritten source_path and the media_file_id
+    on the new session row."""
+    from app.integrations.path_mapping import PathMapping
+    from app.models.library import Library
+    from app.models.media import MediaFile
+
+    db_path = tmp_path / "sse-mapping.db"
+    monkeypatch.setenv(
+        "AUDITARR_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}"
+    )
+    monkeypatch.setenv(
+        "AUDITARR_SECRET_KEY", "test-key-must-be-at-least-sixteen-chars"
+    )
+    from app.core.settings import get_settings
+
+    get_settings.cache_clear()
+    db = get_database()
+    db._engine = None  # noqa: SLF001
+    db._sessionmaker = None  # noqa: SLF001
+    await db.connect()
+    async with db.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with db.session() as session:
+        ig = Integration(
+            name="Plex", kind="plex", enabled=True,
+            poll_interval_seconds=900, config={"base_url": "http://stub/"},
+            health_status="ok",
+        )
+        session.add(ig)
+        await session.flush()
+
+        lib = Library(name="Movies", root_path="/mnt/media/Movies", kind="movies")
+        session.add(lib)
+        await session.flush()
+
+        session.add(
+            MediaFile(
+                library_id=lib.id,
+                path="/mnt/media/Movies/inception.mkv",
+                relative_path="inception.mkv",
+                filename="inception.mkv",
+                extension="mkv",
+                size_bytes=100 * 1024 * 1024,
+                mtime=_dt.datetime.now(_dt.UTC),
+                category="media",
+                severity="ok",
+                severity_rank=10,
+                has_subtitles=False,
+                seen_at=_dt.datetime.now(_dt.UTC),
+                is_orphaned=False,
+            )
+        )
+        await session.commit()
+        ig_id = ig.id
+
+    mgr = SessionStateManager(
+        integration_id=ig_id,
+        db_session_factory=db.session,
+        path_mappings=[
+            PathMapping(
+                src_prefix="/data/movies",
+                dst_prefix="/mnt/media/Movies",
+            )
+        ],
+    )
+
+    enrichment = SessionEnrichment(
+        decision="direct_play",
+        source_path="/data/movies/inception.mkv",  # upstream-side path
+        title="Inception",
+        grandparent_title=None,
+        user="alice",
+        device_kind="Roku",
+        device_name="Living Room",
+        source_codec="h264",
+        source_bitrate_kbps=15000,
+        source_width=1920,
+        source_height=1080,
+        source_container="mkv",
+        target_codec=None,
+        target_bitrate_kbps=None,
+        duration_ms=600_000,
+    )
+    await mgr.handle_state_event(
+        session_key="sk-1",
+        state="playing",
+        view_offset_ms=0,
+        enrichment=enrichment,
+        rating_key="rk-7",
+    )
+
+    async with db.session() as session:
+        rows = (
+            await session.execute(select(PlaybackSession))
+        ).scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.source_path == "/mnt/media/Movies/inception.mkv"
+    assert row.media_file_id is not None
+    assert row.rating_key == "rk-7"
+
+    await db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_sse_writer_leaves_media_file_id_null_when_no_match(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1.9 OP-10 caveat 12: an SSE event whose path doesn't
+    match any MediaFile (after mapping) leaves media_file_id NULL
+    rather than raising. The analyzer filters such rows out so
+    they don't pollute downstream stats."""
+    db_path = tmp_path / "sse-nomap.db"
+    monkeypatch.setenv(
+        "AUDITARR_DATABASE_URL", f"sqlite+aiosqlite:///{db_path}"
+    )
+    monkeypatch.setenv(
+        "AUDITARR_SECRET_KEY", "test-key-must-be-at-least-sixteen-chars"
+    )
+    from app.core.settings import get_settings
+
+    get_settings.cache_clear()
+    db = get_database()
+    db._engine = None  # noqa: SLF001
+    db._sessionmaker = None  # noqa: SLF001
+    await db.connect()
+    async with db.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with db.session() as session:
+        ig = Integration(
+            name="Plex", kind="plex", enabled=True,
+            poll_interval_seconds=900, config={"base_url": "http://stub/"},
+            health_status="ok",
+        )
+        session.add(ig)
+        await session.commit()
+        ig_id = ig.id
+
+    # No path_mappings configured AND no MediaFile seeded.
+    mgr = SessionStateManager(
+        integration_id=ig_id,
+        db_session_factory=db.session,
+    )
+
+    enrichment = SessionEnrichment(
+        decision="direct_play",
+        source_path="/data/movies/unknown.mkv",
+        title="Unknown",
+        grandparent_title=None,
+        user="alice",
+        device_kind="Roku",
+        device_name="Living Room",
+        source_codec="h264",
+        source_bitrate_kbps=15000,
+        source_width=1920,
+        source_height=1080,
+        source_container="mkv",
+        target_codec=None,
+        target_bitrate_kbps=None,
+        duration_ms=600_000,
+    )
+    await mgr.handle_state_event(
+        session_key="sk-orphan",
+        state="playing",
+        view_offset_ms=0,
+        enrichment=enrichment,
+    )
+
+    async with db.session() as session:
+        rows = (
+            await session.execute(select(PlaybackSession))
+        ).scalars().all()
+    assert len(rows) == 1
+    # No mapping → source_path unchanged; no MediaFile match →
+    # media_file_id NULL. The row exists for diagnostic purposes;
+    # the analyzer's WHERE media_file_id IS NOT NULL filter
+    # excludes it from heuristics.
+    assert rows[0].source_path == "/data/movies/unknown.mkv"
+    assert rows[0].media_file_id is None
+
+    await db.disconnect()

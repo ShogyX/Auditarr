@@ -86,7 +86,20 @@ export type Action =
   // unconditional; the optional ``reason`` lands in the
   // ``file.deleted`` audit-log entry the service emits on every
   // successful delete.
-  | { type: "delete"; reason?: string | null };
+  | { type: "delete"; reason?: string | null }
+  // v1.9 Stage 4.6 — VT lookup as a rule action. No params
+  // today; the schema's ``extra="forbid"`` reserves the
+  // namespace for future params.
+  | { type: "vt_lookup" }
+  // v1.9 Stage 5.1 — cross-integration search trigger. The
+  // service layer reads {target, integration_id}, resolves the
+  // integration row, and calls the provider's ``trigger_search``
+  // method.
+  | {
+      type: "search_upstream";
+      target: string;
+      integration_id: string;
+    };
 
 /** Stage 06 (v1.7) — Notify throttle config. */
 export interface NotifyThrottle {
@@ -148,6 +161,18 @@ export interface RuleVocabularyArgSchema {
   minimum?: number;
   required?: boolean;
   hint?: string;
+  /**
+   * v1.9 Stage 5.1 — opt-in special renderer hint. The only
+   * value defined today is ``"integration_picker"`` for the
+   * ``search_upstream`` action's ``integration_id`` arg. The
+   * frontend's ActionRow short-circuits to a dedicated renderer
+   * (SearchUpstreamArgs) when ``action.type ===
+   * "search_upstream"``; this field is informational so that
+   * frontend code reading the vocabulary directly (e.g. tests,
+   * future hand-rolled UIs) sees the marker. The default
+   * renderer ignores it.
+   */
+  format?: string;
 }
 
 /**
@@ -271,6 +296,25 @@ export function useEvaluateLibrary() {
       ),
     // Library-scoped re-evaluation changes both rule outcomes and
     // the media files that absorb the new severities.
+    onSuccess: () => invalidateMany(qc, ["rule", "media"]),
+  });
+}
+
+// v1.9 OP-15 — targeted single-rule re-evaluation.
+// Fires the named rule against every file in every library.
+// Used by the rule editor's "Save & Evaluate" affordance: after
+// the rule saves successfully, the operator clicks once to fire
+// it against existing media without running every other rule too.
+export function useEvaluateRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ruleId: string) =>
+      apiClient.post<{ rule_id: string; files_evaluated: number }>(
+        `/rules/${ruleId}/evaluate-now`,
+        {},
+      ),
+    // Same invalidation surface as evaluate_library: rule
+    // outcomes change AND media files absorb new severities/tags.
     onSuccess: () => invalidateMany(qc, ["rule", "media"]),
   });
 }
@@ -484,5 +528,43 @@ export function useRuleMatchedFiles(
     enabled: !!ruleId,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
+  });
+}
+
+
+// ── v1.9 Stage 4.4 — Rule templates ──────────────────────────
+
+export interface RuleTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  priority: number;
+  definition: RuleDefinition;
+  seeded_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** List all rule templates. */
+export function useRuleTemplates() {
+  return useQuery({
+    queryKey: ["rule-templates"] as const,
+    queryFn: () => apiClient.get<RuleTemplate[]>("/rule-templates"),
+    staleTime: 60_000,
+  });
+}
+
+/** "Use template" mutation — creates a new operator-owned Rule
+ *  from the named template. The backend handles name-collision
+ *  resolution (appends " (copy)" / " (copy 2)") so the UI just
+ *  submits and renders whatever name comes back. */
+export function useUseRuleTemplate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (templateId: string) =>
+      apiClient.post<Rule>(
+        `/rule-templates/${encodeURIComponent(templateId)}/use`,
+      ),
+    onSuccess: () => invalidateRelated(qc, "rule"),
   });
 }

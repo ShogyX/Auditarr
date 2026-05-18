@@ -353,6 +353,53 @@ class RulesService:
                 )
                 await self._hard_delete_media(media_file, reason=reason)
 
+            # v1.9 Stage 4.6 — VT lookup as a rule action.
+            # When any matching rule's ``vt_lookup`` action fires,
+            # the aggregate carries the flag; we enqueue the file
+            # for the VT plugin's worker. The enqueue is idempotent
+            # on ``media_file_id`` (the vt_queue table has a unique
+            # constraint), so multiple rules matching on the same
+            # file still result in one queue row. Same write
+            # target as the scanner's auto-enqueue path — the VT
+            # worker treats them identically once queued.
+            #
+            # The local import mirrors the scanner's pattern: keeps
+            # the rules layer free of a hard dependency on the VT
+            # plugin (the plugin can be absent from installs that
+            # don't carry it).
+            if aggregate.vt_lookup_requested:
+                try:
+                    from plugins.virustotal.backend import (
+                        enqueue_for_vt_lookup,
+                    )
+
+                    await enqueue_for_vt_lookup(
+                        self._session, media_file_id=media_file.id
+                    )
+                except ImportError:
+                    # VT plugin not present — operator authored a
+                    # rule with a vt_lookup action on an install
+                    # without the plugin. Log + continue rather
+                    # than failing the whole rule evaluation.
+                    log.warning(
+                        "rule.vt_lookup_action_plugin_missing",
+                        media_file_id=media_file.id,
+                    )
+
+            # v1.9 Stage 5.1 — search_upstream rule action. The
+            # aggregate carries a list of {target, integration_id}
+            # dicts (one per matched ``search_upstream`` action).
+            # Dedupe by (integration_id, media_file_id) so
+            # multiple rules requesting the same search on the
+            # same file fire it once. The actual upstream call
+            # happens inline — same shape as the existing inline
+            # actions (delete, vt_lookup). Audit + WS events emit
+            # per (integration_id, file, status).
+            if aggregate.search_upstream_requests:
+                await self._trigger_upstream_searches(
+                    media_file, aggregate.search_upstream_requests
+                )
+
             await self._session.flush()
 
         return FileOutcome(
@@ -596,7 +643,364 @@ class RulesService:
             )
         await self._session.delete(media_file)
 
+    # ── v1.9 Stage 5.1 — search_upstream rule action ─────────────
+    async def _trigger_upstream_searches(
+        self,
+        media_file: MediaFile,
+        requests: list[dict[str, str]],
+    ) -> None:
+        """Dispatch a search trigger to each requested integration.
+
+        ``requests`` is a list of ``{"target": str, "integration_id":
+        str}`` dicts as accumulated by the evaluator. We dedupe by
+        ``integration_id`` (multiple rules matching the same file
+        with the same integration → one upstream call), then per
+        unique integration we:
+
+          1. Load the Integration row. Skip + log if missing or
+             disabled — operator may have disabled the integration
+             since the rule was authored; we don't want a rule
+             pinned to a removed integration to error every scan.
+          2. Resolve the provider via the registry. Skip + log if
+             unregistered (operator removed the plugin).
+          3. Confirm the resolved provider's kind matches the rule's
+             declared ``target``. Mismatch logs a warning and skips
+             — typically means the operator moved an integration to
+             a different kind, which is degenerate but recoverable.
+          4. Call ``provider.trigger_search(config, media_file.path)``
+             via ``hasattr`` to gracefully skip providers without
+             the method (older plugin versions).
+          5. Persist an audit log entry tagged
+             ``rule.action.search_upstream`` with the outcome.
+          6. Emit a ``rule.action.search_upstream`` bus event so
+             the UI can surface activity live.
+
+        Exceptions from individual providers are caught and
+        converted to status=error rows in the audit log — one
+        broken integration must not abort the rule pipeline for
+        the file (or for the rest of the matched integrations).
+        """
+        from app.integrations.types import SearchTriggerResult
+        from app.models.integration import Integration
+        from app.services.audit_service import AuditService
+
+        # Dedupe by integration_id. Preserve the first-seen target
+        # so the audit entry reflects what the operator actually
+        # wrote (the target is also re-validated against the
+        # resolved integration's kind below).
+        seen_integration_ids: set[str] = set()
+        unique_requests: list[dict[str, str]] = []
+        for req in requests:
+            iid = req.get("integration_id") or ""
+            if not iid or iid in seen_integration_ids:
+                continue
+            seen_integration_ids.add(iid)
+            unique_requests.append(req)
+
+        audit = AuditService(self._session)
+
+        for req in unique_requests:
+            integration_id = req["integration_id"]
+            target = req.get("target") or ""
+
+            # 1. Load the integration row.
+            integration = await self._session.get(Integration, integration_id)
+            if integration is None:
+                log.warning(
+                    "rule.search_upstream.integration_missing",
+                    integration_id=integration_id,
+                    media_file_id=media_file.id,
+                )
+                await self._emit_search_upstream_audit(
+                    audit,
+                    media_file=media_file,
+                    integration_id=integration_id,
+                    target=target,
+                    result=SearchTriggerResult(
+                        status="error",
+                        detail="Integration not found",
+                    ),
+                )
+                continue
+            if not integration.enabled:
+                log.info(
+                    "rule.search_upstream.integration_disabled",
+                    integration_id=integration_id,
+                    media_file_id=media_file.id,
+                )
+                await self._emit_search_upstream_audit(
+                    audit,
+                    media_file=media_file,
+                    integration_id=integration_id,
+                    target=target,
+                    result=SearchTriggerResult(
+                        status="error",
+                        detail="Integration disabled",
+                    ),
+                )
+                continue
+
+            # 2. Resolve the provider.
+            if self._registry is None:
+                # No registry on a dry-run/test path. Skip silently
+                # rather than logging an error — these contexts
+                # don't ship audit log entries either.
+                continue
+            provider = self._provider_for_integration(integration)
+            if provider is None:
+                log.warning(
+                    "rule.search_upstream.provider_unregistered",
+                    integration_id=integration_id,
+                    kind=integration.kind,
+                )
+                await self._emit_search_upstream_audit(
+                    audit,
+                    media_file=media_file,
+                    integration_id=integration_id,
+                    target=target,
+                    result=SearchTriggerResult(
+                        status="error",
+                        detail=f"No provider registered for kind {integration.kind!r}",
+                    ),
+                )
+                continue
+
+            # 3. Target / kind sanity check.
+            if target and target != integration.kind:
+                log.warning(
+                    "rule.search_upstream.target_kind_mismatch",
+                    integration_id=integration_id,
+                    rule_target=target,
+                    integration_kind=integration.kind,
+                )
+                await self._emit_search_upstream_audit(
+                    audit,
+                    media_file=media_file,
+                    integration_id=integration_id,
+                    target=target,
+                    result=SearchTriggerResult(
+                        status="error",
+                        detail=(
+                            f"Rule target {target!r} doesn't match "
+                            f"integration kind {integration.kind!r}"
+                        ),
+                    ),
+                )
+                continue
+
+            # 4. Capability + call.
+            if not hasattr(provider, "trigger_search"):
+                log.info(
+                    "rule.search_upstream.provider_no_trigger_search",
+                    integration_id=integration_id,
+                    kind=integration.kind,
+                )
+                await self._emit_search_upstream_audit(
+                    audit,
+                    media_file=media_file,
+                    integration_id=integration_id,
+                    target=target,
+                    result=SearchTriggerResult(
+                        status="error",
+                        detail=(
+                            f"{integration.kind!r} provider does not "
+                            f"implement trigger_search"
+                        ),
+                    ),
+                )
+                continue
+
+            config = self._build_integration_config(integration)
+            try:
+                result = await provider.trigger_search(
+                    config, media_file.path
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "rule.search_upstream.provider_exception",
+                    integration_id=integration_id,
+                    kind=integration.kind,
+                    error=str(exc),
+                )
+                result = SearchTriggerResult(
+                    status="error",
+                    detail=f"Provider exception: {exc}",
+                )
+
+            # 5 + 6. Audit + WS emit.
+            await self._emit_search_upstream_audit(
+                audit,
+                media_file=media_file,
+                integration_id=integration_id,
+                target=target or integration.kind,
+                result=result,
+            )
+
+    async def _emit_search_upstream_audit(
+        self,
+        audit,
+        *,
+        media_file: MediaFile,
+        integration_id: str,
+        target: str,
+        result,
+    ) -> None:
+        """Persist the audit log entry + emit the WS event for one
+        search_upstream attempt. Both surfaces carry the same payload
+        so the UI can render the Audit Log row and the "Recent
+        activity" timeline from either source."""
+        payload: dict[str, Any] = {
+            "integration_id": integration_id,
+            "media_file_id": media_file.id,
+            "media_file_path": media_file.path,
+            "target": target,
+            "status": result.status,
+            "upstream_id": result.upstream_id,
+            "detail": result.detail,
+        }
+        try:
+            await audit.record(
+                action="rule.action.search_upstream",
+                actor_id=None,
+                actor_label="rules",
+                target_type="media_file",
+                target_id=media_file.id,
+                metadata=payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "rule.search_upstream.audit_failed",
+                integration_id=integration_id,
+                media_file_id=media_file.id,
+                error=str(exc),
+            )
+        if self._bus is not None:
+            try:
+                await self._bus.emit(
+                    "rule.action.search_upstream",
+                    payload,
+                    source="rules",
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "rule.search_upstream.bus_emit_failed",
+                    integration_id=integration_id,
+                    media_file_id=media_file.id,
+                    error=str(exc),
+                )
+
+    def _provider_for_integration(self, integration):
+        """Return the IntegrationProvider registered for
+        ``integration.kind``, or None if unregistered.
+
+        Mirrors ``IntegrationManager.provider_for`` but kept inline
+        here so RulesService doesn't have to build a full manager
+        (which would require a SecretBox we don't otherwise need).
+        ``registry.providers_for`` returns a list because the
+        plugin system allows multiple providers per capability;
+        the first hit is canonical."""
+        cap = f"integration.{integration.kind}"
+        providers = self._registry.providers_for(cap) if self._registry else []
+        return providers[0] if providers else None
+
+    def _build_integration_config(self, integration):
+        """Build an IntegrationConfig from a row. Decrypts the
+        secrets dict via the global secret box.
+
+        Lifted from ``IntegrationManager.build_config`` rather than
+        instantiating a full manager — see the note on
+        ``_provider_for_integration``. Decryption failures bubble
+        as exceptions; the call site catches them and records an
+        error audit row."""
+        from app.integrations.types import IntegrationConfig
+        from app.security.secrets import get_secret_box
+
+        secrets: dict[str, Any] = {}
+        if integration.secrets_ciphertext:
+            box = get_secret_box()
+            secrets = box.decrypt_dict(integration.secrets_ciphertext)
+        return IntegrationConfig(
+            integration_id=integration.id,
+            name=integration.name,
+            kind=integration.kind,
+            options=dict(integration.config or {}),
+            secrets=secrets,
+        )
+
     # ── Bulk evaluation ──────────────────────────────────────────
+    async def evaluate_rule(self, rule_id: str) -> int:
+        """v1.9 OP-15 — run a SINGLE rule against every file in
+        every library.
+
+        Operator workflow: after creating or editing a rule (esp.
+        one with a ``vt_lookup`` action), the operator wants to
+        see it fire against the existing library without a full
+        all-rules re-evaluation. This method is the targeted
+        path — it loads only the named rule, walks every library,
+        and runs the file → outcome pipeline for each. Tags,
+        severity updates, VT queue inserts, and search_upstream
+        actions all fire as they would in a full re-evaluation
+        because we use the standard ``evaluate_file`` entry point;
+        just with a single-rule rule list.
+
+        Returns the total file count examined across all
+        libraries.
+        """
+        rule = await self._rules.get(rule_id)
+        if rule is None:
+            raise ValueError(f"Rule {rule_id!r} not found")
+        if not rule.enabled:
+            # Evaluating a disabled rule is almost certainly
+            # operator error — the rule wouldn't fire on the
+            # automatic path either. Surface a clear error
+            # rather than silently doing nothing.
+            raise ValueError(
+                f"Rule {rule_id!r} is disabled. Enable it before "
+                "running a targeted evaluation."
+            )
+
+        # Parse the rule's definition once.
+        from app.rules.schema import RuleDefinition
+
+        try:
+            definition = RuleDefinition.model_validate(rule.definition)
+        except Exception as exc:
+            raise ValueError(
+                f"Rule {rule_id!r} has an invalid definition: {exc}"
+            ) from exc
+
+        single_rule_list: list[tuple[Rule, RuleDefinition]] = [
+            (rule, definition)
+        ]
+
+        # Walk every library.
+        from app.models.library import Library
+
+        library_rows = (
+            await self._session.execute(select(Library))
+        ).scalars().all()
+
+        total_examined = 0
+        now = utcnow()
+        match_count = 0
+        for lib in library_rows:
+            filt = MediaFilter(library_id=lib.id)
+            page = await self._media.list(filt=filt, offset=0, limit=10_000)
+            for media_file in page.items:
+                outcome = await self.evaluate_file(
+                    media_file, single_rule_list
+                )
+                if rule.id in outcome.matched_rule_ids:
+                    match_count += 1
+                total_examined += 1
+
+        # Update rule-level tracking for the freshly-run rule.
+        rule.last_evaluated_at = now
+        rule.last_match_count = match_count
+        await self._session.flush()
+
+        return total_examined
+
     async def evaluate_files(
         self, media_files: Iterable[MediaFile]
     ) -> list[FileOutcome]:

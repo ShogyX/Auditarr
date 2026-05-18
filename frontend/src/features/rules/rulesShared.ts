@@ -86,4 +86,9 @@ export function downloadJson(payload: unknown, filename: string): void {
  * standalone /automation route redirects to /rules?tab=automation
  * so existing bookmarks keep working.
  */
-export type RulesTab = "custom" | "builtin" | "suggestions" | "automation";
+export type RulesTab =
+  | "custom"
+  | "builtin"
+  | "templates"
+  | "suggestions"
+  | "automation";

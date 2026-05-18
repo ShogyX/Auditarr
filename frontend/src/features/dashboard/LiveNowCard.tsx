@@ -34,6 +34,7 @@ import {
 import { cn } from "@/lib/cn";
 import { fmtNum } from "@/lib/format";
 import { useUiStore } from "@/stores/uiStore";
+import { useDashboardCardDisabled } from "@/hooks/useDashboardCardDisabled";
 
 const DECISION_LABEL: Record<string, string> = {
   direct_play: "Direct play",
@@ -71,7 +72,9 @@ export function LiveNowCard() {
   const hidden = useUiStore((s) => s.dashboardHidden.includes("live_now"));
   // Stage 13 (plan §606) — when the operator moves this
   // card to the disabled rail, skip the whole render.
-  const disabled = useUiStore((s) => s.dashboardDisabled.includes("live_now"));
+  // v1.9 Stage 2.5 — uniform helper so every card honours the
+  // disable setting the same way.
+  const [disabled] = useDashboardCardDisabled("live_now");
   const toggle = useUiStore((s) => s.toggleDashboardSection);
 
   const sessions = live.data?.sessions ?? [];

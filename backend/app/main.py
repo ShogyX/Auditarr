@@ -109,7 +109,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # on_startup so plugin code can rely on builtins being
     # present. Failures here are logged but don't abort startup —
     # a missing builtin shouldn't keep the app from booting.
-    from app.rules.builtin import register_builtin_rules
+    from app.rules.builtin import (
+        register_builtin_rules,
+        register_builtin_templates,
+    )
 
     try:
         async with db.session() as session:
@@ -117,6 +120,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("builtin_rules.seeded", **stats)
     except Exception as exc:  # noqa: BLE001
         log.warning("builtin_rules.seed_failed", error=str(exc))
+
+    # v1.9 Stage 4.4 — also seed the rule_templates table. Same
+    # idempotent merge contract as builtin_rules; runs on every
+    # startup so a deleted template row gets restored next boot
+    # (operator's "Restore deleted built-ins" path per plan §266).
+    # Wrapped in its own try/except so a templates-table failure
+    # (e.g. migration hasn't run yet on a fresh install) doesn't
+    # abort the builtin-rules seed that ran before it.
+    try:
+        async with db.session() as session:
+            tpl_stats = await register_builtin_templates(session)
+        log.info("builtin_templates.seeded", **tpl_stats)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("builtin_templates.seed_failed", error=str(exc))
 
     # Background task: re-apply overrides whenever any process
     # publishes a reload notification. Stored on the app state so we

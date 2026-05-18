@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     #                   only. For installs the operator wants to manage
     #                   by hand (e.g. running under ansible).
     update_install_mode: str = "auto"
+    # v1.9 Stage 1.2 — how long an update apply may sit in
+    # ``requested`` or ``running`` before the reaper considers it
+    # stale and force-marks it ``failed``. The host helper writes
+    # status transitions at the end of the apply, so a healthy run
+    # is typically tens of seconds to a few minutes; 30 minutes
+    # leaves generous headroom for slow networks pulling a fresh
+    # image. The reaper runs on every ``has_open()`` poll so the
+    # next ``request_apply`` after a wedge can succeed instead of
+    # 409-ing forever.
+    update_apply_timeout_seconds: int = 1800
 
     # ── Plugin gallery (Stage 12) ──────────────────────────────
     # JSON manifest URL listing community plugins. Default points at
@@ -225,6 +235,44 @@ class Settings(BaseSettings):
     # (banner shows). The dashboard reads this; the startup probe
     # writes nothing to it.
     optimization_hwaccel_warning_acknowledged: bool = False
+
+    # ── Stage 9.5.7 (OP-8 / OP-9) — Language preferences ───────
+    # Operator-configurable list of ISO language codes (3-letter
+    # ISO 639-2 preferred — ``eng``, ``fra``, etc — matches what
+    # ffprobe + most container metadata emits). Used by two
+    # dashboard surfaces:
+    #
+    #   * Foreign audio without preferred subs: counts media files
+    #     whose primary audio track's language is NOT in
+    #     ``preferred_audio_languages`` AND that carry no subtitle
+    #     track in any of ``preferred_subtitle_languages``.
+    #
+    #   * Anything in the rules engine can also key off these
+    #     (operators can build their own "warn when not in
+    #     preferred lang" rule).
+    #
+    # Empty list disables the check. Defaults match the
+    # English-speaking majority of the operator base; non-English
+    # operators override via the Settings → Workspace tab.
+    preferred_audio_languages: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["eng"]
+    )
+    preferred_subtitle_languages: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["eng"]
+    )
+
+    @field_validator(
+        "preferred_audio_languages",
+        "preferred_subtitle_languages",
+        mode="before",
+    )
+    @classmethod
+    def _split_language_list(cls, v: object) -> object:
+        if isinstance(v, str):
+            return [s.strip().lower() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(s).strip().lower() for s in v if str(s).strip()]
+        return v
 
     @field_validator("allowed_origins", mode="before")
     @classmethod

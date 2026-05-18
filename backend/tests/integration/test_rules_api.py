@@ -304,8 +304,8 @@ async def test_vocabulary_endpoint_returns_fields_ops_severities_actions(
     # Actions: pre-Stage-9 the visual builder exposed four;
     # Stage 9 added ``quarantine`` and ``delete``; Stage 05 (v1.7)
     # retired ``quarantine`` again (Section A.0 — "delete means
-    # delete"). The vocabulary now exposes the original four plus
-    # ``delete``.
+    # delete"). v1.9 Stage 4.6 added ``vt_lookup`` (no params).
+    # v1.9 Stage 5.1 added ``search_upstream`` (target + integration_id).
     action_types = {a["type"] for a in body["actions"]}
     assert action_types == {
         "set_severity",
@@ -313,6 +313,8 @@ async def test_vocabulary_endpoint_returns_fields_ops_severities_actions(
         "queue_optimization",
         "notify",
         "delete",
+        "vt_lookup",
+        "search_upstream",
     }
 
     # ``set_severity`` exposes the severities as an enum in its args.
@@ -584,3 +586,100 @@ async def test_suggestion_endpoints_require_auth(client: AsyncClient) -> None:
     assert r3.status_code == 401
     r4 = await client.post("/api/v1/rules/analyze-playback/run")
     assert r4.status_code == 401
+
+
+# ── v1.9 OP-15 — POST /rules/{id}/evaluate-now ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rule_now_fires_single_rule_against_existing_files(
+    client: AsyncClient,
+) -> None:
+    """v1.9 OP-15: the targeted ``evaluate-now`` endpoint runs
+    one specific rule across every library, updates the rule's
+    last_evaluated_at + last_match_count, and returns the
+    files_evaluated count.
+
+    Operator workflow: create or edit a rule, click "Evaluate
+    now" in the rule editor, see the immediate result without
+    running every other rule too.
+    """
+    headers = await _admin_headers(client)
+    library_id, media_id = await _seed_one_file()
+
+    create = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Tag HEVC files",
+            "definition": {
+                "match": {"field": "video_codec", "op": "eq", "value": "hevc"},
+                "actions": [
+                    {"type": "add_tag", "tag": "encoded-hevc"},
+                ],
+            },
+        },
+    )
+    assert create.status_code == 201, create.text
+    rule_id = create.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/rules/{rule_id}/evaluate-now", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["rule_id"] == rule_id
+    assert body["files_evaluated"] >= 1
+
+    # Tag was applied to the seeded file (proves the action ran).
+    tags_response = await client.get(
+        f"/api/v1/media/{media_id}/tags", headers=headers
+    )
+    tag_names = {t["name"] for t in tags_response.json()}
+    assert "encoded-hevc" in tag_names
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rule_now_returns_404_for_missing_rule(
+    client: AsyncClient,
+) -> None:
+    """Missing rule id → 404 with a clear error message."""
+    headers = await _admin_headers(client)
+    response = await client.post(
+        "/api/v1/rules/nonexistent-id/evaluate-now", headers=headers
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rule_now_returns_400_for_disabled_rule(
+    client: AsyncClient,
+) -> None:
+    """Disabled rule → 422 (validation) with an actionable
+    message. Evaluating a disabled rule is operator error — the
+    rule wouldn't fire on the automatic path either, so silently
+    succeeding would be misleading."""
+    headers = await _admin_headers(client)
+    await _seed_one_file()
+
+    create = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Disabled rule",
+            "enabled": False,
+            "definition": {
+                "match": {"field": "video_codec", "op": "eq", "value": "hevc"},
+                "actions": [{"type": "add_tag", "tag": "test"}],
+            },
+        },
+    )
+    rule_id = create.json()["id"]
+
+    response = await client.post(
+        f"/api/v1/rules/{rule_id}/evaluate-now", headers=headers
+    )
+    # ValidationError → 422 in this codebase.
+    assert response.status_code == 422
+    assert "disabled" in response.json().get("message", "").lower() or \
+           "disabled" in response.text.lower()

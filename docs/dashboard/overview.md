@@ -13,7 +13,7 @@ related: [rules/reference, automation/overview, integrations/overview]
 The dashboard is the home page. It tells you, in one screen:
 
 - How many files are in your library, and how many of them have issues
-  open (anything above severity `ok`).
+ open (anything above severity `ok`).
 - The severity distribution across your whole library and per library.
 - Which rules are matching the most files right now.
 - The current health of every integration.
@@ -48,10 +48,10 @@ The numbers next to **Files**, **Rules**, and **Optimization** in the
 sidebar come from `/dashboard/sidebar-badges`:
 
 - **Files** shows `issuesOpen` — files with `severity_rank > 10` (i.e.
-  anything above plain `ok`).
+ anything above plain `ok`).
 - **Rules** shows `rulesEnabled` — the count of currently-enabled rules.
 - **Optimization** shows `activeOptimizations` — items in the queue with
-  status `queued` or `running`.
+ status `queued` or `running`.
 
 The badge query refetches every 60s in the background; explicit user
 actions (creating a rule, queueing an optimization, etc.) invalidate the
@@ -67,7 +67,7 @@ what to do next ("Add a library in Settings", "Connect Plex or Sonarr",
 ## What's next
 
 Time-windowed widgets — "issues opened this week", "match velocity per
-rule", "scan throughput trends" — are not in Stage 8. They'd need new
+rule", "scan throughput trends" — are not in . They'd need new
 indexed `evaluated_at`-style columns or a small denormalized rollup
-table. Stage 13 polish will decide whether real deployments call for
+table. polish will decide whether real deployments call for
 either.

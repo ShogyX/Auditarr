@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 
+import { ScanProgressBar } from "@/components/ui/ScanProgressBar";
 import { useSidebarBadges } from "@/hooks/useDashboard";
 import { useScanProgressWs } from "@/hooks/useScanProgress";
 import { applyAccent, applyTheme } from "@/lib/accent";
@@ -57,6 +58,14 @@ export function AppShell() {
             in static CSS so the layout is stable on first paint and
             wide content can't push the page into horizontal scroll. */}
         <main className="app-main-top pt-header min-h-screen">
+          {/* v1.9 Stage 1.1 — global scan progress bar. Always
+              mounted; ``ScanProgressBar`` self-hides when no scan
+              is running, so this only takes vertical space when
+              an operator actually needs the feedback. Pre-1.9 the
+              bar lived only inside FilesPage / DashboardPage, so
+              operators on Rules / Integrations / Settings had no
+              way to see a long scan was still going. */}
+          <ScanProgressBar className="px-4 pt-2" />
           <Outlet />
         </main>
         <HelpDrawer />
@@ -73,6 +82,9 @@ export function AppShell() {
           push the page into horizontal scroll. Tailwind utilities
           are kept for visual back-compat — values are identical. */}
       <main className="app-main pl-sidebar min-h-screen flex flex-col">
+        {/* v1.9 Stage 1.1 — global scan progress bar (see comment
+            in the top-nav branch above for rationale). */}
+        <ScanProgressBar className="px-4 pt-2" />
         <Outlet />
       </main>
       <HelpDrawer />

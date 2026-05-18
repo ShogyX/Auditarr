@@ -99,14 +99,15 @@ describe("RulesTable — Stage 03 column resize", () => {
       handle!.dispatchEvent(ev);
     }
 
-    // Start width: 90 px (default for priority). Drag +60 → 150.
+    // v1.9 Stage 9.5.1 (OP-1): defaults retuned for wider
+    // viewports. Priority default is now 100; drag +60 → 160.
     dispatchPointer("pointerdown", 1000);
     dispatchPointer("pointermove", 1060);
     dispatchPointer("pointerup", 1060);
 
     const stored = useRulesPrefs.getState().columnWidths;
-    expect(stored.priority).toBe(150);
-    expect(effectiveRulesColumnWidth("priority", stored)).toBe(150);
+    expect(stored.priority).toBe(160);
+    expect(effectiveRulesColumnWidth("priority", stored)).toBe(160);
   });
 
   it("does not write to the files prefs store", () => {
@@ -152,7 +153,9 @@ describe("RulesTable — Stage 03 column resize", () => {
     dispatchPointer("pointerdown", 500);
     dispatchPointer("pointermove", 600);
     dispatchPointer("pointerup", 600);
-    expect(useRulesPrefs.getState().columnWidths.name).toBe(460);
+    // v1.9 Stage 9.5.1 (OP-1): name default is now 560; drag
+    // +100 → 660.
+    expect(useRulesPrefs.getState().columnWidths.name).toBe(660);
 
     // The files store stays empty (this test doesn't touch
     // the files surface).

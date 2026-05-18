@@ -95,3 +95,16 @@ export function useRollback() {
     onSuccess: () => invalidateRelated(qc, "updater"),
   });
 }
+
+// v1.9 Stage 1.2 — force-clear a stuck apply. The backend's
+// status endpoint reaps stale rows automatically (default
+// 30 min); this hook is the operator's manual lever for when
+// they don't want to wait.
+export function useForceClearApply() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (apply_id: string) =>
+      apiClient.post<UpdateApply>(`/updater/applies/${apply_id}/force-clear`, {}),
+    onSuccess: () => invalidateRelated(qc, "updater"),
+  });
+}

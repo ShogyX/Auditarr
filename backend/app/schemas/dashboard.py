@@ -125,3 +125,90 @@ class CategoryBreakdownRead(BaseModel):
     group: str  # "video_codec" | "container"
     file_count: int
     total_size_bytes: int
+
+
+# ── v1.9 Stage 3.3 — Composition ──────────────────────────────
+
+
+class CompositionRowRead(BaseModel):
+    """One row in any of the composition sections."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    label: str
+    count: int
+    total_size_bytes: int = 0
+
+
+class BitrateMatrixRowRead(BaseModel):
+    """One row in the median-bitrate matrix."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    library_id: str | None
+    library_name: str | None
+    resolution_key: str
+    video_codec: str | None
+    container: str | None
+    file_count: int
+    median_bitrate_kbps: int
+
+
+class CompositionRead(BaseModel):
+    """Full composition payload for the new Categories card."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    resolutions: list[CompositionRowRead]
+    extensions: list[CompositionRowRead]
+    containers: list[CompositionRowRead]
+    subtitle_formats: list[CompositionRowRead]
+    subtitle_languages: list[CompositionRowRead]
+    audio_languages: list[CompositionRowRead]
+    unknown_tracks: dict[str, int]
+    subtitles_internal_external: dict[str, int]
+    orphan_count: int
+    bitrate_matrix: list[BitrateMatrixRowRead]
+
+
+# v1.9 Stage 9.5.7 (OP-8 / OP-9) — language-preference + rule-flagged surfaces.
+
+
+class ForeignAudioSummaryRead(BaseModel):
+    """Foreign-audio surfacing for the dashboard.
+
+    A file qualifies when:
+      * its primary audio track's language is NOT in
+        ``preferred_audio_languages``, AND
+      * it carries NO subtitle track in any of
+        ``preferred_subtitle_languages``.
+
+    The operator-configurable preferences are echoed back in
+    the response so the UI's "settings → operator preferences"
+    callout can render the active values without a second
+    fetch.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    count: int
+    sample_ids: list[str]
+    preferred_audio_languages: list[str]
+    preferred_subtitle_languages: list[str]
+
+
+class IncompatibleMediaSummaryRead(BaseModel):
+    """Rule-flagged incompatible-media count for the dashboard.
+
+    Any file with at least one ``rule_evaluations`` row tagged
+    by a rule whose action set carries ``incompatible_audio``
+    or ``incompatible_video`` semantics (via the rule's
+    actions_summary). The matching rules are operator-authored;
+    this surface just counts files where any such rule fired.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    count: int
+    sample_ids: list[str]

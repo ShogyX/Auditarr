@@ -34,8 +34,10 @@ import { AutomationTabContent } from "@/features/automation/AutomationTabContent
 import { SuggestionReviewModal } from "@/features/dashboard/SuggestionReviewModal";
 import { SuggestionsCard } from "@/features/dashboard/SuggestionsCard";
 import { useHelpKey } from "@/hooks/useHelpKey";
+import { useRuleTemplates } from "@/hooks/useRules";
 
 import { ImportRulesDialog } from "./ImportRulesDialog";
+import { RuleTemplatesTab } from "./RuleTemplatesTab";
 import { RulesEvaluateBar } from "./RulesEvaluateBar";
 import { RulesTabBar } from "./RulesTabBar";
 import { RulesTable } from "./RulesTable";
@@ -46,6 +48,13 @@ export function RulesPage() {
   useHelpKey("rules.conditions");
   const navigate = useNavigate();
   const s = useRulesPageState();
+
+  // v1.9 Stage 4.4 — surfaces the template count on the tab.
+  // Kept out of useRulesPageState because the count is the only
+  // thing the page-level component needs from templates, and
+  // hoisting the whole query into that hook would couple it to a
+  // feature that doesn't otherwise belong there.
+  const templates = useRuleTemplates();
 
   // Stage 2: header actions split by tab.
   //   - non-automation tabs → RulesEvaluateBar + "New rule"
@@ -99,7 +108,14 @@ export function RulesPage() {
         }
       />
 
-      <div className="p-6 flex flex-col gap-4 rules-page">
+      {/* v1.9 Stage 9.5.1 (OP-1) — full-bleed layout on xl. The
+          page was previously constrained to ~half the viewport,
+          leaving operators with 20+ rules scrolling constantly.
+          Wider padding only on narrow screens; xl widens to use
+          the available space. Card-based layout stays — that's
+          how the rest of the app renders — but the outer
+          container no longer caps width. */}
+      <div className="p-4 xl:p-6 flex flex-col gap-4 rules-page rules-page-wide">
         {s.evaluate.data && s.tab !== "automation" ? (
           <Card>
             <div className="px-4 py-3 text-[13px]">
@@ -118,6 +134,7 @@ export function RulesPage() {
               onTab={s.setTab}
               customCount={s.customRules.length}
               builtinCount={s.builtinRules.data?.length ?? 0}
+              templatesCount={templates.data?.length ?? 0}
               suggestionsCount={s.pendingSuggestionsCount}
             />
 
@@ -157,6 +174,12 @@ export function RulesPage() {
               onDuplicate={s.onDuplicate}
             />
           ) : null}
+
+          {/* v1.9 Stage 4.4 — Templates tab: shipped rule bodies
+              the operator can clone into editable operator-owned
+              Rule rows. The component handles its own loading /
+              error / empty states. */}
+          {s.tab === "templates" ? <RuleTemplatesTab /> : null}
 
           {s.tab === "suggestions" ? (
             <div className="p-4">

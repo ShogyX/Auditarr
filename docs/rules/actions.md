@@ -3,7 +3,7 @@ id: rules/actions
 title: Rule actions
 category: rules
 tags: [rules, actions, quarantine, delete]
-summary: What a rule does when it matches — full vocabulary including the Stage 9 quarantine and delete actions.
+summary: What a rule does when it matches — full vocabulary including the quarantine and delete actions.
 help_context: [rules.actions, rules.editor.actions]
 related: [rules/conditions, rules/severity]
 ---
@@ -16,7 +16,7 @@ does not abort the others. Across many rules matching the same file,
 results are aggregated: tags accumulate (deduped); severity escalates
 to the highest matched value; a `delete` action by any matched rule
 removes the file (delete is one-way — once any rule deletes, the row
-and file are gone). The pre-Stage-05 `quarantine` aggregation is gone
+and file are gone). The `quarantine` aggregation is gone
 along with the action itself.
 
 The full vocabulary is published by the backend at
@@ -63,27 +63,27 @@ the active channel.
 
 ```json
 {
-  "type": "notify",
-  "channel": "discord-ops",
-  "message": "Codec mismatch: {path}"
+ "type": "notify",
+ "channel": "discord-ops",
+ "message": "Codec mismatch: {path}"
 }
 ```
 
 The `channel` is required; `message` is optional (defaults to a
 generic format string derived from the rule name).
 
-### `quarantine` <span class="pill">Removed in Stage 05 (v1.7)</span>
+### `quarantine` 
 
 **The `quarantine` action no longer exists.** It was retired in
-Stage 05 (Section A.0 of the v1.7 addendum) along with the rest
+ (of the) along with the rest
 of the quarantine workflow — "delete means delete."
 
 If your rule used to quarantine, you have two paths now:
 
-  * Tag the matched files (`add_tag`) and let the operator
-    review the tagged set.
-  * If you want the file gone, use a `delete` action with a
-    descriptive `reason`. The audit log records every removal.
+ * Tag the matched files (`add_tag`) and let the operator
+ review the tagged set.
+ * If you want the file gone, use a `delete` action with a
+ descriptive `reason`. The audit log records every removal.
 
 The 0015 migration rewrites stored `type: "quarantine"`
 actions to `type: "delete"` automatically (the `reason` is
@@ -91,10 +91,10 @@ preserved), so existing rules don't break on upgrade — but the
 behaviour change is significant: those rules now hard-delete
 instead of flagging. Review your rule set after upgrading.
 
-### `delete` <span class="pill">Stage 9 / updated Stage 05 (v1.7)</span>
+### `delete` 
 
 Move the file to the trash directory and remove its index row.
-**Unconditional** — Stage 05 retired the pre-v1.7 `confirm`
+**Unconditional** — retired the `confirm`
 flag that used to gate hard delete vs. soft delete (the soft
 path was quarantine, which is also gone).
 
@@ -110,9 +110,9 @@ the audit trail see WHY a file was removed, not just WHEN.
 When a `delete` action matches:
 
 1. The file is moved (`shutil.move`) to `data_dir/trash/{id}__{name}`.
-   The numeric id prefix prevents same-name collisions across libraries.
+ The numeric id prefix prevents same-name collisions across libraries.
 2. An audit-log entry is written (`action: "file.deleted"`,
-   `actor_label: "rules"`, `metadata: { path, reason, trash_path }`).
+ `actor_label: "rules"`, `metadata: { path, reason, trash_path }`).
 3. The `MediaFile` row is removed from the database.
 4. `media.deleted` is emitted on the event bus with the reason.
 
@@ -129,7 +129,7 @@ logged loudly at `rules.hard_delete.audit_failed` so an operator
 notices the gap.
 
 The trash directory accumulates files; emptying it is the
-operator's responsibility — Stage 14 will surface a UI affordance.
+operator's responsibility — will surface a UI affordance.
 
 ## Visual rule builder
 
@@ -138,7 +138,7 @@ the backend vocabulary publishes, so any new action added in a
 future stage shows up automatically without any frontend change.
 
 For the `delete` action specifically, the builder renders the
-optional `reason` as a labeled text input. Stage 05 retired the
+optional `reason` as a labeled text input. retired the
 old `confirm` checkbox — the hard-delete semantics no longer
 have a gating flag to expose.
 

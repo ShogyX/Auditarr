@@ -370,7 +370,7 @@ function GlobalPathMappingsSection() {
   // across the three sources.
   const suggestionList = [
     ...(suggestions.data?.library_roots ?? []),
-    ...(suggestions.data?.integration_paths.flatMap((p) => [p.from, p.to]) ?? []),
+    ...((suggestions.data?.integration_paths ?? []).flatMap((p) => [p.from, p.to])),
     ...(suggestions.data?.global_paths ?? []),
   ];
   const seen = new Set<string>();

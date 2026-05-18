@@ -74,6 +74,18 @@ class PlaybackEvent(Base):
     )
     duration_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
     upstream_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # v1.9 OP-10 — if the history poller matched this event
+    # against an existing SSE-tracked PlaybackSession, we record
+    # that session's id here. NULL means "no matching session
+    # found" — the event is the sole record of this play, and
+    # the analyzer reads it directly. The analyzer also uses
+    # this column to dedup: when an event is reconciled, the
+    # session row is the authoritative record and the event is
+    # skipped in the analyzer's primary read pass (preserved
+    # for diagnosability per caveat 4).
+    reconciled_with_session_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True
+    )
     created_at: Mapped[_dt.datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -153,6 +165,19 @@ class PlaybackSession(Base):
             "integration_id",
             "state",
         ),
+        # v1.9 OP-10 — reconciliation index. Drives the history
+        # poller's "find the SSE session for this DTO" query
+        # (``WHERE integration_id = ? AND rating_key = ? AND
+        # started_at BETWEEN ? AND ? AND rating_key IS NOT
+        # NULL``). The same shape ships in migration 0030; this
+        # mirror is here so a fresh ``Base.metadata.create_all``
+        # (test fixtures) builds the same schema as a migrated DB.
+        Index(
+            "ix_playback_sessions_recon",
+            "integration_id",
+            "rating_key",
+            "started_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(
@@ -169,6 +194,17 @@ class PlaybackSession(Base):
     # Plex's ``sessionKey``; Jellyfin's session id. Unique within
     # an integration for the session's lifetime.
     session_key: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    # v1.9 OP-10 — the upstream's stable media id (Plex's
+    # ``ratingKey``). NULL for providers that don't expose one
+    # (Jellyfin's SSE shape carries an ``ItemId`` but the wiring
+    # is out of scope for OP-10). The history poller uses this
+    # column to reconcile a history DTO against an existing
+    # SSE-tracked session — both sides know the rating_key, while
+    # ``session_key`` is SSE-only.
+    rating_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
 
     # Lifecycle state. One of:
     #   "playing"   — actively streaming.

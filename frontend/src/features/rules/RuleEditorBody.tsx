@@ -33,6 +33,7 @@ import { DryRunPanel } from "./DryRunPanel";
 import { Field } from "./editorShared";
 import { MatchedFilesTab } from "./MatchedFilesTab";
 import { RuleEditorTabStrip } from "./RuleEditorTabStrip";
+import { RuleEvaluationOrderPanel } from "./RuleEvaluationOrderPanel";
 import { useRuleEditorState } from "./useRuleEditorState";
 import { VisualRuleBuilder } from "./VisualRuleBuilder";
 
@@ -79,23 +80,63 @@ export function RuleEditorBody({ rule, onDone }: RuleEditorBodyProps) {
                 </span>
               </Button>
             ) : (
-              <Button
-                size="sm"
-                variant="accent"
-                onClick={() => s.formRef.current?.requestSubmit()}
-                disabled={s.isPending || !s.parsedDefinition.ok}
-              >
-                <Icon name={rule ? "check" : "plus"} size={12} />
-                <span className="ml-1">
-                  {s.isPending ? "Saving…" : rule ? "Save" : "Create"}
-                </span>
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  variant="accent"
+                  onClick={() => s.formRef.current?.requestSubmit()}
+                  disabled={s.isPending || !s.parsedDefinition.ok}
+                >
+                  <Icon name={rule ? "check" : "plus"} size={12} />
+                  <span className="ml-1">
+                    {s.isPending ? "Saving…" : rule ? "Save" : "Create"}
+                  </span>
+                </Button>
+                {/* v1.9 OP-15 — Save & Evaluate runs the rule
+                    against existing media immediately after
+                    saving. Operators reach for this when the
+                    rule's effect (a VT scan, an upstream search,
+                    a tag) needs to apply to files already in
+                    the library, not just files scanned after
+                    the rule was saved. */}
+                <Button
+                  size="sm"
+                  variant="primary"
+                  onClick={s.onSaveAndEvaluate}
+                  disabled={
+                    s.isPending ||
+                    s.isEvaluating ||
+                    !s.parsedDefinition.ok ||
+                    !s.enabled
+                  }
+                  title={
+                    s.enabled
+                      ? "Save the rule and immediately run it against every file in every library."
+                      : "Enable the rule first — Save & Evaluate won't fire a disabled rule."
+                  }
+                  data-testid="save-and-evaluate-button"
+                >
+                  <Icon name="play" size={12} />
+                  <span className="ml-1">
+                    {s.isEvaluating
+                      ? "Evaluating…"
+                      : "Save & Evaluate"}
+                  </span>
+                </Button>
+              </>
             )}
           </>
         }
       />
 
-      <div className="p-6 flex flex-col gap-4 max-w-7xl rule-editor-shell">
+      {/* v1.9 Stage 9.5.1/9.5.3 (OP-1, OP-3) — drop the
+          ``max-w-7xl`` constraint on xl and bump the side panel
+          width. Operators reported the editor used ~half their
+          viewport on wide screens. We keep the cap on smaller
+          screens (so the form lines stay readable) but lift it
+          on xl/2xl. The side panel widens from 280→360 so the
+          Evaluation list's text isn't cramped. */}
+      <div className="p-6 flex flex-col gap-4 max-w-7xl xl:max-w-none rule-editor-shell">
         {s.isBuiltin ? (
           // A subtle banner so an operator who landed here from
           // a deep link knows why the inputs are disabled. The
@@ -125,7 +166,20 @@ export function RuleEditorBody({ rule, onDone }: RuleEditorBodyProps) {
           </Card>
         ) : null}
 
-        <Card>
+        {/* v1.9 Stage 4.5 — two-column layout: the form on the
+            left, the Evaluation order side panel on the right.
+            Collapses to a single column below md so narrow
+            viewports keep the form full-width and push the
+            side panel below it.
+            v1.9 Stage 9.5.3 (OP-3) — operator-reported as still
+            cramped at 360/420. Bumped to 440/520 so the eval
+            list's rule names render without ellipsis on common
+            lengths, and the "new rule here" insertion marker
+            doesn't collide with surrounding text. The form keeps
+            the lion's share (1fr) so the condition editor stays
+            the primary surface. */}
+        <div className="grid grid-cols-1 lg:grid-cols-[1fr_440px] 2xl:grid-cols-[1fr_520px] gap-4 items-start">
+          <Card>
           <form
             ref={s.formRef}
             onSubmit={s.onSubmit}
@@ -291,6 +345,18 @@ export function RuleEditorBody({ rule, onDone }: RuleEditorBodyProps) {
             ) : null}
           </form>
         </Card>
+
+          {/* v1.9 Stage 4.5 — side panel. Lives inside the
+              two-column grid so it sits next to the form on lg+
+              and flows below on smaller screens. ``rule`` is null
+              on the create path; pass through ``s.priority`` so
+              the panel's insertion marker tracks the operator's
+              current Priority input. */}
+          <RuleEvaluationOrderPanel
+            currentRuleId={rule?.id ?? null}
+            currentPriority={s.priority}
+          />
+        </div>
       </div>
     </>
   );

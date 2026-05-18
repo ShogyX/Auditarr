@@ -252,44 +252,53 @@ async def test_submit_rejects_when_response_lacks_id(
 # ── list_transcode_profiles ────────────────────────────────────
 
 
+
 @pytest.mark.asyncio
 async def test_list_profiles_queries_pluginsjsondb(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport = _MockTransport(
-        [
-            (
-                "/api/v2/cruddb",
-                httpx.Response(
-                    200,
-                    content=json.dumps(
-                        [
-                            {
-                                "id": "Tdarr_Plugin_henk_h265",
-                                "Name": "henk: convert to h265",
-                                "Description": "Re-encode using x265.",
-                                "Type": "Video",
-                                "Stage": "Pre-processing",
-                            },
-                            {
-                                "id": "Tdarr_Plugin_lol_remux",
-                                "Name": "lol: remux to mkv",
-                                "Description": "Just remux.",
-                            },
-                        ]
-                    ).encode(),
-                ),
-            ),
-        ]
-    )
+    """v1.9 audit fix (OP-13): Tdarr enumeration queries
+    PluginsJSONDB AND FlowsJSONDB. Plugins entries return
+    unsuffixed; the test pins this for plugins-only responses
+    (FlowsJSONDB returns empty)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        collection = body["data"]["collection"]
+        if collection == "PluginsJSONDB":
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    [
+                        {
+                            "id": "Tdarr_Plugin_henk_h265",
+                            "Name": "henk: convert to h265",
+                            "Description": "Re-encode using x265.",
+                            "Type": "Video",
+                            "Stage": "Pre-processing",
+                        },
+                        {
+                            "id": "Tdarr_Plugin_Migz_remove_subs",
+                            "Name": "Migz: remove subs",
+                            "Description": "Strip subtitle streams.",
+                            "Type": "Video",
+                            "Stage": "Pre-processing",
+                        },
+                    ]
+                ).encode(),
+            )
+        # FlowsJSONDB empty in this test.
+        return httpx.Response(200, content=b"[]")
+
+    transport = _MockTransport([("/api/v2/cruddb", handler)])
     _install_transport(monkeypatch, transport)
 
     profiles = await _provider().list_transcode_profiles(_config())
 
-    # Right collection queried.
-    body = json.loads(transport.requests[0].content)
-    assert body["data"]["collection"] == "PluginsJSONDB"
-    assert body["data"]["mode"] == "getAll"
+    # Both collections were queried.
+    request_bodies = [json.loads(r.content) for r in transport.requests]
+    collections_queried = {b["data"]["collection"] for b in request_bodies}
+    assert collections_queried == {"PluginsJSONDB", "FlowsJSONDB"}
 
     assert len(profiles) == 2
     assert profiles[0].id == "Tdarr_Plugin_henk_h265"
@@ -299,9 +308,71 @@ async def test_list_profiles_queries_pluginsjsondb(
 
 
 @pytest.mark.asyncio
+async def test_list_profiles_includes_flows_with_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1.9 audit fix (OP-13): newer Tdarr builds use flows
+    instead of plugins. FlowsJSONDB entries render in the picker
+    with a "(flow)" suffix so operators see the source."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        collection = body["data"]["collection"]
+        if collection == "FlowsJSONDB":
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    [
+                        {
+                            "id": "flow-abc",
+                            "Name": "My HEVC Flow",
+                            "Description": "Multi-step transcode.",
+                        }
+                    ]
+                ).encode(),
+            )
+        return httpx.Response(200, content=b"[]")
+
+    transport = _MockTransport([("/api/v2/cruddb", handler)])
+    _install_transport(monkeypatch, transport)
+    profiles = await _provider().list_transcode_profiles(_config())
+    assert len(profiles) == 1
+    assert profiles[0].id == "flow-abc"
+    assert profiles[0].name == "My HEVC Flow (flow)"
+
+
+@pytest.mark.asyncio
+async def test_list_profiles_handles_wrapped_data_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1.9 audit fix (OP-13): some Tdarr builds wrap responses
+    in {"data": [...]}. The parser must handle both wrapped and
+    bare-list shapes."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["data"]["collection"] == "PluginsJSONDB":
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    {"data": [{"id": "p1", "Name": "P1"}]}
+                ).encode(),
+            )
+        return httpx.Response(200, content=b"[]")
+
+    transport = _MockTransport([("/api/v2/cruddb", handler)])
+    _install_transport(monkeypatch, transport)
+    profiles = await _provider().list_transcode_profiles(_config())
+    assert len(profiles) == 1
+    assert profiles[0].id == "p1"
+
+
+@pytest.mark.asyncio
 async def test_list_profiles_returns_empty_on_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Both collection queries failing → empty list. Operator
+    sees "no profiles available" instead of a hard error."""
     transport = _MockTransport(
         [("/api/v2/cruddb", httpx.Response(503, content=b"down"))],
     )
@@ -314,23 +385,22 @@ async def test_list_profiles_returns_empty_on_http_error(
 async def test_list_profiles_skips_entries_without_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    transport = _MockTransport(
-        [
-            (
-                "/api/v2/cruddb",
-                httpx.Response(
-                    200,
-                    content=json.dumps(
-                        [
-                            {"id": "a", "Name": "A"},
-                            {"Name": "no-id"},
-                            "not-a-dict",
-                        ]
-                    ).encode(),
-                ),
-            ),
-        ]
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["data"]["collection"] == "PluginsJSONDB":
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    [
+                        {"id": "a", "Name": "A"},
+                        {"Name": "no-id"},
+                        "not-a-dict",
+                    ]
+                ).encode(),
+            )
+        return httpx.Response(200, content=b"[]")
+
+    transport = _MockTransport([("/api/v2/cruddb", handler)])
     _install_transport(monkeypatch, transport)
     profiles = await _provider().list_transcode_profiles(_config())
     assert len(profiles) == 1

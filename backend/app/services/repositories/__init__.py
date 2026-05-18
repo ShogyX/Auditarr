@@ -30,6 +30,7 @@ from app.services.repositories.rule import (
     RuleRepository,
 )
 from app.services.repositories.rule_suggestion import RuleSuggestionRepository
+from app.services.repositories.rule_template import RuleTemplateRepository
 from app.services.repositories.scan import ScanRepository
 from app.services.repositories.session import RefreshSessionRepository
 from app.services.repositories.updater import (
@@ -59,6 +60,7 @@ __all__ = [
     "RuleEvaluationRepository",
     "RuleRepository",
     "RuleSuggestionRepository",
+    "RuleTemplateRepository",
     "ScanRepository",
     "ScheduleRepository",
     "UpdateApplyRepository",

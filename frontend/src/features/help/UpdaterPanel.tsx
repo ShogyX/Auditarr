@@ -13,6 +13,7 @@ import { Icon } from "@/components/ui/Icon";
 import { Pill, Tag } from "@/components/ui/Pill";
 import { ErrorState, LoadingState } from "@/components/ui/States";
 import {
+  useForceClearApply,
   useRequestApply,
   useRollback,
   useTriggerCheck,
@@ -21,12 +22,28 @@ import {
   type UpdateApply,
 } from "@/hooks/useUpdater";
 
+// v1.9 Stage 1.2 — when an apply has been ``requested`` or
+// ``running`` for longer than this, the UI surfaces a manual
+// "force-clear" button. The backend's authoritative reaper
+// runs every poll on a longer window (default 30 min), so this
+// hint is the friendly mid-window option for operators who
+// don't want to wait.
+const STUCK_APPLY_THRESHOLD_MS = 5 * 60 * 1000;
+
+function applyAppearsStuck(apply: UpdateApply): boolean {
+  if (apply.status !== "requested" && apply.status !== "running") return false;
+  const started = Date.parse(apply.started_at);
+  if (!Number.isFinite(started)) return false;
+  return Date.now() - started > STUCK_APPLY_THRESHOLD_MS;
+}
+
 export function UpdaterPanel() {
   const status = useUpdaterStatus();
   const applies = useUpdateApplies(5);
   const triggerCheck = useTriggerCheck();
   const requestApply = useRequestApply();
   const rollback = useRollback();
+  const forceClear = useForceClearApply();
 
   if (status.isLoading) {
     return (
@@ -152,6 +169,8 @@ export function UpdaterPanel() {
                     key={apply.id}
                     apply={apply}
                     onRollback={() => rollback.mutate(apply.id)}
+                    onForceClear={() => forceClear.mutate(apply.id)}
+                    forceClearPending={forceClear.isPending}
                   />
                 ))}
               </div>
@@ -163,7 +182,23 @@ export function UpdaterPanel() {
   );
 }
 
-function ApplyRow({ apply, onRollback }: { apply: UpdateApply; onRollback: () => void }) {
+function ApplyRow({
+  apply,
+  onRollback,
+  onForceClear,
+  forceClearPending,
+}: {
+  apply: UpdateApply;
+  onRollback: () => void;
+  onForceClear: () => void;
+  forceClearPending: boolean;
+}) {
+  // v1.9 Stage 1.2 — show "Force-clear" on rows that have been
+  // open for longer than the stuck threshold. The backend's
+  // reaper will eventually catch this row on its own, but
+  // surfacing the affordance lets the operator unblock the
+  // next apply request immediately.
+  const stuck = applyAppearsStuck(apply);
   return (
     <div className="flex items-center gap-2 text-[12px]">
       <Pill className={applyStatusClass(apply.status)}>{apply.status}</Pill>
@@ -176,7 +211,16 @@ function ApplyRow({ apply, onRollback }: { apply: UpdateApply; onRollback: () =>
       ) : apply.detail ? (
         <span className="text-muted-2 truncate flex-1">{apply.detail}</span>
       ) : null}
-      {apply.status === "completed" && apply.from_version ? (
+      {stuck ? (
+        <button
+          onClick={onForceClear}
+          disabled={forceClearPending}
+          className="ml-auto text-[11.5px] text-sev-warn hover:text-sev-error underline disabled:opacity-50"
+          title="This apply has been open for over 5 minutes. Force-clearing marks it failed so the next apply can run."
+        >
+          {forceClearPending ? "Clearing…" : "Force-clear"}
+        </button>
+      ) : apply.status === "completed" && apply.from_version ? (
         <button
           onClick={onRollback}
           className="ml-auto text-[11.5px] text-muted-2 hover:text-text underline"

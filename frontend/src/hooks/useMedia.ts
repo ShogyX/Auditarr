@@ -747,3 +747,62 @@ export function useBulkReprobe() {
     onSuccess: () => invalidateRelated(qc, "media"),
   });
 }
+
+// ── v1.9 Stage 2.4 — Operator-initiated delete ─────────────────
+
+export interface DeleteResultRead {
+  media_id: string;
+  path: string;
+  removed_from_disk: boolean;
+  trash_path: string | null;
+}
+
+export interface BulkDeleteResponse {
+  deleted: DeleteResultRead[];
+  requested: number;
+  not_found: string[];
+}
+
+export interface DeleteOneArgs {
+  mediaId: string;
+  remove_from_disk: boolean;
+  reason: string | null;
+}
+
+export interface BulkDeleteArgs {
+  ids: string[];
+  remove_from_disk: boolean;
+  reason: string | null;
+}
+
+/** Delete one media file. ``remove_from_disk=false`` is index-only
+ *  (the file stays on disk and will be re-indexed by the next scan);
+ *  ``remove_from_disk=true`` moves the file into the date-bucketed
+ *  trash directory under ``data_dir/trash/``. */
+export function useDeleteMedia() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ mediaId, remove_from_disk, reason }: DeleteOneArgs) =>
+      apiClient.delete<DeleteResultRead>(`/media/${mediaId}`, {
+        remove_from_disk,
+        reason,
+      }),
+    onSuccess: (_data, args) => {
+      invalidateRelated(qc, "media");
+      qc.invalidateQueries({ queryKey: ["media", args.mediaId] });
+    },
+  });
+}
+
+export function useBulkDeleteMedia() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ids, remove_from_disk, reason }: BulkDeleteArgs) =>
+      apiClient.post<BulkDeleteResponse>("/media/bulk-delete", {
+        ids,
+        remove_from_disk,
+        reason,
+      }),
+    onSuccess: () => invalidateRelated(qc, "media"),
+  });
+}

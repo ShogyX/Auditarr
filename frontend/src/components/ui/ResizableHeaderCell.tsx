@@ -79,6 +79,14 @@ export function ResizableHeaderCell({
       startWidth.current = currentWidth;
       liveWidth.current = currentWidth;
       handle.setPointerCapture(e.pointerId);
+      // v1.9 Stage 3.2 — paint a global col-resize cursor for
+      // the duration of the gesture so the operator can drag past
+      // the table's edge without losing the visual affordance.
+      // CSS in components.css picks up the body attribute and
+      // forces ``cursor: col-resize`` on every descendant.
+      if (typeof document !== "undefined") {
+        document.body.dataset.resizingCol = "1";
+      }
     },
     [columnKey, currentWidth],
   );
@@ -102,6 +110,10 @@ export function ResizableHeaderCell({
       const handle = e.currentTarget;
       if (handle.hasPointerCapture(e.pointerId)) {
         handle.releasePointerCapture(e.pointerId);
+      }
+      // v1.9 Stage 3.2 — clear the global drag-cursor flag.
+      if (typeof document !== "undefined") {
+        delete document.body.dataset.resizingCol;
       }
       if (liveWidth.current !== startWidth.current) {
         onCommit(columnKey, liveWidth.current);

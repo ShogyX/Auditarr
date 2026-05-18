@@ -89,7 +89,7 @@ export function OptimizationPage() {
           </>
         }
       />
-      <div className="p-6 flex flex-col gap-6 max-w-7xl">
+      <div className="p-6 flex flex-col gap-6 max-w-7xl xl:max-w-none">
         <OptimizationProfilesCard
           profiles={profiles}
           update={update}

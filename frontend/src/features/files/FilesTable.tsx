@@ -196,6 +196,10 @@ export function FilesTable({
                     isSorted && "is-sorted",
                     "num" in c && c.num && "num",
                   )}
+                  // v1.9 Stage 3.2 — flag that this header has a
+                  // resize handle so the CSS in components.css
+                  // can paint the 1px hover affordance.
+                  data-col-resizable="1"
                   onClick={
                     sortKey
                       ? (e) => {

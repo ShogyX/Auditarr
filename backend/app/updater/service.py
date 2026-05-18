@@ -132,7 +132,14 @@ class UpdaterService:
         # An apply is "in progress" if there's a row in requested/running
         # state. We don't lock; the host script picks the most recent
         # requested row and the status file resolves any ambiguity.
-        in_progress = await self._applies.has_open()
+        # v1.9 Stage 1.2 — pass the apply-timeout so ``has_open`` first
+        # reaps any rows older than the cutoff. This is the authoritative
+        # reaper: it runs every time the status endpoint is hit
+        # (every 30 s from the UI's poll), so a wedged apply is auto-
+        # cleared within the timeout window with no operator action.
+        in_progress = await self._applies.has_open(
+            timeout_seconds=self._settings.update_apply_timeout_seconds,
+        )
         install_mode = detect_install_mode(self._settings.update_install_mode)
         return UpdaterStatus(
             installed_version=self._settings.app_version,
@@ -169,7 +176,9 @@ class UpdaterService:
                 "'unmanaged'. Configure AUDITARR_UPDATE_INSTALL_MODE "
                 "or update Auditarr by hand."
             )
-        if await self._applies.has_open():
+        if await self._applies.has_open(
+            timeout_seconds=self._settings.update_apply_timeout_seconds,
+        ):
             raise ValueError(
                 "Another update apply is already in progress"
             )
@@ -290,6 +299,37 @@ class UpdaterService:
             status_path.unlink()
         except OSError:
             pass
+        return row
+
+    # ── Force-clear (v1.9 Stage 1.2) ────────────────────────────
+    async def force_clear(self, apply_id: str) -> UpdateApply:
+        """Operator escape hatch: flip a stuck row to ``failed``.
+
+        Authoritative reaping happens in :meth:`get_status` /
+        :meth:`request_apply` (via the timeout-aware ``has_open``),
+        but operators sometimes want to clear a wedge immediately
+        rather than wait for the timeout. This is the manual lever.
+
+        Raises ``ValueError`` if the row is unknown or not in an open
+        state — surfaced as 404 / 422 by the router.
+        """
+        row = await self._applies.force_clear(apply_id)
+        await self._session.commit()
+        if self._bus is not None:
+            await self._bus.emit(
+                "update.failed",
+                {
+                    "apply_id": row.id,
+                    "to_version": row.to_version,
+                    "error": row.error,
+                },
+                source="updater",
+            )
+        log.info(
+            "updater.apply_force_cleared",
+            apply_id=row.id,
+            to_version=row.to_version,
+        )
         return row
 
     # ── Rollback ────────────────────────────────────────────────

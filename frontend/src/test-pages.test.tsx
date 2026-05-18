@@ -159,23 +159,36 @@ describe("page-mount smoke", () => {
     expect(screen.getAllByText(/settings/i).length).toBeGreaterThan(0);
   });
 
-  it("SettingsPage exposes the Stage 22 runtime/secrets/path-mappings panels", () => {
+  it("SettingsPage exposes the Stage 22 runtime/secrets panels (v1.9: path-mappings moved to /integrations)", () => {
     // Smoke-only: with apiClient.get mocked to return null, every new
     // panel should render its admin/empty state rather than throwing.
     // We just confirm the panel headings made it into the DOM.
     //
     // Stage 6 audit fix (Issue 8): the Settings page now groups
     // sections under category tabs. Runtime settings + Secrets
-    // live on the "System" tab; Path mappings lives on the
-    // "Integrations" tab. We click into each before asserting.
+    // live on the "System" tab.
+    //
+    // v1.9 Stage 2.1: the "Integrations" sub-tab here was retired
+    // and PathMappingsPanel moved to /integrations. We assert the
+    // Workspace tab now hosts a summary card linking to that page
+    // (proof the move happened) rather than the heavy editor.
     render(wrap(<SettingsPage />));
 
     fireEvent.click(screen.getByRole("tab", { name: /system/i }));
     expect(screen.getAllByText(/runtime settings/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/^secrets$/i).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole("tab", { name: /integrations/i }));
-    expect(screen.getAllByText(/path mappings/i).length).toBeGreaterThan(0);
+    // No integrations tab on /settings anymore.
+    expect(
+      screen.queryByRole("tab", { name: /integrations/i }),
+    ).toBeNull();
+
+    // The Workspace tab summary card links to /integrations.
+    fireEvent.click(screen.getByRole("tab", { name: /workspace/i }));
+    const link = screen.getByRole("link", {
+      name: /open path mappings on the integrations page/i,
+    });
+    expect(link.getAttribute("href")).toBe("/integrations");
 
     expect(errors.filter((e) => !/jsdom/i.test(e))).toEqual([]);
   });

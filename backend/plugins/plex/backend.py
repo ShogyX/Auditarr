@@ -150,8 +150,26 @@ class PlexProvider(IntegrationProvider):
     }
     secret_fields: tuple[str, ...] = ("token",)
 
+    # v1.9 Stage 6.1 — TTL cache for ratingKey resolution.
+    # ``_resolve_rating_key_from_path`` paginates the entire video
+    # library for every transcode submission. For an operator with
+    # many transcode rules firing per scan, the same path may be
+    # resolved twice in a row. A short TTL (default 60s) collapses
+    # those duplicates without keeping stale data when the operator
+    # renames a file — within 60s the next resolution re-scans Plex
+    # and picks up the new path.
+    #
+    # Per-instance state, NOT class-level: the rule engine builds
+    # a single provider instance per process via the plugin
+    # registry, but tests construct fresh instances; class-level
+    # would leak between tests.
+    _RATING_KEY_TTL_SECONDS = 60
+
     def __init__(self, log: Any) -> None:
         self._log = log
+        self._rating_key_cache: dict[
+            tuple[str, str], tuple[str, _dt.datetime]
+        ] = {}
 
     # ── HTTP helpers ─────────────────────────────────────────────
     def _client(self, config: IntegrationConfig) -> httpx.AsyncClient:
@@ -446,8 +464,29 @@ class PlexProvider(IntegrationProvider):
 
         Cost is one ``/sections`` round-trip plus one paginated
         ``/all`` per video section. For most home setups that's
-        2-3 small calls. A future revision can cache by path.
+        2-3 small calls.
+
+        v1.9 Stage 6.1 — TTL-cached. The same ``(integration_id,
+        auditarr_path)`` pair returns cached result within
+        ``_RATING_KEY_TTL_SECONDS`` (60s). The cache holds only
+        successful resolutions — a previous "not found" result
+        rechecks every call so the operator who just added the
+        file to Plex doesn't have to wait for the TTL. Per-
+        instance state; tests use fresh PlexProvider() so cache
+        doesn't leak.
         """
+        # Cache check — only successful resolutions are cached
+        # (errors and None results are not, so a transient outage
+        # doesn't pin a bad answer for the TTL window).
+        cache_key = (config.integration_id, auditarr_path)
+        cached = self._rating_key_cache.get(cache_key)
+        if cached is not None:
+            rating_key, expires_at = cached
+            if _dt.datetime.now(_dt.UTC) < expires_at:
+                return rating_key, None
+            # Expired — drop it.
+            self._rating_key_cache.pop(cache_key, None)
+
         mappings = parse_mappings(config.options.get("path_mappings"))
         plex_side_path = remap_path_inverse(auditarr_path, mappings)
 
@@ -503,6 +542,18 @@ class PlexProvider(IntegrationProvider):
                     config, section_key, plex_type, plex_side_path
                 )
                 if rating_key is not None:
+                    # v1.9 Stage 6.1 — cache the successful
+                    # resolution. Only successes are cached; a
+                    # "not found" result rechecks next call so an
+                    # operator who just added the file doesn't
+                    # have to wait for the TTL.
+                    expires_at = _dt.datetime.now(
+                        _dt.UTC
+                    ) + _dt.timedelta(seconds=self._RATING_KEY_TTL_SECONDS)
+                    self._rating_key_cache[cache_key] = (
+                        rating_key,
+                        expires_at,
+                    )
                     return rating_key, None
 
         return None, (
@@ -651,8 +702,21 @@ class PlexProvider(IntegrationProvider):
                 # return 201. Anything in the 2xx family means
                 # "queued".
                 if response.status_code >= 400:
+                    # v1.9 audit fix (LOG-AUDIT-2): a 4xx that's
+                    # not 401 (auth) or 429 (rate-limit) is a
+                    # PERMANENT failure for this item — the media
+                    # ID doesn't exist (404), the operator's
+                    # plan can't transcode (403), etc. Return
+                    # ``rejected`` rather than ``error`` so the
+                    # worker doesn't retry the item forever.
+                    # 5xx and the two retryable 4xx codes stay
+                    # ``error`` (transient).
+                    permanent_4xx = (
+                        400 <= response.status_code < 500
+                        and response.status_code not in (401, 429)
+                    )
                     return JobSubmitResult(
-                        status="error",
+                        status="rejected" if permanent_4xx else "error",
                         detail=(
                             f"Plex returned {response.status_code} "
                             f"for {endpoint}"
@@ -677,6 +741,130 @@ class PlexProvider(IntegrationProvider):
             upstream_job_id=synthetic_id,
             detail=f"queued in Plex for ratingKey={rating_key}",
         )
+
+    # ── v1.9 Stage 6.1 — diagnostics + verify helpers ───────────
+    async def diagnostics(
+        self, config: IntegrationConfig
+    ) -> dict[str, dict[str, object]]:
+        """Run four sanity checks against the configured Plex
+        server, returning a structured per-check result.
+
+        Probes:
+          1. ``/`` — root endpoint reachable + token accepted.
+          2. ``/library/sections`` — library listing works (used
+             by Auditarr's library discovery).
+          3. ``/activities`` — activities endpoint reachable
+             (used by some monitoring tools; failing this is a
+             soft warning, not an error).
+          4. ``/library/optimize`` — the optimize queue endpoint
+             that Stage 07's transcode submission writes to. A
+             403/404 here is a strong signal that the Plex token
+             lacks the "manage" claim.
+
+        Each entry is ``{ok: bool, detail: str, latency_ms: int}``.
+        Operators trigger this from the integration row's
+        diagnostics button; the dashboard renders the result as
+        a compact table so a misconfigured token surfaces in
+        seconds rather than after the next scheduled poll.
+
+        Best-effort: a single probe's failure doesn't abort the
+        others. Each probe wraps its own HTTP errors so the
+        operator sees the full picture from one call.
+        """
+        results: dict[str, dict[str, object]] = {}
+        async with self._client(config) as client:
+            for name, path in (
+                ("root", "/"),
+                ("library_sections", "/library/sections"),
+                ("activities", "/activities"),
+                ("optimize_queue", "/library/optimize"),
+            ):
+                results[name] = await _run_diag_probe(client, path)
+        return results
+
+    async def verify_optimization_started(
+        self, config: IntegrationConfig, upstream_job_id: str
+    ) -> bool:
+        """After submitting a transcode job, confirm Plex
+        actually accepted it by checking the optimize queue.
+
+        Stage 07's ``submit_transcode_job`` synthesizes an
+        ``upstream_job_id`` of ``plex:<ratingKey>:<target>``. The
+        verification: re-parse the rating key, query
+        ``/library/optimize``, return True if the rating key is
+        in the queue. Returns False on any error or missing
+        rating key — the caller treats False as "submission
+        unconfirmed", not "submission failed".
+        """
+        rating_key = _parse_synthetic_job_id(upstream_job_id)
+        if rating_key is None:
+            return False
+        try:
+            async with self._client(config) as client:
+                response = await client.get("/library/optimize")
+                if response.status_code >= 400:
+                    return False
+                payload = response.json() or {}
+        except httpx.HTTPError:
+            return False
+        except ValueError:
+            return False
+        items = (payload.get("MediaContainer") or {}).get("Metadata") or []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            # Plex's optimize queue carries the original
+            # ratingKey as ``Item[0].ratingKey``. Iterate items
+            # since one optimize job can hold multiple sources.
+            sub_items = entry.get("Item") or []
+            for sub in sub_items:
+                if not isinstance(sub, dict):
+                    continue
+                if str(sub.get("ratingKey")) == str(rating_key):
+                    return True
+        return False
+
+    async def verify_optimization_completed(
+        self, config: IntegrationConfig, upstream_job_id: str
+    ) -> bool:
+        """Inverse of ``verify_optimization_started``: True when
+        the rating key is NO LONGER in the optimize queue.
+
+        Plex doesn't distinguish "completed" from
+        "cancelled / removed" once the entry is gone; the caller
+        is responsible for deciding what an absent rating key
+        means in its context. For the transcode poller, "gone
+        from the queue after we saw it there" is treated as
+        completion.
+
+        Returns False when the rating key is still in the queue
+        OR when the verification call fails (so a transient
+        error doesn't cause the poller to declare premature
+        completion)."""
+        rating_key = _parse_synthetic_job_id(upstream_job_id)
+        if rating_key is None:
+            return False
+        try:
+            async with self._client(config) as client:
+                response = await client.get("/library/optimize")
+                if response.status_code >= 400:
+                    return False
+                payload = response.json() or {}
+        except httpx.HTTPError:
+            return False
+        except ValueError:
+            return False
+        items = (payload.get("MediaContainer") or {}).get("Metadata") or []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            sub_items = entry.get("Item") or []
+            for sub in sub_items:
+                if not isinstance(sub, dict):
+                    continue
+                if str(sub.get("ratingKey")) == str(rating_key):
+                    return False  # still queued
+        return True
 
     async def list_transcode_profiles(
         self, config: IntegrationConfig
@@ -1151,6 +1339,10 @@ def _plex_history_to_event(entry: dict) -> PlaybackEventDTO | None:
             target_bitrate_kbps=None,
             completed_at=None,
             duration_s=duration_s,
+            # v1.9 OP-10 — surface the rating_key on the DTO so
+            # the poller can reconcile this history entry against
+            # an existing SSE-tracked PlaybackSession row.
+            rating_key=str(rating_key),
         )
     except (AttributeError, TypeError, ValueError, KeyError):
         # Any unexpected shape crashes silently — drop the entry,
@@ -1387,6 +1579,74 @@ def _safe_int(v: Any) -> int | None:
         return int(v)
     except (ValueError, TypeError):
         return None
+
+
+# ── v1.9 Stage 6.1 — diagnostics helpers ─────────────────────────
+
+
+async def _run_diag_probe(
+    client: "httpx.AsyncClient", path: str
+) -> dict[str, object]:
+    """Run one diagnostic probe. Each probe is GET + timing +
+    HTTP-status interpretation. Failures map to
+    ``{ok: False, detail: str, latency_ms: int}`` so the
+    operator sees the slow probe along with the failing one.
+
+    The probe is "ok" on any 2xx OR 3xx. We don't treat redirects
+    as failures because some Plex servers behind reverse proxies
+    redirect ``/`` to ``/web/index.html``; Plex still works.
+    ``/activities`` returning 401/403 is treated as ``ok`` with
+    a detail line — some Plex servers gate it behind permissions
+    that don't affect Auditarr's core functions.
+    """
+    import time
+
+    start = time.perf_counter()
+    try:
+        response = await client.get(path)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        if 200 <= response.status_code < 400:
+            return {
+                "ok": True,
+                "detail": f"HTTP {response.status_code}",
+                "latency_ms": latency_ms,
+            }
+        if path == "/activities" and response.status_code in (401, 403):
+            return {
+                "ok": True,
+                "detail": (
+                    f"HTTP {response.status_code} — activities "
+                    "endpoint is gated; doesn't affect core "
+                    "functions"
+                ),
+                "latency_ms": latency_ms,
+            }
+        return {
+            "ok": False,
+            "detail": f"HTTP {response.status_code}",
+            "latency_ms": latency_ms,
+        }
+    except httpx.HTTPError as exc:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return {
+            "ok": False,
+            "detail": f"HTTP error: {exc}",
+            "latency_ms": latency_ms,
+        }
+
+
+def _parse_synthetic_job_id(upstream_job_id: str) -> str | None:
+    """Parse Stage 07's synthetic upstream_job_id format
+    ``plex:<ratingKey>:<target>``. Returns the rating key or
+    None if the string doesn't match. The verify helpers above
+    use this; keeping it module-level so tests can exercise it
+    without instantiating a provider."""
+    if not upstream_job_id.startswith("plex:"):
+        return None
+    parts = upstream_job_id.split(":", 2)
+    if len(parts) < 2 or not parts[1]:
+        return None
+    return parts[1]
 
 
 def register(context: PluginContext) -> Plugin:

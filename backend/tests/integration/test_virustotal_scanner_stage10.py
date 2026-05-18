@@ -388,3 +388,149 @@ async def test_stage06_vt_rule_fires_on_malicious_fixture(env) -> None:
         row = await session.get(MediaFile, media_id)
         assert row is not None
         assert row.vt_status in ("malicious", "suspicious")
+
+
+# ── v1.9 OP-15 — VT triggers for existing media ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_vt_lookup_rule_action_enqueues_on_reevaluation(env) -> None:
+    """v1.9 OP-15: a rule with a ``vt_lookup`` action that
+    matches an EXISTING file (re-evaluation, not first-scan)
+    must enqueue the file for VT lookup.
+
+    Pins the rule-action → vt_queue path for the
+    operator's "re-evaluate library" / "bulk re-evaluate"
+    workflows. The scanner-side auto-enqueue is a separate path
+    (tested above); this test specifically covers the
+    operator-authored-rule path which is what they reach for
+    when they want a scoped scan against media that's already
+    in the library.
+    """
+    from app.events.bus import EventBus
+    from app.models.rule import Rule
+    from app.services.repositories import RuleRepository
+    from app.services.rules_service import RulesService
+
+    db = env["db"]
+    library_id = env["library_id"]
+
+    # Seed an existing file (i.e. already-scanned, not new).
+    async with db.session() as session:
+        media = MediaFile(
+            library_id=library_id,
+            path="/mnt/media/Movies/installer.exe",
+            relative_path="installer.exe",
+            filename="installer.exe",
+            extension="exe",
+            size_bytes=1_000_000,
+            mtime=_dt.datetime.now(_dt.UTC),
+            category="executable",
+            severity="ok",
+            severity_rank=10,
+            has_subtitles=False,
+            seen_at=_dt.datetime.now(_dt.UTC),
+            is_orphaned=False,
+            hash_sha256="abc123" * 10 + "abcd",  # 64-char hex
+        )
+        session.add(media)
+        await session.commit()
+        media_id = media.id
+
+        # Author a rule with a vt_lookup action targeting .exe.
+        rule = Rule(
+            name="vt-scan-executables",
+            description="",
+            enabled=True,
+            definition={
+                "match": {"field": "extension", "op": "eq", "value": "exe"},
+                "actions": [{"type": "vt_lookup"}],
+            },
+        )
+        await RuleRepository(session).add(rule)
+        await session.commit()
+
+    # Re-evaluate against existing media.
+    async with db.session() as session:
+        bus = EventBus()
+        bus.clear()
+        service = RulesService(session=session, event_bus=bus)
+        await service.evaluate_library(library_id)
+        await session.commit()
+
+    # Verify the VT queue has the file.
+    async with db.session() as session:
+        rows = (
+            (await session.execute(select(VtQueueItem)))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1, (
+        f"expected exactly one VT queue row, got {len(rows)}"
+    )
+    assert rows[0].media_file_id == media_id
+
+
+@pytest.mark.asyncio
+async def test_vt_lookup_rule_action_idempotent_on_repeat_reevaluation(
+    env,
+) -> None:
+    """v1.9 OP-15: re-evaluating twice doesn't produce duplicate
+    VT queue rows (ON CONFLICT DO NOTHING in
+    ``enqueue_for_vt_lookup`` covers this)."""
+    from app.events.bus import EventBus
+    from app.models.rule import Rule
+    from app.services.repositories import RuleRepository
+    from app.services.rules_service import RulesService
+
+    db = env["db"]
+    library_id = env["library_id"]
+
+    async with db.session() as session:
+        media = MediaFile(
+            library_id=library_id,
+            path="/mnt/media/Movies/setup.exe",
+            relative_path="setup.exe",
+            filename="setup.exe",
+            extension="exe",
+            size_bytes=1_000_000,
+            mtime=_dt.datetime.now(_dt.UTC),
+            category="executable",
+            severity="ok",
+            severity_rank=10,
+            has_subtitles=False,
+            seen_at=_dt.datetime.now(_dt.UTC),
+            is_orphaned=False,
+            hash_sha256="def456" * 10 + "defa",
+        )
+        session.add(media)
+        rule = Rule(
+            name="vt-scan-exe",
+            description="",
+            enabled=True,
+            definition={
+                "match": {"field": "extension", "op": "eq", "value": "exe"},
+                "actions": [{"type": "vt_lookup"}],
+            },
+        )
+        await RuleRepository(session).add(rule)
+        await session.commit()
+
+    # First evaluate.
+    async with db.session() as session:
+        service = RulesService(session=session, event_bus=EventBus())
+        await service.evaluate_library(library_id)
+        await session.commit()
+    # Second evaluate — must not duplicate.
+    async with db.session() as session:
+        service = RulesService(session=session, event_bus=EventBus())
+        await service.evaluate_library(library_id)
+        await session.commit()
+
+    async with db.session() as session:
+        rows = (
+            (await session.execute(select(VtQueueItem)))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1

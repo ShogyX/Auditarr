@@ -316,42 +316,80 @@ class TdarrProvider(IntegrationProvider):
         """
         try:
             async with self._client(config) as client:
-                response = await client.post(
-                    "/api/v2/cruddb",
-                    json={
-                        "data": {
-                            "collection": "PluginsJSONDB",
-                            "mode": "getAll",
-                        }
-                    },
-                )
-                response.raise_for_status()
-                payload = response.json() or []
+                # v1.9 audit fix (OP-13) — try plugins first
+                # (legacy Tdarr), then flows (Tdarr v2 "flows"
+                # surface). Both use the same cruddb endpoint
+                # with different collection names. Some Tdarr
+                # builds also wrap payloads in {"data": [...]};
+                # the parser below tolerates both list and
+                # wrapped-list responses.
+                discovered: list[dict[str, Any]] = []
+                for collection in ("PluginsJSONDB", "FlowsJSONDB"):
+                    try:
+                        response = await client.post(
+                            "/api/v2/cruddb",
+                            json={
+                                "data": {
+                                    "collection": collection,
+                                    "mode": "getAll",
+                                }
+                            },
+                        )
+                        response.raise_for_status()
+                        payload = response.json() or []
+                    except httpx.HTTPError as exc:
+                        if self._log is not None:
+                            self._log.debug(
+                                "tdarr.profiles.collection_error",
+                                collection=collection,
+                                error=str(exc),
+                            )
+                        continue
+                    except ValueError:
+                        continue
+                    # Some Tdarr versions wrap responses in {"data": [...]};
+                    # newer ones return the array directly. Handle both.
+                    if isinstance(payload, dict):
+                        if isinstance(payload.get("data"), list):
+                            items = payload["data"]
+                        else:
+                            items = [payload]
+                    elif isinstance(payload, list):
+                        items = payload
+                    else:
+                        continue
+                    for item in items:
+                        if isinstance(item, dict):
+                            # Tag the source so the picker can
+                            # render "(plugin)" vs "(flow)".
+                            item.setdefault("_collection", collection)
+                            discovered.append(item)
         except httpx.HTTPError:
-            # Tolerant: empty list means the picker shows "(no
-            # plugins discovered)". The error is logged by the
-            # caller via the manager's healthcheck pipeline.
-            return []
-        except ValueError:
             return []
 
         out: list[TranscodeProfileSummary] = []
-        for plugin in payload if isinstance(payload, list) else []:
-            if not isinstance(plugin, dict):
-                continue
+        for plugin in discovered:
             plugin_id = plugin.get("id") or plugin.get("_id")
             if not plugin_id:
                 continue
             name = plugin.get("Name") or plugin.get("name") or str(plugin_id)
             description = plugin.get("Description") or plugin.get("description")
+            collection = plugin.get("_collection", "")
+            # Suffix the rendered name with "(flow)" for FlowsJSONDB
+            # entries so operators see the distinction in the
+            # picker dropdown.
+            display_name = str(name)
+            if collection == "FlowsJSONDB":
+                display_name += " (flow)"
             out.append(
                 TranscodeProfileSummary(
                     id=str(plugin_id),
-                    name=str(name),
+                    name=display_name,
                     description=str(description) if description else None,
                     metadata={
                         "Type": plugin.get("Type"),
                         "Stage": plugin.get("Stage"),
+                        "Collection": collection,
                     },
                 )
             )
@@ -436,6 +474,170 @@ class TdarrProvider(IntegrationProvider):
                 "_id": doc.get("_id") or doc.get("id"),
             },
         )
+
+
+# ── v1.9 Stage 8.2 — Tdarr handoff helpers ──────────────────────
+
+
+# Codec keywords we look for in Tdarr plugin names + descriptions
+# to bias the score. The numeric weights are calibrated so that
+# a plugin whose name contains the target codec wins over one
+# that merely mentions it in the description.
+_CODEC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "h264": ("h264", "h.264", "x264", "avc"),
+    "h265": ("h265", "h.265", "x265", "hevc"),
+    "av1": ("av1",),
+    "vp9": ("vp9",),
+}
+
+_HARDWARE_KEYWORDS: tuple[str, ...] = (
+    "nvenc",
+    "qsv",
+    "quicksync",
+    "vaapi",
+    "videotoolbox",
+    "amf",
+)
+
+
+def score_stack(
+    plugin: dict[str, Any],
+    *,
+    target_codec: str | None = None,
+    prefer_hardware: bool = False,
+) -> int:
+    """v1.9 Stage 8.2 — score a Tdarr plugin against a transcode
+    intent.
+
+    Tdarr's plugin list is operator-specific (community plugins,
+    custom plugins, built-ins all mixed); without a structured
+    output-codec field on every entry, picking automatically is
+    a heuristic. This scorer ranks by:
+
+      * +20 if ``target_codec`` is in the plugin name.
+      * +10 if ``target_codec`` is in the plugin description.
+      * +5  if any hardware acceleration keyword is present AND
+            ``prefer_hardware`` is True.
+      * +2  if the plugin's ``Stage`` is the conventional
+            ``Pre-processing`` stage (Tdarr's most common
+            transcode stage; rules out ``Pre-cache`` /
+            ``Post-processing`` / etc.).
+
+    Returns 0 when nothing matched — operators get a stable
+    "no auto-pick" signal rather than a random tiebreaker.
+
+    Pure function; no I/O. Designed to be cheap to call across
+    every plugin in the list so the caller can sort.
+    """
+    name = str(plugin.get("Name") or plugin.get("name") or "").lower()
+    desc = str(
+        plugin.get("Description") or plugin.get("description") or ""
+    ).lower()
+    stage = str(plugin.get("Stage") or "").lower()
+
+    score = 0
+    matched_codec = False
+
+    if target_codec:
+        target_norm = target_codec.lower().strip()
+        keywords = _CODEC_KEYWORDS.get(target_norm, (target_norm,))
+        if any(k in name for k in keywords):
+            score += 20
+            matched_codec = True
+        elif any(k in desc for k in keywords):
+            score += 10
+            matched_codec = True
+
+    if prefer_hardware:
+        haystack = name + " " + desc
+        if any(hk in haystack for hk in _HARDWARE_KEYWORDS):
+            score += 5
+
+    # The stage bonus only adds signal when we already have a
+    # codec or hardware reason to consider this plugin —
+    # otherwise every plugin gets +2 and the score noise drowns
+    # out genuine matches.
+    if matched_codec and ("pre-processing" in stage or "pre processing" in stage):
+        score += 2
+
+    return score
+
+
+def pick_best_plugin(
+    plugins: list[dict[str, Any]],
+    *,
+    target_codec: str | None = None,
+    prefer_hardware: bool = False,
+) -> dict[str, Any] | None:
+    """v1.9 Stage 8.2 — convenience wrapper over ``score_stack``.
+
+    Returns the highest-scoring plugin whose score is > 0, or
+    None when nothing matched. We don't fall back to the
+    first-alphabetical plugin: the calling rule should pass an
+    explicit ``provider_profile_id`` rather than picking
+    randomly when the heuristic is uncertain.
+    """
+    if not plugins:
+        return None
+    scored = [
+        (score_stack(p, target_codec=target_codec, prefer_hardware=prefer_hardware), p)
+        for p in plugins
+        if isinstance(p, dict)
+    ]
+    scored.sort(key=lambda kv: kv[0], reverse=True)
+    if not scored or scored[0][0] <= 0:
+        return None
+    return scored[0][1]
+
+
+def build_output_name(
+    *,
+    input_path: str,
+    target_codec: str | None = None,
+    suffix: str | None = None,
+) -> str:
+    """v1.9 Stage 8.2 — derive an output filename for a Tdarr
+    transcode.
+
+    Tdarr's plugins do their own output naming by default —
+    this helper exists for two distinct use cases:
+
+      1. Operators who want Auditarr to preview the expected
+         post-transcode name on the queue card before the job
+         runs.
+      2. Plugins / flows that respect a hint key like
+         ``output_name`` in the job document.
+
+    Rules:
+      * Replace the extension with ``.mkv`` (Tdarr's default
+        container for video re-encodes).
+      * If ``target_codec`` is supplied, append ``.<codec>``
+        before the extension (so ``Movie.mkv`` becomes
+        ``Movie.hevc.mkv``).
+      * If ``suffix`` is supplied, append it before any
+        codec hint (so the operator's "transcoded" suffix
+        renders as ``Movie.transcoded.hevc.mkv``).
+      * Path components above the filename are preserved.
+
+    Pure function; idempotent on already-formatted names so a
+    re-run on the same path returns the same output."""
+    import os
+
+    head, tail = os.path.split(input_path or "")
+    if not tail:
+        return input_path
+    stem, _ext = os.path.splitext(tail)
+    parts = [stem]
+    if suffix:
+        s = suffix.strip().lstrip(".")
+        if s and s.lower() not in stem.lower():
+            parts.append(s)
+    if target_codec:
+        c = target_codec.strip().lower().lstrip(".")
+        if c and c not in stem.lower():
+            parts.append(c)
+    new_name = ".".join(parts) + ".mkv"
+    return os.path.join(head, new_name) if head else new_name
 
 
 def register(context: PluginContext) -> Plugin:

@@ -1275,10 +1275,18 @@ select.settings-input {
 }
 
 .rules-row.is-disabled td:not(.rules-row-actions) {
-  /* Dim every cell except the action buttons so the row reads
-     "disabled" at a glance without burying the controls operators
-     might still want to use (toggle back on, duplicate, delete). */
-  opacity: 0.65;
+  /* v1.9 audit fix (OP-4): operators reported disabled rows
+     looked indistinguishable from enabled ones at a glance.
+     Drop opacity further and desaturate via grayscale so the
+     visual signal is unmistakable. */
+  opacity: 0.4;
+  filter: grayscale(60%);
+}
+.rules-row.is-disabled td:not(.rules-row-actions) .pill {
+  /* Pills inside a disabled row also lose color so the
+     severity / "Built-in" pills don't compete with the
+     dimming. */
+  filter: grayscale(80%);
 }
 .rules-row.is-disabled .files-table-row:hover {
   opacity: 1;
@@ -1587,7 +1595,28 @@ select.settings-input {
    the name Stage 03 will reuse via the shared
    ``ResizableHeaderCell`` primitive. The two classes are
    intentionally interchangeable so Stage 03 can drop in the shared
-   primitive without breaking existing CSS. */
+   primitive without breaking existing CSS.
+
+   v1.9 Stage 3.2 — visibility improvements:
+     - Hovering ANYWHERE on the column header (the parent ``<th>``
+       carries ``.files-th``) reveals a 1px vertical accent rule on
+       the right edge of the column. Pre-1.9 the handle was a 4px
+       transparent hit area that only revealed itself when the
+       cursor entered that 4px sliver — operators repeatedly
+       reported that the resize affordance was "invisible until
+       you knew where it was".
+     - During an active drag, ``data-resizing-col`` is set on
+       ``<body>`` by the handle's pointerdown handler (see the
+       inline note in ResizableHeaderCell.tsx). The body-level
+       attribute is what lets us paint a global col-resize cursor
+       on every element under the pointer — the operator can drag
+       past the table's edge without the cursor flickering back
+       to default.
+
+   The pre-1.9 ``:hover``/``:active`` background-fill state on the
+   handle is preserved underneath so the column-edge widens to the
+   full 4px accent strip once the operator's cursor reaches the
+   handle itself. */
 .files-th-resizer,
 .ui-th-resizer {
   position: absolute;
@@ -1604,12 +1633,55 @@ select.settings-input {
   transition: background-color 80ms ease;
   touch-action: none;
 }
+
+/* v1.9 Stage 3.2 — show a 1px vertical accent rule on the right
+   edge of the column whenever the operator's cursor is over the
+   header. ``[data-col-resizable]`` is set on every <th> that has
+   a resize handle; using the attribute selector keeps this rule
+   working on both the Files table and any future table that
+   reuses ResizableHeaderCell (Rules table is next per the same
+   stage 3 plan). */
+th[data-col-resizable]:hover .files-th-resizer,
+th[data-col-resizable]:hover .ui-th-resizer {
+  background: var(--border-strong, var(--border));
+  opacity: 0.7;
+  /* Render as a thin rule (1px) when the handle isn't itself
+     hovered — the existing :hover/:active path widens it to the
+     full 4px below. */
+  width: 1px;
+  right: 1px;
+}
+
 .files-th-resizer:hover,
 .ui-th-resizer:hover,
 .files-th-resizer:active,
 .ui-th-resizer:active {
   background: var(--accent);
   opacity: 0.6;
+  /* Restore the full 4px hit width when the operator's cursor is
+     actually on the handle, even if the header-hover rule above
+     narrowed it. */
+  width: 4px;
+  right: 0;
+}
+
+/* v1.9 Stage 3.2 — global col-resize cursor during an active
+   drag. The handle's pointerdown listener sets
+   ``document.body.dataset.resizingCol = "1"``; release clears it.
+   Painting the cursor at the body level prevents the cursor from
+   flickering back to default when the operator drags past the
+   table's right edge.
+
+   ``!important`` is used because individual elements (links,
+   buttons, inputs) inside the page set their own cursors that
+   would otherwise win the cascade. The override is only active
+   during the drag gesture. */
+body[data-resizing-col="1"],
+body[data-resizing-col="1"] * {
+  cursor: col-resize !important;
+  /* Disable text selection during the drag so a stray pointer
+     wobble doesn't highlight half the page. */
+  user-select: none;
 }
 
 /* Per-column filter row, rendered below the header when the

@@ -18,7 +18,7 @@
  * rule.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
@@ -28,6 +28,7 @@ import { fmtBytes, fmtNum } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { toast } from "@/lib/toast";
 import {
+  useDeleteMedia,
   useMediaDetail,
   useMediaEvaluations,
   useMediaTags,
@@ -37,6 +38,8 @@ import {
   type MediaTag,
 } from "@/hooks/useMedia";
 import { usePlaybackEvents } from "@/hooks/usePlayback";
+
+import { DeleteFilesDialog } from "./DeleteFilesDialog";
 
 interface FileDetailDrawerProps {
   /** Summary row clicked in the table; we use it for instant-render
@@ -69,6 +72,9 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
   // quarantine + unquarantine hooks that lived here are gone with
   // Stage 05 (v1.7) — Section A.0 "delete means delete".
   const reprobe = useReprobeMedia();
+  // v1.9 Stage 2.4 — single-file delete from the drawer.
+  const deleteMedia = useDeleteMedia();
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   // Close on Escape — keyboard parity with the prototype's drawer.
   useEffect(() => {
@@ -116,6 +122,32 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
   // Stage 27's ``runQuarantine`` + ``runUnquarantine`` handlers
   // lived here. Stage 05 (v1.7) retired the quarantine workflow
   // (Section A.0); the drawer no longer offers those buttons.
+
+  // v1.9 Stage 2.4 — single-file delete from the drawer.
+  async function runDelete(args: { remove_from_disk: boolean; reason: string | null }) {
+    try {
+      const result = await deleteMedia.mutateAsync({
+        mediaId: file.id,
+        remove_from_disk: args.remove_from_disk,
+        reason: args.reason,
+      });
+      const removed = result.removed_from_disk;
+      toast(
+        removed
+          ? `Removed and moved to trash`
+          : `Removed from index`,
+        "ok",
+      );
+      setDeleteOpen(false);
+      onClose();
+    } catch (err) {
+      toast(
+        `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+        5000,
+      );
+    }
+  }
 
   return (
     <>
@@ -463,8 +495,37 @@ export function FileDetailDrawer({ file, onClose }: FileDetailDrawerProps) {
             />
             {reprobe.isPending ? "Re-probing…" : "Re-probe"}
           </Button>
+          {/* v1.9 Stage 2.4 — direct delete from the drawer. */}
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={() => setDeleteOpen(true)}
+            disabled={deleteMedia.isPending}
+            title="Remove this file from Auditarr. Default is index-only; the dialog offers an on-disk trash option."
+          >
+            <Icon name="trash" size={12} />
+            Delete
+          </Button>
         </div>
       </aside>
+
+      <DeleteFilesDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        fileNames={[full?.filename ?? file.filename ?? file.path]}
+        severityPreview={
+          (full?.severity ?? file.severity) as
+            | "ok"
+            | "info"
+            | "warn"
+            | "high"
+            | "error"
+            | "crit"
+            | null
+        }
+        onConfirm={runDelete}
+        isPending={deleteMedia.isPending}
+      />
     </>
   );
 }

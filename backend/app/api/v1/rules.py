@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, status
-from pydantic import ValidationError as PydanticValidationError
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from app.api.auth_deps import AdminUser, CurrentUser
 from app.api.dependencies import EventBusDep, RegistryDep, SessionDep
@@ -33,6 +33,7 @@ from app.schemas.rules import (
     RuleDryRunRequest,
     RuleDryRunResponse,
     RuleEvaluateLibraryResponse,
+    RuleEvaluateRuleResponse,
     RuleEvaluationFileRow,
     RuleEvaluationRead,
     RuleExportBundle,
@@ -252,6 +253,47 @@ async def vocabulary(_user: CurrentUser) -> RuleVocabularyRead:
                 },
             },
         ),
+        # v1.9 Stage 4.6: VT lookup. No params today (the action
+        # ``extra="forbid"``s any keys), but surfacing it in the
+        # builder so the operator can pick it from the action
+        # dropdown rather than hand-editing JSON.
+        RuleVocabularyAction(
+            type="vt_lookup",
+            label="VirusTotal lookup",
+            args_schema={},
+        ),
+        # v1.9 Stage 5.1: cross-integration search trigger.
+        # ``target`` is an enum (sonarr / radarr / bazarr) so the
+        # builder renders it as a select. ``integration_id`` is a
+        # special string with a hint flagging it for the special
+        # integration-picker treatment in the frontend; the
+        # frontend filters its integration list by ``target``.
+        RuleVocabularyAction(
+            type="search_upstream",
+            label="Search in upstream",
+            args_schema={
+                "target": {
+                    "type": "string",
+                    "enum": ["sonarr", "radarr", "bazarr"],
+                    "required": True,
+                    "hint": (
+                        "Upstream service kind. The integration "
+                        "picker below filters to enabled "
+                        "integrations of this kind."
+                    ),
+                },
+                "integration_id": {
+                    "type": "string",
+                    "required": True,
+                    "format": "integration_picker",
+                    "hint": (
+                        "Pick which configured integration row "
+                        "to call. Operators with multiple Sonarr "
+                        "instances must pick one explicitly."
+                    ),
+                },
+            },
+        ),
     ]
 
     return RuleVocabularyRead(
@@ -298,6 +340,51 @@ async def list_suggestions(
     repo = RuleSuggestionRepository(session)
     rows = await repo.list_pending()
     return [RuleSuggestionRead.model_validate(r) for r in rows]
+
+
+# v1.10 — AI provider usage summary. Surfaces per-integration
+# call counts in the rolling 24h window vs the configured
+# ``daily_call_budget``. Registered BEFORE the
+# ``/suggestions/{suggestion_id}`` wildcard so the static path
+# wins the FastAPI route match — otherwise ``ai-usage`` would
+# be captured as a suggestion id and produce a 404.
+@router.get(
+    "/suggestions/ai-usage",
+    summary="Per-integration AI call counts vs configured budget",
+)
+async def ai_usage_summary(
+    _admin: AdminUser,
+    session: SessionDep,
+) -> dict[str, object]:
+    """Returns one entry per enabled AI-provider integration with
+    the count of AI suggestion calls in the last 24 hours, the
+    configured daily budget, the remaining headroom, and whether
+    the budget has been exceeded.
+
+    The window is rolling-24h (not calendar-day). Operators with
+    a calendar-day expectation see the same data; the difference
+    only matters within 24h of a budget-exceeding burst.
+    """
+    from app.models.integration import Integration as _Integration
+    from app.services.ai.suggestions import AISuggestionService
+    from sqlalchemy import select
+
+    integrations = (
+        await session.execute(
+            select(_Integration).where(
+                _Integration.kind == "ai-provider"
+            )
+        )
+    ).scalars().all()
+
+    service = AISuggestionService(session=session)
+    rows = []
+    for ig in integrations:
+        if not ig.enabled:
+            continue
+        rows.append(await service.usage_summary(ig))
+
+    return {"integrations": rows}
 
 
 @router.get(
@@ -677,6 +764,49 @@ async def evaluate_library(
     )
 
 
+# v1.9 OP-15 — targeted re-evaluation of a single rule across
+# every library.
+@router.post(
+    "/{rule_id}/evaluate-now",
+    response_model=RuleEvaluateRuleResponse,
+    summary="Re-evaluate this specific rule against every file in every library",
+)
+async def evaluate_rule_now(
+    rule_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+    bus: EventBusDep,
+    registry: RegistryDep,
+) -> RuleEvaluateRuleResponse:
+    """v1.9 OP-15 — operator-facing "fire this rule now" trigger.
+
+    Use case: operator creates or edits a rule (especially one
+    with a ``vt_lookup`` or ``search_upstream`` action) and wants
+    to see it fire against existing library files immediately,
+    without running the full all-rules evaluation. Targeted: just
+    this one rule, just the files it would match.
+
+    Returns the total file count examined across all libraries —
+    the actual match count is visible via the rule's
+    ``last_match_count`` field after the call returns.
+
+    Errors:
+      * 404 — rule not found
+      * 400 — rule is disabled or has an invalid definition
+    """
+    service = RulesService(session=session, event_bus=bus, registry=registry)
+    try:
+        count = await service.evaluate_rule(rule_id)
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise NotFoundError(msg) from exc
+        raise ValidationError(msg) from exc
+    return RuleEvaluateRuleResponse(
+        rule_id=rule_id, files_evaluated=count
+    )
+
+
 # ── Stage 24: duplicate / export / import ─────────────────────
 
 
@@ -980,3 +1110,100 @@ async def _next_available_name(
         n += 1
         if n > 100:
             return f"{base} (imported {_dt_now_short()})"
+
+
+# ── v1.9 Stage 9.2 — stale rule suggestions ──────────────────
+
+
+@router.get(
+    "/suggestions/stale",
+    summary="Active rules that look stale (inactive or overzealous)",
+)
+async def list_stale_rule_suggestions(
+    _user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, object]:
+    """v1.9 Stage 9.2 — rule-removal / severity-lowering hints.
+
+    Surfaces two kinds of observations:
+
+      * ``inactive`` — the rule was evaluated recently but
+        matched zero files. Likely a candidate for
+        disable / delete.
+      * ``overzealous`` — the rule fires AND most observed
+        playback in the analysis window was direct_play.
+        Consider lowering severity rather than removing.
+
+    Read-only: this endpoint returns observations only. The
+    operator decides what to do via the existing rule edit /
+    delete surfaces."""
+    from app.services.playback.stale_rule_analyzer import StaleRuleAnalyzer
+
+    analyzer = StaleRuleAnalyzer(session=session)
+    outcome = await analyzer.analyze()
+    return {
+        "suggestions": [s.to_dict() for s in outcome.suggestions],
+        "rules_examined": outcome.rules_examined,
+    }
+
+
+# ── v1.9 Stage 9.3 — AI suggestion generator ────────────────────
+
+
+class AIGenerateRequest(BaseModel):
+    """Optional body for the AI suggestion endpoint. When
+    ``provider_integration_id`` is unset, the service picks the
+    first enabled ``ai_provider`` Integration."""
+
+    provider_integration_id: str | None = None
+
+
+@router.post(
+    "/suggestions/ai-generate",
+    summary="Ask the configured AI provider to propose new rules",
+)
+async def ai_generate_suggestions(
+    _admin: AdminUser,
+    session: SessionDep,
+    body: AIGenerateRequest | None = None,
+) -> dict[str, object]:
+    """v1.9 Stage 9.3 — admin-only endpoint that triggers the AI
+    suggestion generator.
+
+    Returns a structured outcome:
+      * ``suggestions_created`` — int, count of new RuleSuggestion
+        rows persisted.
+      * ``candidates_received`` — int, raw proposals from the AI
+        before validation.
+      * ``candidates_rejected`` — int, proposals that failed
+        ``RuleDefinition.model_validate``.
+      * ``budget_exceeded`` — bool, True when the integration's
+        ``daily_call_budget`` was already used up. In that case
+        no HTTP call was made.
+      * ``provider_kind`` / ``provider_integration_id`` — which
+        provider was used.
+      * ``error`` — string when the provider call failed or no
+        provider integration is configured.
+
+    The endpoint surfaces 200 even on provider-level errors —
+    the operator's UI banner reads the ``error`` field. A 5xx
+    would be misleading: the request reached our service
+    correctly; only the AI hand-off failed.
+    """
+    from app.services.ai.suggestions import AISuggestionService
+
+    service = AISuggestionService(session=session)
+    result = await service.generate(
+        provider_integration_id=(
+            body.provider_integration_id if body else None
+        ),
+    )
+    return {
+        "suggestions_created": result.suggestions_created,
+        "candidates_received": result.candidates_received,
+        "candidates_rejected": result.candidates_rejected,
+        "budget_exceeded": result.budget_exceeded,
+        "provider_kind": result.provider_kind,
+        "provider_integration_id": result.provider_integration_id,
+        "error": result.error,
+    }

@@ -24,10 +24,11 @@
  * single-level WHEN/AND/OR.
  */
 
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { useIntegrations } from "@/hooks/useIntegrations";
 import { useMediaVocabulary, type MediaVocabulary } from "@/hooks/useMedia";
 import { cn } from "@/lib/cn";
 import type {
@@ -40,6 +41,16 @@ import type {
   RuleVocabulary,
   RuleVocabularyField,
 } from "@/hooks/useRules";
+
+// v1.10 (OP-2) — nested AND/OR editor. Imported here as an
+// alternative rendering of the conditions column; the flat
+// builder stays the default for simple rules.
+import {
+  ConditionGroupEditor,
+  liftToGroup,
+  unliftFromGroup,
+  depthOf,
+} from "./ConditionGroupEditor";
 
 // ── Type guards ──────────────────────────────────────────────
 function isCondition(m: Match): m is Condition {
@@ -143,6 +154,23 @@ export function VisualRuleBuilder({
 }) {
   const flattened = useMemo(() => flatten(definition.match), [definition.match]);
 
+  // v1.10 (OP-2) — nested AND/OR editor. The default is the flat
+  // builder; operators with simple rules don't see the extra
+  // chrome. When the match tree itself carries nested groups
+  // (loaded from a JSON-tab edit or an existing nested rule),
+  // auto-enable nested mode so the operator doesn't see the
+  // flattened view of structure that's lossy on save.
+  const treeDepth = useMemo(() => depthOf(definition.match), [definition.match]);
+  const [nestedModeOverride, setNestedModeOverride] = useState<
+    boolean | null
+  >(null);
+  // Auto-enable when depth > 1 (the depth-1 case is a single
+  // top-level combinator with leaf children — the flat builder
+  // handles that fine). Operator override (explicit click)
+  // takes precedence.
+  const nestedMode =
+    nestedModeOverride !== null ? nestedModeOverride : treeDepth > 1;
+
   // Builder operations — every mutation produces a new RuleDefinition
   // that we push up to the dialog.
   function setCombinator(combinator: "all" | "any") {
@@ -219,13 +247,12 @@ export function VisualRuleBuilder({
 
   return (
     <div className="flex flex-col gap-3">
-      {flattened.hadNesting ? (
-        <div className="text-[11.5px] p-2 rounded-md bg-sev-warn/10 text-sev-warn border border-sev-warn/30">
-          <Icon name="alert" size={11} className="inline mr-1" />
-          This rule has nested combinators that don't fit the flat visual layout. The conditions
-          below are shown for reference; edit JSON mode for full control.
-        </div>
-      ) : null}
+      {/* v1.10 (OP-2) — the legacy "nested combinators can't
+          render in the flat layout, edit JSON" banner is gone.
+          Nested combinators now render through
+          ConditionGroupEditor when nested mode is on. We keep
+          a subtle hint when the JSON tab has edited the rule
+          into a shape the flat builder would lose info on. */}
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_2fr_1fr] gap-3">
         {/* ── Trigger ── */}
@@ -243,44 +270,103 @@ export function VisualRuleBuilder({
 
         {/* ── Conditions ── */}
         <Column
-          title={`If ${flattened.combinator === "all" ? "all" : "any"} of:`}
+          title={
+            nestedMode
+              ? "If:"
+              : `If ${flattened.combinator === "all" ? "all" : "any"} of:`
+          }
           right={
-            <div className="inline-flex border border-border rounded-md bg-surface-2 p-0.5">
-              {(["all", "any"] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setCombinator(k)}
-                  className={cn(
-                    "text-[11.5px] px-2 py-0.5 rounded",
-                    flattened.combinator === k
-                      ? "bg-surface text-text"
-                      : "text-text-2 hover:bg-[var(--hover)]",
-                  )}
-                >
-                  {k}
-                </button>
-              ))}
+            <div className="flex items-center gap-2">
+              {/* v1.10 (OP-2) — Nested mode toggle. Stays out of
+                  the way for simple rules; flips on
+                  automatically when the loaded rule already
+                  carries nested groups. */}
+              <label
+                className="inline-flex items-center gap-1 text-[11px] text-muted-2 hover:text-text cursor-pointer"
+                title="Enable nested AND/OR groups for complex rules"
+              >
+                <input
+                  type="checkbox"
+                  checked={nestedMode}
+                  onChange={(e) =>
+                    setNestedModeOverride(e.target.checked)
+                  }
+                  className="h-3 w-3"
+                  data-testid="nested-mode-toggle"
+                />
+                Nested
+              </label>
+              {!nestedMode ? (
+                <div className="inline-flex border border-border rounded-md bg-surface-2 p-0.5">
+                  {(["all", "any"] as const).map((k) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setCombinator(k)}
+                      className={cn(
+                        "text-[11.5px] px-2 py-0.5 rounded",
+                        flattened.combinator === k
+                          ? "bg-surface text-text"
+                          : "text-text-2 hover:bg-[var(--hover)]",
+                      )}
+                    >
+                      {k}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
           }
         >
-          <div className="flex flex-col gap-2">
-            {flattened.conditions.map((cond, idx) => (
-              <ConditionRow
-                key={idx}
-                cond={cond}
-                idx={idx}
-                combinator={flattened.combinator}
-                vocabulary={vocabulary}
-                onChange={(patch) => setCondition(idx, patch)}
-                onRemove={flattened.conditions.length > 1 ? () => removeCondition(idx) : undefined}
-              />
-            ))}
-            <Button size="sm" variant="ghost" onClick={addCondition}>
-              <Icon name="plus" size={12} />
-              <span className="ml-1">Add condition</span>
-            </Button>
-          </div>
+          {nestedMode ? (
+            <ConditionGroupEditor
+              group={liftToGroup(definition.match)}
+              onChange={(next) =>
+                onChange({
+                  ...definition,
+                  match: unliftFromGroup(next),
+                })
+              }
+              onRemove={null}
+              vocabulary={vocabulary}
+              depth={0}
+              renderCondition={({
+                cond,
+                onChange: onCondChange,
+                onRemove: onCondRemove,
+                conjunctionLabel,
+              }) => (
+                <NestedConditionRow
+                  cond={cond}
+                  conjunctionLabel={conjunctionLabel}
+                  vocabulary={vocabulary}
+                  onChange={(patch) =>
+                    onCondChange({ ...cond, ...patch })
+                  }
+                  onRemove={onCondRemove}
+                />
+              )}
+            />
+          ) : (
+            <div className="flex flex-col gap-2">
+              {flattened.conditions.map((cond, idx) => (
+                <ConditionRow
+                  key={idx}
+                  cond={cond}
+                  idx={idx}
+                  combinator={flattened.combinator}
+                  vocabulary={vocabulary}
+                  onChange={(patch) => setCondition(idx, patch)}
+                  onRemove={flattened.conditions.length > 1 ? () => removeCondition(idx) : undefined}
+                  onCombinatorChange={setCombinator}
+                />
+              ))}
+              <Button size="sm" variant="ghost" onClick={addCondition}>
+                <Icon name="plus" size={12} />
+                <span className="ml-1">Add condition</span>
+              </Button>
+            </div>
+          )}
         </Column>
 
         {/* ── Actions ── */}
@@ -378,6 +464,7 @@ function ConditionRow({
   vocabulary,
   onChange,
   onRemove,
+  onCombinatorChange,
 }: {
   cond: Condition;
   idx: number;
@@ -385,22 +472,57 @@ function ConditionRow({
   vocabulary: RuleVocabulary;
   onChange: (patch: Partial<Condition>) => void;
   onRemove?: () => void;
+  /** v1.9 Stage 4.3 — per-row combinator dropdown. Each row's
+   *  dropdown changes the SAME shared parent combinator (the
+   *  builder is flat — one combinator per match group, applied
+   *  to every row). Operators expect the per-row affordance even
+   *  when the data model is shared; surfacing it on each row
+   *  matches their mental model of "I'm choosing how THIS row
+   *  joins the previous one".
+   *
+   *  The very first row gets a static "WHEN" label since there's
+   *  nothing before it to combine with. ``onCombinatorChange`` is
+   *  optional so the first-row case can elide it. */
+  onCombinatorChange?: (next: "all" | "any") => void;
 }) {
   const fieldDef = vocabulary.fields.find((f) => f.key === cond.field);
   const fieldType = fieldDef?.type ?? "string";
   const validOps = vocabulary.ops[fieldType] ?? [];
-  const conjunction = idx === 0 ? "WHEN" : combinator === "all" ? "AND" : "OR";
+
+  // v1.9 Stage 4.3 — the first row renders "WHEN" as static text
+  // (no AND/OR to choose for the leading condition). All later
+  // rows render a dropdown that flips the group combinator.
+  const isFirstRow = idx === 0;
+  const conjunctionLabel = isFirstRow
+    ? "WHEN"
+    : combinator === "all"
+      ? "AND"
+      : "OR";
 
   return (
     <div className="flex items-center gap-2 flex-wrap p-2 border border-border rounded-md bg-surface">
-      <span
-        className={cn(
-          "font-mono text-[10.5px] font-semibold tracking-[0.04em] w-10 text-right",
-          idx === 0 ? "text-text-2" : "text-muted-2",
-        )}
-      >
-        {conjunction}
-      </span>
+      {isFirstRow || !onCombinatorChange ? (
+        <span
+          className={cn(
+            "font-mono text-[10.5px] font-semibold tracking-[0.04em] w-10 text-right",
+            "text-text-2",
+          )}
+        >
+          {conjunctionLabel}
+        </span>
+      ) : (
+        <select
+          aria-label="Combinator"
+          value={combinator === "all" ? "AND" : "OR"}
+          onChange={(e) =>
+            onCombinatorChange(e.target.value === "AND" ? "all" : "any")
+          }
+          className="font-mono text-[10.5px] font-semibold tracking-[0.04em] w-10 h-6 text-right bg-transparent text-muted-2 hover:text-text border-0 focus:outline-none focus:ring-1 focus:ring-accent rounded cursor-pointer appearance-none text-center"
+        >
+          <option value="AND">AND</option>
+          <option value="OR">OR</option>
+        </select>
+      )}
       <select
         aria-label="Field"
         value={cond.field}
@@ -632,23 +754,131 @@ function ActionRow({
           </option>
         ))}
       </select>
-      {def
-        ? Object.entries(def.args_schema).map(([argKey, argDef]) => (
-            <ActionArgInput
-              key={argKey}
-              argKey={argKey}
-              argDef={argDef}
-              value={(action as Record<string, unknown>)[argKey]}
-              onChange={(v) => onChange({ ...action, [argKey]: v } as Action)}
-            />
-          ))
-        : null}
+      {/* v1.9 Stage 5.1 — search_upstream needs a peer-aware
+          renderer because integration_id filters by the value of
+          the target field on the SAME action. The generic
+          ActionArgInput renderer can't see peer args (it gets one
+          key/value pair at a time). For everything else, the
+          generic renderer is fine and handles enum/string/object
+          uniformly. */}
+      {action.type === "search_upstream" ? (
+        <SearchUpstreamArgs
+          action={action}
+          onChange={onChange}
+        />
+      ) : def ? (
+        Object.entries(def.args_schema).map(([argKey, argDef]) => (
+          <ActionArgInput
+            key={argKey}
+            argKey={argKey}
+            argDef={argDef}
+            value={(action as Record<string, unknown>)[argKey]}
+            onChange={(v) => onChange({ ...action, [argKey]: v } as Action)}
+          />
+        ))
+      ) : null}
       {onRemove ? (
         <Button size="sm" variant="ghost" onClick={onRemove} title="Remove action">
           <Icon name="trash" size={12} />
         </Button>
       ) : null}
     </div>
+  );
+}
+
+// v1.9 Stage 5.1 — peer-aware renderer for the search_upstream
+// action. Two selects:
+//   * target: hardcoded sonarr / radarr / bazarr enum
+//   * integration_id: pulled from useIntegrations() and filtered
+//     to enabled integrations whose kind matches the chosen
+//     target
+// Changing target clears integration_id (the previously-picked
+// integration is almost certainly a different kind now), which
+// keeps the rule body coherent. The picker leads with an empty
+// "Pick an integration…" option when nothing matches the
+// current target.
+const SEARCH_UPSTREAM_TARGETS = ["sonarr", "radarr", "bazarr"] as const;
+type SearchUpstreamTarget = (typeof SEARCH_UPSTREAM_TARGETS)[number];
+
+interface SearchUpstreamAction {
+  type: "search_upstream";
+  target: string;
+  integration_id: string;
+}
+
+function SearchUpstreamArgs({
+  action,
+  onChange,
+}: {
+  action: Action;
+  onChange: (next: Action) => void;
+}) {
+  // The cast is safe — ActionRow only renders this component
+  // when action.type === "search_upstream".
+  const a = action as SearchUpstreamAction;
+  const integrationsQuery = useIntegrations();
+
+  const filtered = useMemo(() => {
+    const rows = integrationsQuery.data ?? [];
+    return rows.filter((r) => r.enabled && r.kind === a.target);
+  }, [integrationsQuery.data, a.target]);
+
+  const selectClass =
+    "h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent flex-1 min-w-[120px]";
+
+  return (
+    <>
+      <label className="flex items-center gap-1.5 text-[11.5px] text-muted-2">
+        target
+        <select
+          aria-label="Search upstream target"
+          className={selectClass}
+          value={a.target}
+          onChange={(e) =>
+            onChange({
+              ...a,
+              target: e.target.value as SearchUpstreamTarget,
+              // Changing target invalidates the previously-picked
+              // integration (different kind), so clear it. The
+              // operator picks a new one from the filtered list.
+              integration_id: "",
+            })
+          }
+        >
+          {SEARCH_UPSTREAM_TARGETS.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex items-center gap-1.5 text-[11.5px] text-muted-2">
+        integration
+        <select
+          aria-label="Search upstream integration"
+          className={selectClass}
+          value={a.integration_id}
+          onChange={(e) =>
+            onChange({
+              ...a,
+              integration_id: e.target.value,
+            })
+          }
+          disabled={integrationsQuery.isLoading}
+        >
+          <option value="">
+            {filtered.length === 0
+              ? `No enabled ${a.target} integrations`
+              : "Pick an integration…"}
+          </option>
+          {filtered.map((row) => (
+            <option key={row.id} value={row.id}>
+              {row.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    </>
   );
 }
 
@@ -904,7 +1134,95 @@ function freshAction(type: string): Action {
     // action and the Stage 9 ``confirm`` flag on Delete.
     case "delete":
       return { type: "delete", reason: null };
+    // v1.9 Stage 4.6: VT lookup. No params.
+    case "vt_lookup":
+      return { type: "vt_lookup" };
+    // v1.9 Stage 5.1: cross-integration search trigger. Default
+    // target=sonarr (most common case); integration_id starts
+    // empty so the integration picker shows a "pick one" hint.
+    case "search_upstream":
+      return {
+        type: "search_upstream",
+        target: "sonarr",
+        integration_id: "",
+      };
     default:
       return { type: "set_severity", severity: "warn" };
   }
+}
+
+// ── v1.10 (OP-2) Nested condition row ───────────────────────
+// Variant of ConditionRow that takes a static conjunction label
+// (the parent group's header already shows the AND/OR combinator,
+// so the row only displays "WHEN" / "AND" / "OR" as a leading
+// label, never as a dropdown). The row's "Add condition"
+// affordance is moved to the parent group's header, so this
+// component is leaner than ConditionRow itself.
+function NestedConditionRow({
+  cond,
+  conjunctionLabel,
+  vocabulary,
+  onChange,
+  onRemove,
+}: {
+  cond: Condition;
+  conjunctionLabel: string;
+  vocabulary: RuleVocabulary;
+  onChange: (patch: Partial<Condition>) => void;
+  onRemove: () => void;
+}) {
+  const fieldDef = vocabulary.fields.find((f) => f.key === cond.field);
+  const fieldType = fieldDef?.type ?? "string";
+  const validOps = vocabulary.ops[fieldType] ?? [];
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap p-2 border border-border rounded-md bg-surface">
+      <span
+        className={cn(
+          "font-mono text-[10.5px] font-semibold tracking-[0.04em] w-10 text-right",
+          "text-text-2",
+        )}
+      >
+        {conjunctionLabel}
+      </span>
+      <select
+        aria-label="Field"
+        value={cond.field}
+        onChange={(e) => {
+          const next = vocabulary.fields.find((f) => f.key === e.target.value);
+          if (!next) return;
+          const nextOps = vocabulary.ops[next.type] ?? [];
+          const op = nextOps.includes(cond.op) ? cond.op : (nextOps[0] ?? "eq");
+          onChange({ field: e.target.value, op, value: defaultValueFor(next) });
+        }}
+        className="h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent"
+      >
+        {vocabulary.fields.map((f) => (
+          <option key={f.key} value={f.key}>
+            {f.label}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label="Operator"
+        value={cond.op}
+        onChange={(e) => onChange({ op: e.target.value })}
+        className="h-7 px-2 text-[12px] bg-surface-2 border border-border rounded focus:outline-none focus:ring-2 focus:ring-accent"
+      >
+        {validOps.map((op) => (
+          <option key={op} value={op}>
+            {OP_LABELS[op] ?? op.replace(/_/g, " ")}
+          </option>
+        ))}
+      </select>
+      <ValueInput
+        fieldDef={fieldDef}
+        value={cond.value}
+        onChange={(v) => onChange({ value: v })}
+      />
+      <Button size="sm" variant="ghost" onClick={onRemove} title="Remove condition">
+        <Icon name="trash" size={12} />
+      </Button>
+    </div>
+  );
 }

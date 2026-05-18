@@ -10,7 +10,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { invalidateRelated } from "@/lib/invalidate";
-import { apiClient } from "@/services/apiClient";
+import { apiClient, ApiError } from "@/services/apiClient";
 
 // ── Types ───────────────────────────────────────────────────────
 export interface PlaybackEvent {
@@ -150,6 +150,23 @@ export function usePlaybackEvents(filters: PlaybackEventFilters = {}) {
   });
 }
 
+// v1.9 Stage 6.5 — retry behavior for the dashboard's
+// playback queries. Transient errors (network blip,
+// upstream 5xx) should not blank the panel; React Query's
+// default retries 3 times with exponential backoff. We
+// keep that, but stop retrying client errors (4xx) which
+// will never resolve on retry (auth, validation, etc.)
+// and would just slow rendering of the error state.
+function _retryTransient(failureCount: number, error: unknown): boolean {
+  if (failureCount >= 3) return false;
+  if (error instanceof ApiError) {
+    // 4xx → no retry; 5xx and network errors → keep trying.
+    return error.status >= 500;
+  }
+  // Non-ApiError (network failure, etc.) — retry up to 3 times.
+  return true;
+}
+
 export function useTopTranscoded(opts: { days?: number; limit?: number } = {}) {
   const days = opts.days ?? 30;
   const limit = opts.limit ?? 20;
@@ -160,6 +177,7 @@ export function useTopTranscoded(opts: { days?: number; limit?: number } = {}) {
         `/playback/stats/transcoded?days=${days}&limit=${limit}`,
       ),
     staleTime: 5 * 60_000,
+    retry: _retryTransient,
   });
 }
 
@@ -172,6 +190,7 @@ export function useDeviceMatrix(opts: { days?: number } = {}) {
         `/playback/stats/devices?days=${days}`,
       ),
     staleTime: 5 * 60_000,
+    retry: _retryTransient,
   });
 }
 
@@ -184,6 +203,7 @@ export function useDecisionTrend(opts: { days?: number } = {}) {
         `/playback/stats/decisions?days=${days}`,
       ),
     staleTime: 5 * 60_000,
+    retry: _retryTransient,
   });
 }
 

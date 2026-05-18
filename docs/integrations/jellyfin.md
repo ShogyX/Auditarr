@@ -17,35 +17,35 @@ header Jellyfin inherited from its Emby roots and still accepts).
 ## What works today
 
 - **Healthcheck** — `GET /System/Info` returns the server name, version,
-  OS, and unique id. A 401 response surfaces as "API key rejected".
+ OS, and unique id. A 401 response surfaces as "API key rejected".
 - **Library discovery** — `GET /Library/VirtualFolders` enumerates each
-  configured library and its on-disk roots. Jellyfin libraries can list
-  multiple physical paths under one name; we emit one
-  `DiscoveredLibrary` per location so you can pick exactly which paths
-  Auditarr should scan.
+ configured library and its on-disk roots. Jellyfin libraries can list
+ multiple physical paths under one name; we emit one
+ `DiscoveredLibrary` per location so you can pick exactly which paths
+ Auditarr should scan.
 
 ## Configuration
 
-| Field            | Example                          |
+| Field | Example |
 |------------------|----------------------------------|
-| Server URL       | `http://jellyfin.local:8096`     |
-| API key          | _from Dashboard → API Keys_      |
-| Verify TLS       | `true`                           |
-| Timeout (s)      | `15`                             |
+| Server URL | `http://jellyfin.local:8096` |
+| API key | _from Dashboard → API Keys_ |
+| Verify TLS | `true` |
+| Timeout (s) | `15` |
 
 ## What's not in this release
 
 - **Tag mirroring** — Jellyfin tags are per-item metadata; mirroring would
-  require paginating `/Items?fields=Tags,Path` across thousands of rows.
-  Will land alongside Stage 8 (Dashboard & Analytics) when we have a
-  cursor strategy that doesn't blow up the upstream API.
+ require paginating `/Items?fields=Tags,Path` across thousands of rows.
+ Will land alongside (Dashboard & Analytics) when we have a
+ cursor strategy that doesn't blow up the upstream API.
 
 ## Collection type → Auditarr kind
 
 | Jellyfin `CollectionType` | Auditarr kind |
 |---------------------------|---------------|
-| `movies`, `boxsets`       | `movies`      |
-| `tvshows`                 | `tv`          |
-| `music`, `musicvideos`    | `music`       |
-| `homevideos`              | `mixed`       |
-| _anything else / null_    | `mixed`       |
+| `movies`, `boxsets` | `movies` |
+| `tvshows` | `tv` |
+| `music`, `musicvideos` | `music` |
+| `homevideos` | `mixed` |
+| _anything else / null_ | `mixed` |

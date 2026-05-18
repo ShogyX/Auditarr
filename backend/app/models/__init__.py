@@ -23,6 +23,7 @@ from app.models.rule import Rule
 from app.models.rule_evaluation import RuleEvaluation
 from app.models.rule_notification_window import RuleNotificationWindow
 from app.models.rule_suggestion import RuleSuggestion
+from app.models.rule_template import RuleTemplate
 from app.models.runtime_setting import (
     EncryptedSecret,
     RuntimeSettingChange,
@@ -59,6 +60,7 @@ __all__ = [
     "RuleEvaluation",
     "RuleNotificationWindow",
     "RuleSuggestion",
+    "RuleTemplate",
     "RuntimeSettingChange",
     "RuntimeSettingOverride",
     "EncryptedSecret",

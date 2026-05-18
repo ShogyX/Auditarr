@@ -42,17 +42,17 @@ is a diagnostic — it updates as you edit, and is purely for verifying
 the shape without leaving the dialog. You can't edit it; the
 structured fields are the source of truth.
 
-## Stage 7 changes
+## changes
 
 - Routing column was made **explicitly nullable** in the schema —
-  patching `integration_routing: null` now correctly clears the
-  field instead of silently dropping the value.
+ patching `integration_routing: null` now correctly clears the
+ field instead of silently dropping the value.
 - Required-fields check runs client-side before submit so a misconfigured
-  profile surfaces an inline error before the round-trip.
+ profile surfaces an inline error before the round-trip.
 
 ## See also
 
 - [Optimization overview](/help/optimization/overview) — the broader
-  scheduling + queue model.
+ scheduling + queue model.
 - [Rule actions](/help/rules/actions) — how `queue_optimization`
-  references a profile by name.
+ references a profile by name.

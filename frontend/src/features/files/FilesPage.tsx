@@ -107,6 +107,13 @@ export function FilesPage() {
           </Card>
         ) : (
           <Card>
+            {/* v1.9 Stage 2.4 — build an id→filename map for the
+                currently-rendered rows so the delete-confirmation
+                dialog can show real names instead of placeholders.
+                We map all visible rows (not just selected ones)
+                because the selection set may include ids the
+                operator selected on a previous page; missing
+                entries fall back to a placeholder in the dialog. */}
             <FilesToolbar
               libraries={s.libraries.data ?? []}
               libraryId={s.libraryId}
@@ -128,6 +135,14 @@ export function FilesPage() {
               selectionCount={s.selected.size}
               onClearSelection={s.clearSelection}
               selectedIds={s.selected}
+              selectedNames={
+                new Map(
+                  (s.list.data?.items ?? []).map((item) => [
+                    item.id,
+                    item.filename,
+                  ]),
+                )
+              }
               showColumnFilters={s.showColumnFilters}
               onToggleColumnFilters={() =>
                 s.setShowColumnFilters(!s.showColumnFilters)

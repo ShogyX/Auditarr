@@ -115,6 +115,15 @@ class PlaybackEventDTO:
     completed_at: _dt.datetime | None = None
     duration_s: int | None = None
 
+    # v1.9 OP-10 — provider's stable media id (Plex's
+    # ``ratingKey``). Used by the poller to reconcile a history
+    # DTO against an existing SSE-tracked PlaybackSession row.
+    # Defaults to None for backward compatibility — Jellyfin /
+    # Tracearr providers and any test fixtures built before this
+    # field landed continue to construct the DTO without
+    # specifying it.
+    rating_key: str | None = None
+
 
 # ── Stage 09 (v1.7): live playback DTO ──────────────────────────
 
@@ -316,6 +325,35 @@ class TranscodeJobStatus:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+# ── v1.9 Stage 5.1 — cross-integration search trigger ──────────
+
+
+@dataclass(slots=True)
+class SearchTriggerResult:
+    """Outcome of a provider's ``trigger_search`` call.
+
+    Returned by the worker job that fires when a rule's
+    ``search_upstream`` action matches. The dataclass is what gets
+    audit-logged + WS-emitted.
+
+    ``status``:
+      * ``"submitted"`` — upstream accepted the command. The
+        ``upstream_id`` field carries whichever id the provider
+        resolved (series_id, movie_id, etc.).
+      * ``"not_found"`` — the provider couldn't find the file's
+        path in its title list. Common cause: the integration's
+        root paths don't overlap the file's path.
+      * ``"error"`` — the upstream rejected the command, the API
+        was unreachable, etc. ``detail`` carries the human-readable
+        cause.
+    """
+
+    status: str
+    upstream_id: str | None = None
+    detail: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 @runtime_checkable
 class IntegrationProvider(Protocol):
     """Implemented by connector plugins.
@@ -447,5 +485,37 @@ class IntegrationProvider(Protocol):
         in ``routed`` status. Providers that own remote transcode
         execution must implement this; otherwise the worker
         treats routed items as terminal and never polls them.
+        """
+        ...
+
+    # ── v1.9 Stage 5.1: cross-integration search trigger ─────────
+    # Optional, per plan §301-308. Sonarr/Radarr/Bazarr implement
+    # this; everything else returns None or raises NotImplemented.
+    # The worker hatattr-checks before calling, mirroring the
+    # Stage 07 transcode pattern.
+    async def trigger_search(
+        self,
+        config: "IntegrationConfig",
+        media_file_path: str,
+    ) -> "SearchTriggerResult":
+        """Submit a search command to the upstream service for the
+        file at ``media_file_path``.
+
+        Implementations resolve ``media_file_path`` to an upstream
+        id (Sonarr series id / Radarr movie id / Bazarr series id)
+        via the integration's own API (e.g. listing series and
+        filtering by path-prefix). They then issue the appropriate
+        command:
+
+          * Sonarr: POST /api/v3/command {"name": "SeriesSearch", "seriesId": <id>}
+          * Radarr: POST /api/v3/command {"name": "MoviesSearch", "movieIds": [<id>]}
+          * Bazarr: POST /api/episodes/subtitles for the series
+
+        Returns a ``SearchTriggerResult`` carrying the outcome
+        (``status="submitted" | "not_found" | "error"``) plus
+        diagnostics for the audit log entry. Implementations
+        SHOULD NOT raise on upstream errors — capture them in
+        ``status="error"`` so the audit log records the failure
+        rather than the worker job retrying indefinitely.
         """
         ...

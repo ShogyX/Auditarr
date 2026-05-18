@@ -35,6 +35,7 @@ from typing import Any
 from app.core.logging import get_logger
 from app.events.bus import get_event_bus
 from app.integrations.manager import IntegrationManager
+from app.integrations.path_mapping import parse_mappings
 from app.security.secrets import get_secret_box
 from app.services.playback.session_manager import (
     SessionStateManager,
@@ -219,15 +220,26 @@ async def _run_plex_listener(
     # event) — sessions cleared on stop.
     enrichment_cache: dict[str, Any] = {}
 
+    # v1.9 OP-10 — parse the per-integration path mappings once
+    # at listener startup so the SessionStateManager can rewrite
+    # source_path before resolving media_file_id. The mappings
+    # are stored as a JSON list under ``config.options``; the
+    # parser tolerates malformed entries.
+    integration_mappings = parse_mappings(
+        (config.options or {}).get("path_mappings")
+    )
+
     state_manager = SessionStateManager(
         integration_id=integration_id,
         db_session_factory=db.session,
+        path_mappings=integration_mappings,
     )
 
     log.info(
         "worker.sse.listener_starting",
         integration_id=integration_id,
         integration_name=integration.name,
+        path_mappings=len(integration_mappings),
     )
 
     async for evt in provider.subscribe_sessions(config):
@@ -271,11 +283,18 @@ async def _run_plex_listener(
                 cached = enrichment_from_live_dto(dto)
                 enrichment_cache[evt.session_key] = cached
 
+        # v1.9 OP-10 — thread the rating_key from the SSE event
+        # through. Plex's SSE payload exposes it on the session
+        # state notification; if a particular event shape doesn't
+        # carry it the manager simply skips the column.
+        evt_rating_key = getattr(evt, "rating_key", None)
+
         await state_manager.handle_state_event(
             session_key=evt.session_key,
             state=state,
             view_offset_ms=evt.view_offset_ms,
             enrichment=cached,
+            rating_key=evt_rating_key,
         )
 
         # Drop enrichment for stopped sessions so memory doesn't

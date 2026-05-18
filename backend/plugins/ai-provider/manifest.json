@@ -1,0 +1,14 @@
+{
+  "id": "ai-provider",
+  "name": "AI Provider",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect to an LLM provider (ollama / openai / anthropic / custom_openapi) for AI-generated rule suggestions.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.ai-provider"],
+  "requires": []
+}

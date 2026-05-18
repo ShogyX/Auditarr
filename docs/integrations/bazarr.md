@@ -18,23 +18,23 @@ which lets you write rules like "flag any title with no English subtitles".
 ## What works today
 
 - **Healthcheck** — `GET /api/system/status` returns Bazarr's version and
-  whether the upstream Sonarr/Radarr SignalR connections are alive.
+ whether the upstream Sonarr/Radarr SignalR connections are alive.
 - **Library discovery** — returns `[]` deliberately. Bazarr doesn't own
-  libraries; it follows Sonarr/Radarr, so promote roots from those
-  integrations instead.
+ libraries; it follows Sonarr/Radarr, so promote roots from those
+ integrations instead.
 - **Tag mirroring** — `GET /api/series` + `GET /api/movies` combined.
-  Every title with a `missing_subtitles` list produces tags of the form
-  `missing-subs:<lang>` keyed by the title's on-disk path.
+ Every title with a `missing_subtitles` list produces tags of the form
+ `missing-subs:<lang>` keyed by the title's on-disk path.
 
 ## Configuration
 
-| Field                          | Example                        |
+| Field | Example |
 |--------------------------------|--------------------------------|
-| Server URL                     | `http://bazarr.local:6767`     |
-| API key                        | _from Settings → General_      |
-| Verify TLS                     | `true`                         |
-| Timeout (s)                    | `15`                           |
-| Mirror missing-subtitle tags   | `true`                         |
+| Server URL | `http://bazarr.local:6767` |
+| API key | _from Settings → General_ |
+| Verify TLS | `true` |
+| Timeout (s) | `15` |
+| Mirror missing-subtitle tags | `true` |
 
 ## Tag shape
 
@@ -45,4 +45,4 @@ For a series at `/data/tv/Breaking Bad` missing English and Spanish:
 (/data/tv/Breaking Bad, missing-subs:es)
 ```
 
-The rules engine (Stage 6) will consume these as conditions.
+The rules engine will consume these as conditions.

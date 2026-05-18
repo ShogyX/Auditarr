@@ -658,3 +658,183 @@ async def virustotal_status(
         "enabled": bool(vt_integration and vt_integration.enabled),
         "configured": vt_integration is not None,
     }
+
+
+# ── v1.9 Stage 7.1 — path mapping + webhook whitelist discovery ──
+
+
+@router.post(
+    "/{integration_id}/discover-path-mappings",
+    summary="Suggest path_mappings rows based on the upstream's root folders",
+)
+async def discover_path_mappings_endpoint(
+    integration_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+    registry: RegistryDep,
+    bus: EventBusDep,
+) -> dict[str, Any]:
+    """Probe the upstream's root folder / library endpoint and
+    return suggested path_mappings rows.
+
+    The endpoint is admin-only because it makes outbound HTTP
+    requests to the integration's configured base_url, which is
+    a side-effect-bearing operation we don't want non-admins
+    triggering. Mirror the existing admin gate on
+    POST /integrations/{id}/healthcheck.
+
+    Always returns HTTP 200 even on probe failure — the
+    suggestions list is just empty in that case. Surfacing the
+    error as a 5xx would prevent the operator from seeing the
+    "no suggestions, type manually" path.
+    """
+    from app.integrations.discovery import discover_path_mappings
+
+    repo = IntegrationRepository(session)
+    integration = await repo.get(integration_id)
+    if integration is None:
+        raise NotFoundError(f"Integration {integration_id!r} not found")
+
+    manager = _manager(session, registry, bus)
+    suggestions = await discover_path_mappings(
+        session=session,
+        manager=manager,
+        integration=integration,
+    )
+    return {
+        "integration_id": integration.id,
+        "kind": integration.kind,
+        "suggestions": [s.to_dict() for s in suggestions],
+    }
+
+
+@router.post(
+    "/{integration_id}/discover-webhook-sources",
+    summary="Surface recently-observed webhook source IPs",
+)
+async def discover_webhook_sources_endpoint(
+    integration_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+) -> dict[str, Any]:
+    """Read the last 24 hours of ``webhook.received`` audit log
+    rows for this integration and surface the distinct source
+    IPs with counts. Operator uses this to populate the source
+    whitelist with the IPs that have actually been reaching
+    them — no guessing.
+
+    Returns ``[]`` when there's nothing in the audit log;
+    that's a normal state for a new install."""
+    from app.integrations.discovery import discover_webhook_sources
+
+    repo = IntegrationRepository(session)
+    integration = await repo.get(integration_id)
+    if integration is None:
+        raise NotFoundError(f"Integration {integration_id!r} not found")
+
+    sources = await discover_webhook_sources(
+        session=session,
+        integration=integration,
+    )
+    return {
+        "integration_id": integration.id,
+        "sources": sources,
+    }
+
+
+# ── v1.9 Stage 7.2 — upstream tag listing ───────────────────────
+
+
+@router.get(
+    "/{integration_id}/upstream-tags",
+    summary="List tags available on the upstream",
+)
+async def list_upstream_tags(
+    integration_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+    registry: RegistryDep,
+    bus: EventBusDep,
+) -> dict[str, Any]:
+    """For Sonarr / Radarr / Bazarr integrations, GET the
+    upstream's ``/api/v3/tag`` endpoint and return the label
+    list. The frontend uses this to populate the tag-
+    allowlist / -denylist autocomplete chips: the operator
+    sees only tags that actually exist on the upstream,
+    eliminating typos.
+
+    Other kinds return ``[]`` (no tag concept).
+    """
+    repo = IntegrationRepository(session)
+    integration = await repo.get(integration_id)
+    if integration is None:
+        raise NotFoundError(f"Integration {integration_id!r} not found")
+
+    if integration.kind not in ("sonarr", "radarr", "bazarr"):
+        return {
+            "integration_id": integration.id,
+            "kind": integration.kind,
+            "tags": [],
+        }
+
+    from app.core.http import async_client
+
+    manager = _manager(session, registry, bus)
+    try:
+        config = manager.build_config(integration)
+    except Exception:
+        return {
+            "integration_id": integration.id,
+            "kind": integration.kind,
+            "tags": [],
+        }
+
+    base_url = str(config.options.get("base_url", "")).rstrip("/")
+    api_key = str(config.secrets.get("api_key", ""))
+    if not base_url or not api_key:
+        return {
+            "integration_id": integration.id,
+            "kind": integration.kind,
+            "tags": [],
+        }
+
+    headers = {"X-Api-Key": api_key}
+    try:
+        import httpx
+
+        async with async_client(
+            base_url=base_url, headers=headers, timeout=15.0
+        ) as client:
+            # Sonarr/Radarr use /api/v3/tag; Bazarr doesn't have
+            # a tag endpoint per se — we surface a synthetic
+            # tag list (missing-subs:<lang>) derived from the
+            # languages endpoint. Hidden behind the same surface.
+            if integration.kind == "bazarr":
+                # Bazarr's languages endpoint — used to
+                # synthesize the "missing-subs:<lang>" tags
+                # Auditarr generates.
+                response = await client.get("/api/system/languages")
+                response.raise_for_status()
+                langs = (response.json() or {}).get("data") or []
+                tags = [
+                    f"missing-subs:{(lang.get('code2') or lang.get('code3') or '').lower()}"
+                    for lang in langs
+                    if (lang.get("code2") or lang.get("code3"))
+                ]
+            else:
+                response = await client.get("/api/v3/tag")
+                response.raise_for_status()
+                payload = response.json() or []
+                tags = [
+                    str(entry.get("label"))
+                    for entry in payload
+                    if entry.get("label")
+                ]
+    except httpx.HTTPError:
+        tags = []
+
+    return {
+        "integration_id": integration.id,
+        "kind": integration.kind,
+        "tags": sorted(set(tags)),
+    }

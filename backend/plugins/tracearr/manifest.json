@@ -1,0 +1,14 @@
+{
+  "id": "tracearr",
+  "name": "Tracearr",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Pull playback history events from a Tracearr instance.",
+  "backend_entry": "backend.py",
+  "routes": false,
+  "navigation": false,
+  "settings": false,
+  "permissions": [],
+  "capabilities": ["integration.tracearr"],
+  "requires": []
+}

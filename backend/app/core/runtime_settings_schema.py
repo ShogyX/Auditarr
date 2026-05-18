@@ -493,6 +493,47 @@ RUNTIME_EDITABLE: tuple[RuntimeFieldSpec, ...] = (
         field_constraints={},
         impact="immediate",
     ),
+    # ── v1.10 (OP-8 / OP-9) — language preferences ────────────
+    # Backs the foreign-audio dashboard tile and any operator-
+    # authored rule that consults preferred languages. Stored
+    # as a list of lowercase ISO 639-2 three-letter codes
+    # (``eng``, ``fra``, …). The Settings class' field
+    # validator already lowercases + splits comma-separated
+    # strings; this entry surfaces the same field through the
+    # runtime-settings panel for in-app editing.
+    RuntimeFieldSpec(
+        key="preferred_audio_languages",
+        label="Preferred audio languages",
+        description=(
+            "Comma-separated list of ISO 639-2 three-letter "
+            "language codes (e.g. 'eng,fra'). The foreign-audio "
+            "dashboard tile counts files whose primary audio "
+            "isn't in this list. Empty list disables the tile."
+        ),
+        category="dashboard",
+        field_type=list[str],
+        field_default=["eng"],
+        field_constraints={},
+        impact="immediate",
+        group="language_preferences",
+    ),
+    RuntimeFieldSpec(
+        key="preferred_subtitle_languages",
+        label="Preferred subtitle languages",
+        description=(
+            "Comma-separated list of ISO 639-2 codes for the "
+            "subtitle tracks that 'rescue' a foreign-audio file "
+            "from the dashboard count. A file with non-preferred "
+            "audio is only flagged if it ALSO has no subtitle "
+            "track in this list."
+        ),
+        category="dashboard",
+        field_type=list[str],
+        field_default=["eng"],
+        field_constraints={},
+        impact="immediate",
+        group="language_preferences",
+    ),
 )
 
 RUNTIME_EDITABLE_BY_KEY: dict[str, RuntimeFieldSpec] = {
@@ -575,6 +616,30 @@ def validate_runtime_setting(key: str, value: Any) -> Any:
     if validator_cls is None:
         validator_cls = _build_validator_model(spec)
         _VALIDATOR_CACHE[key] = validator_cls
+
+    # v1.10 — for ``list[str]`` fields the operator may type a
+    # comma-separated string in the UI text input. Pre-coerce so
+    # the pydantic validator (which expects a list) accepts both
+    # shapes. Mirror Settings._split_language_list: lowercase +
+    # strip + drop empties.
+    import typing as _t
+
+    origin = _t.get_origin(spec.field_type)
+    if origin is list and isinstance(value, str):
+        args = _t.get_args(spec.field_type)
+        if args and args[0] is str:
+            value = [
+                s.strip().lower()
+                for s in value.split(",")
+                if s.strip()
+            ]
+    elif origin is list and isinstance(value, list):
+        # Normalize list-of-strings too (lowercase + strip).
+        args = _t.get_args(spec.field_type)
+        if args and args[0] is str:
+            value = [
+                str(s).strip().lower() for s in value if str(s).strip()
+            ]
 
     try:
         validated = validator_cls(value=value)
@@ -660,6 +725,18 @@ def _type_name(t: type) -> str:
         return "number"
     if t is str:
         return "string"
+    # v1.10 — list-of-strings support for fields like
+    # ``preferred_audio_languages``. The frontend renders these as
+    # a comma-separated text input with a chip preview. We don't
+    # distinguish ``list[int]`` because no current setting needs
+    # it; add when needed.
+    import typing as _t
+
+    origin = _t.get_origin(t)
+    if origin is list:
+        args = _t.get_args(t)
+        if args and args[0] is str:
+            return "string_list"
     return "string"
 
 

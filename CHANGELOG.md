@@ -1,7 +1,61 @@
 # Changelog
 
-All notable changes to Auditarr. Dates reflect the day the stage was
-shipped from the workspace.
+All notable changes to Auditarr.
+
+## [1.9.0] — 2026-05-18 — Operator-quality release
+
+This is the largest release since v1.7, focused on the things operators actually run into during day-to-day use. The release groups into four themes: smarter rules, better visibility, cleaner workflows, and a hard pass on bugs and UX paper-cuts.
+
+### Smarter rules
+
+- **Rule recommendations engine** — the playback analyzer now generates rule suggestions from observed behavior (codec/container ratios, repeat-transcode patterns, missing subs on Bazarr-connected setups, stale rules with no recent matches). Every suggestion is operator-reviewed; nothing auto-deploys.
+- **AI rule authoring** — connect Ollama, OpenAI, Anthropic, or a custom OpenAPI endpoint as an integration. The dashboard's Suggestions card gains a "Generate from library" button that builds a context payload (anonymized file paths, no usernames), asks the model for proposed rules, and surfaces validated `RuleDefinition` shapes alongside the heuristic suggestions. Per-call token caps and a per-day call budget keep costs bounded; dismissed suggestions feed back into the prompt so bad ideas don't recur.
+- **Rule templates** — a Templates tab under Rules. Ready-to-clone bodies for common scenarios (Plex/Jellyfin compatibility tagging, subtitle-missing warnings, fat-HEVC bitrate flagging, orphaned-file cleanup). Cloned templates land as disabled custom rules for review before enabling.
+- **Search-upstream action** — rules can now trigger searches in connected Sonarr, Radarr, or Bazarr instances when they match. Use for "this file is orphaned → re-find it from indexers" automation. Audit-logged per fire; deduplicated per `(integration, file)`.
+- **Save & Evaluate** — the rule editor gains a companion button next to Save. Saves the rule and immediately fires it against every file in every library — operators no longer have to clarify "did this rule actually do anything to my existing media?" after saving.
+- **Nested AND/OR support** — the rule DSL already supported nested `all`/`any` combinators; the visual builder still flattens them with a "use JSON tab to edit" banner. A fully-recursive visual editor is deferred to v1.10.
+
+### Better visibility
+
+- **Categories card redesign** — replaces the bar-graph version. Sections for resolutions, top extensions, normalized containers, subtitle formats, subtitle and audio languages, unknown tracks, internal-vs-external subtitles, orphan count, and a sortable median-bitrate matrix. Every row is a deep-link to the Files page filtered to match.
+- **Median bitrate matrix** — `(library, resolution, codec, container)` cells with file counts and median bitrate. Sortable headers; click-through to filtered Files. Both Mbps and kbps shown so either unit is readable at a glance.
+- **Devices observed card** — top playback clients ranked by total plays, with per-device transcode ratio. Answers "which clients keep transcoding?" without opening Plex/Jellyfin's own dashboards.
+- **Live now card** — real-time playback session list from the new SSE listener. Shows what's playing, on what device, with what transcode decision.
+- **Foreign-audio surface** — counts files whose primary audio isn't in the operator's preferred languages and that carry no subtitles in the preferred set. Configurable via `AUDITARR_PREFERRED_AUDIO_LANGUAGES` / `AUDITARR_PREFERRED_SUBTITLE_LANGUAGES`.
+- **Rule-flagged incompatibilities surface** — counts files carrying any tag whose name contains "incompatible". Built-in `plex-incompatible-*` / `jellyfin-incompatible-*` rules populate it automatically when enabled.
+- **System logs page** — in-app log viewer for diagnosing issues without shell access. Filter by severity, category, time window, and free-text search. Download filtered records as newline-delimited JSON. Live-tail at the bottom of the list.
+
+### Cleaner workflows
+
+- **Direct file delete** — the Files page bulk action and the file detail drawer can delete files directly (move to `<data_dir>/trash/`, drop the row, audit-log the action). The old quarantine action has been retired; delete is one-way.
+- **Path mappings editor** — the per-integration path-mapping configuration moved to the Integrations page. Operators with mismatched mount points between Plex/Jellyfin and Auditarr's container see the editor in the same place they configure the integration itself.
+- **Tdarr handoff** — the integration scans both PluginsJSONDB and FlowsJSONDB for transcode profiles, tolerates the legacy `{"data": [...]}` wrapper, and surfaces flow profiles with a `(flow)` suffix so operators can tell them apart.
+- **Plex playback short-session visibility** — playback events that complete before Plex's history endpoint records them now reach the rules engine via a four-stage pipeline (SSE writer applies path mappings + resolves `media_file_id`; history poller reconciles closest-time matches; analyzer reads sessions as the primary source with events as fallback; housekeeping sweeps stuck sessions). Rules targeting playback behavior now see ALL plays, not just the watched-past-90% subset.
+- **Tracearr integration** — accept playback telemetry from Tracearr collectors. Useful when the media server doesn't expose a usable playback API.
+
+### Bugs and paper-cuts
+
+- Plex 4xx responses (other than 401/429) are now classified as permanent rejections rather than transient errors — the optimization queue no longer retries known-bad endpoints forever.
+- VirusTotal rule actions now fire against existing library files via the new `POST /rules/{id}/evaluate-now` endpoint. The "Save & Evaluate" button in the rule editor wires this directly.
+- Logs page download uses authenticated `fetch` + blob anchor (previously a top-level navigation that silently dropped the auth header and 401'd).
+- Dashboard category limit raised from 50 to 128 — the codec filter menu was 422'ing on its legitimate paginated requests.
+- AI suggestion deduplication uses a SHA-1 of the canonical JSON definition, so two identical proposals dedupe deterministically rather than crashing on the unique constraint.
+- AI suggestions containing `delete` actions are hard-rejected after schema validation. The system prompt forbids them, but the hard reject ensures destructive actions never reach the review surface.
+- Device upsert runs inside a savepoint so a race-induced integrity error rolls back cleanly. Device-name hashing trims whitespace so `" Living Room "` and `"Living Room"` collapse to one device.
+- Plugin manifest IDs now use dashes (`ai-provider`, not `ai_provider`). The 12 shipped plugin manifests are validated against their directory names in CI.
+- Built-in rule rows render with a clear "Built-in" badge and disabled-rule rows are visually toned down with opacity 0.4 and grayscale 60% so the table at a glance shows what's active.
+- Rules table column widths default to a wider layout suited for 1920px-class viewports; persisted widths from prior versions are preserved.
+- Logs API: tz-naive `since` queries are coerced to UTC. Negative cursors clamp to 0. Filtered records compute `last_error_at` from the filtered set rather than the buffer global.
+
+### Documentation
+
+- Every page under `docs/` has been swept of internal stage/migration/audit markers — documentation now describes what behavior is, not when or why historically it became that way.
+- 11 new pages cover the v1.9 surface: direct delete, categories card, devices, AI suggestions, language-preference surfaces, Tracearr, AI providers, rule templates, search-upstream, system logs, and factory reset.
+
+### Deferred to v1.10
+
+- Visual nested AND/OR rule editor (OP-2). Operators can author nested rules via the JSON tab today; the visual tab still flattens nested groups with a "use JSON" banner. A proper recursive editor needs a focused work block.
+- Dedicated Settings UI for the foreign-audio language preferences. Configuration via env var works; the dashboard tile echoes current values. Adding a list-of-strings field type to the runtime-settings describe machinery is a follow-up.
 
 ## [1.8.3] — 2026-05-17 — Critical worker crash-loop fix (Plex SSE)
 

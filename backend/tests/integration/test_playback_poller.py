@@ -384,3 +384,207 @@ async def test_poller_advances_cursor(seeded_env) -> None:
     from app.services.playback.poller import CURSOR_SAFETY_SKEW
 
     assert parsed == (now - _dt.timedelta(minutes=2)) - CURSOR_SAFETY_SKEW
+
+
+# ── v1.9 OP-10 — reconciliation tests ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_matches_closest_session_in_window(seeded_env) -> None:
+    """v1.9 OP-10 caveat 3: when two sessions share a rating_key
+    within the ±5min reconciliation window, the poller picks the
+    closest one by absolute |started_at - viewed_at|."""
+    from app.models.playback import PlaybackSession
+
+    db = seeded_env["db"]
+    make_manager = seeded_env["make_manager"]
+    stub = seeded_env["stub"]
+    integration_id = seeded_env["integration_id"]
+
+    target_time = _dt.datetime(2026, 5, 18, 12, 0, 0, tzinfo=_dt.UTC)
+
+    # Seed two SSE sessions with the same rating_key: one 4 min
+    # before target (further), one 1 min after target (closer).
+    async with db.session() as session:
+        far = PlaybackSession(
+            integration_id=integration_id,
+            session_key="sk-far",
+            rating_key="rk-42",
+            state="stopped",
+            decision="direct_play",
+            started_at=target_time - _dt.timedelta(minutes=4),
+            last_event_at=target_time - _dt.timedelta(minutes=3),
+        )
+        near = PlaybackSession(
+            integration_id=integration_id,
+            session_key="sk-near",
+            rating_key="rk-42",
+            state="stopped",
+            decision="direct_play",
+            started_at=target_time + _dt.timedelta(minutes=1),
+            last_event_at=target_time + _dt.timedelta(minutes=2),
+        )
+        session.add_all([far, near])
+        await session.commit()
+        await session.refresh(near)
+        near_id = near.id
+
+    # History DTO at target_time + rating_key=rk-42.
+    stub.next_batch = [
+        PlaybackEventDTO(
+            upstream_id="hist-42",
+            source_path="/data/movies/a.mkv",
+            decision="direct_play",
+            started_at=target_time,
+            rating_key="rk-42",
+        )
+    ]
+
+    async with db.session() as session:
+        integration = await session.get(Integration, integration_id)
+        poller = PlaybackPoller(
+            session=session,
+            manager=make_manager(session),
+            event_bus=seeded_env["bus"],
+        )
+        await poller.poll_one(integration)
+
+    # Verify the CLOSER session was the one marked reconciled,
+    # and the event row got tagged with its id (caveat 4: insert
+    # preserved for diagnosability).
+    async with db.session() as session:
+        sessions = (
+            await session.execute(select(PlaybackSession))
+        ).scalars().all()
+        events = (
+            await session.execute(select(PlaybackEvent))
+        ).scalars().all()
+
+    by_key = {s.session_key: s for s in sessions}
+    assert by_key["sk-far"].reconciled_with_history is False
+    assert by_key["sk-near"].reconciled_with_history is True
+    assert len(events) == 1
+    assert events[0].reconciled_with_session_id == near_id
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_skips_when_rating_key_null(seeded_env) -> None:
+    """v1.9 OP-10 caveat 11: a DTO with rating_key=None (Jellyfin
+    shape) must NEVER match a session — even one whose rating_key
+    is also None — to prevent cross-provider accidental joins."""
+    from app.models.playback import PlaybackSession
+
+    db = seeded_env["db"]
+    make_manager = seeded_env["make_manager"]
+    stub = seeded_env["stub"]
+    integration_id = seeded_env["integration_id"]
+
+    target_time = _dt.datetime(2026, 5, 18, 13, 0, 0, tzinfo=_dt.UTC)
+
+    async with db.session() as session:
+        session.add(
+            PlaybackSession(
+                integration_id=integration_id,
+                session_key="sk-jelly",
+                rating_key=None,  # Jellyfin SSE row.
+                state="stopped",
+                decision="direct_play",
+                started_at=target_time,
+                last_event_at=target_time,
+            )
+        )
+        await session.commit()
+
+    stub.next_batch = [
+        PlaybackEventDTO(
+            upstream_id="hist-no-rk",
+            source_path="/data/movies/a.mkv",
+            decision="direct_play",
+            started_at=target_time,
+            rating_key=None,
+        )
+    ]
+
+    async with db.session() as session:
+        integration = await session.get(Integration, integration_id)
+        poller = PlaybackPoller(
+            session=session,
+            manager=make_manager(session),
+            event_bus=seeded_env["bus"],
+        )
+        await poller.poll_one(integration)
+
+    async with db.session() as session:
+        sessions = (
+            await session.execute(select(PlaybackSession))
+        ).scalars().all()
+        events = (
+            await session.execute(select(PlaybackEvent))
+        ).scalars().all()
+
+    assert all(s.reconciled_with_history is False for s in sessions)
+    assert len(events) == 1
+    assert events[0].reconciled_with_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_preserves_event_row(seeded_env) -> None:
+    """v1.9 OP-10 caveat 4: even when a session matches, the
+    PlaybackEvent row is still INSERTED (tagged with the session
+    id). This preserves diagnosability — if reconciliation is
+    wrong, operators can inspect the event row."""
+    from app.models.playback import PlaybackSession
+
+    db = seeded_env["db"]
+    make_manager = seeded_env["make_manager"]
+    stub = seeded_env["stub"]
+    integration_id = seeded_env["integration_id"]
+
+    target_time = _dt.datetime(2026, 5, 18, 14, 0, 0, tzinfo=_dt.UTC)
+
+    async with db.session() as session:
+        sess = PlaybackSession(
+            integration_id=integration_id,
+            session_key="sk-preserved",
+            rating_key="rk-99",
+            state="stopped",
+            decision="direct_play",
+            started_at=target_time,
+            last_event_at=target_time + _dt.timedelta(minutes=1),
+        )
+        session.add(sess)
+        await session.commit()
+        await session.refresh(sess)
+        sess_id = sess.id
+
+    stub.next_batch = [
+        PlaybackEventDTO(
+            upstream_id="hist-99",
+            source_path="/data/movies/a.mkv",
+            decision="direct_play",
+            started_at=target_time,
+            rating_key="rk-99",
+        )
+    ]
+
+    async with db.session() as session:
+        integration = await session.get(Integration, integration_id)
+        poller = PlaybackPoller(
+            session=session,
+            manager=make_manager(session),
+            event_bus=seeded_env["bus"],
+        )
+        outcome = await poller.poll_one(integration)
+
+    # Event was inserted, not skipped.
+    assert outcome.inserted == 1
+    async with db.session() as session:
+        events = (
+            await session.execute(select(PlaybackEvent))
+        ).scalars().all()
+        sessions = (
+            await session.execute(select(PlaybackSession))
+        ).scalars().all()
+    assert len(events) == 1
+    assert events[0].reconciled_with_session_id == sess_id
+    assert sessions[0].reconciled_with_history is True

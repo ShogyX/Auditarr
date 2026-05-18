@@ -196,7 +196,15 @@ async def test_vocabulary_action_set_unchanged_post_stage_06(
     """Stage 06 doesn't add a new action type — the union is
     still {set_severity, add_tag, queue_optimization, notify,
     delete}. Throttle and ack are extensions of existing
-    actions / rule-level metadata, not new actions."""
+    actions / rule-level metadata, not new actions.
+
+    v1.9 Stage 4.6 + 5.1 update: ``vt_lookup`` and
+    ``search_upstream`` ARE new action types added in v1.9, so
+    the pinned set now includes them. The "post Stage 06" framing
+    of this test is historical — the assertion has been updated
+    once per stage that adds an action and the test name's "post"
+    phrasing now means "no SURPRISES post-Stage-06"; explicit
+    additions in later stages are still recorded here."""
     headers = await _admin_headers(client)
     resp = await client.get("/api/v1/rules/vocabulary", headers=headers)
     body = resp.json()
@@ -207,4 +215,6 @@ async def test_vocabulary_action_set_unchanged_post_stage_06(
         "queue_optimization",
         "notify",
         "delete",
+        "vt_lookup",
+        "search_upstream",
     }

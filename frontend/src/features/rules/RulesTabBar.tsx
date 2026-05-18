@@ -18,6 +18,7 @@ export interface RulesTabBarProps {
   onTab: (next: RulesTab) => void;
   customCount: number;
   builtinCount: number;
+  templatesCount: number;
   suggestionsCount: number;
 }
 
@@ -26,6 +27,7 @@ export function RulesTabBar({
   onTab,
   customCount,
   builtinCount,
+  templatesCount,
   suggestionsCount,
 }: RulesTabBarProps) {
   return (
@@ -49,6 +51,19 @@ export function RulesTabBar({
       >
         Built-in{" "}
         <span className="font-mono text-muted-2 ml-1">{builtinCount}</span>
+      </button>
+      {/* v1.9 Stage 4.4 — Templates tab. The count badge surfaces
+          the number of shipped templates the operator can pick
+          from. */}
+      <button
+        type="button"
+        role="tab"
+        aria-selected={tab === "templates"}
+        className={tab === "templates" ? "on" : ""}
+        onClick={() => onTab("templates")}
+      >
+        Templates{" "}
+        <span className="font-mono text-muted-2 ml-1">{templatesCount}</span>
       </button>
       <button
         type="button"

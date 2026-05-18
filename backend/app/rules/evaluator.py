@@ -32,7 +32,9 @@ from app.rules.schema import (
     Notify,
     QueueOptimization,
     RuleDefinition,
+    SearchUpstream,
     SetSeverity,
+    VtLookup,
 )
 
 
@@ -110,6 +112,23 @@ class EvaluationResult:
     # in lockstep.
     delete_paths: list[str] = field(default_factory=list)
     delete_reasons: list[str] = field(default_factory=list)
+    # v1.9 Stage 4.6 — VT lookup as a rule action. When a rule's
+    # ``vt_lookup`` action matches, the evaluator flips this to
+    # True; the service layer reads the flag and enqueues the
+    # file into the VT queue (same write target as the scanner's
+    # auto-enqueue path). A boolean is enough — a file matched by
+    # multiple ``vt_lookup`` actions still results in one queue
+    # entry; the VT queue is idempotent on (media_file_id).
+    vt_lookup_requested: bool = False
+    # v1.9 Stage 5.1 — Cross-integration search trigger. Each
+    # matched ``search_upstream`` action appends one entry of
+    # ``{"target": str, "integration_id": str}``. The service
+    # layer reads the list, deduplicates by (integration_id,
+    # media_file_id), and enqueues one worker job per unique
+    # pair. Two parallel ``search_upstream`` actions on the same
+    # rule (e.g. one for Sonarr and one for Bazarr) yield two
+    # entries — distinct integrations, distinct jobs.
+    search_upstream_requests: list[dict[str, str]] = field(default_factory=list)
 
     def merge_into(self, other: "EvaluationResult") -> None:
         """Combine this result's escalations into ``other``.
@@ -131,6 +150,16 @@ class EvaluationResult:
         # Stage 05: delete_paths + delete_reasons stay paired by index.
         other.delete_paths.extend(self.delete_paths)
         other.delete_reasons.extend(self.delete_reasons)
+        # v1.9 Stage 4.6 — boolean OR (any matching rule's
+        # vt_lookup action escalates the aggregate).
+        if self.vt_lookup_requested:
+            other.vt_lookup_requested = True
+        # v1.9 Stage 5.1 — accumulate search-upstream requests.
+        # The service layer is responsible for deduplication; we
+        # extend the raw list here so the merge stays pure
+        # concatenation (no per-merge dedup cost, which would
+        # otherwise be O(N²) across many rules).
+        other.search_upstream_requests.extend(self.search_upstream_requests)
 
 
 # ── Public API ────────────────────────────────────────────────────────
@@ -161,6 +190,34 @@ def _match(node: Match, input_: EvaluationInput) -> bool:
 
 def _eval_condition(condition: Condition, input_: EvaluationInput) -> bool:
     value = getattr(input_, condition.field, None)
+    # v1.9 Stage 4.1 — language-field comparisons normalize both
+    # sides through ``normalize_language`` so a rule like
+    # ``audio_languages contains "en"`` matches files whose
+    # ffprobe-derived list contains ``eng`` / ``English`` /
+    # ``en-US`` / etc. Pre-1.9 strict string equality made these
+    # rules silently miss the cases operators most expected to
+    # work. The two language fields are the only ones that get
+    # this treatment — everything else (codecs, paths, tags)
+    # stays case-sensitive and exact, matching pre-1.9 behavior.
+    if condition.field in ("audio_languages", "subtitle_languages"):
+        from app.rules.language_normalize import (
+            normalize_language,
+            normalize_languages,
+        )
+
+        actual_norm = normalize_languages(value if isinstance(value, list) else [])
+        expected_raw = condition.value
+        if isinstance(expected_raw, list):
+            expected_norm = [
+                n
+                for n in (normalize_language(v) for v in expected_raw if isinstance(v, str))
+                if n is not None
+            ]
+        elif isinstance(expected_raw, str):
+            expected_norm = normalize_language(expected_raw)
+        else:
+            expected_norm = expected_raw
+        return _apply_op(condition.op, actual_norm, expected_norm)
     return _apply_op(condition.op, value, condition.value)
 
 
@@ -256,5 +313,29 @@ def _apply_action(
         # audit row still carries something operator-readable.
         result.delete_paths.append(input_.path)
         result.delete_reasons.append(action.reason or "Deleted by rule")
+        return
+    if isinstance(action, VtLookup):
+        # v1.9 Stage 4.6 — flag the file for VT enqueue. The
+        # service layer (RulesService) reads the flag and writes a
+        # row to the vt_queue table; the VT plugin's worker drains
+        # it at its own quota-respecting cadence. We don't pass
+        # ``input_.media_file_id`` along here because the result
+        # object is already keyed to one file (the service knows
+        # which one).
+        result.vt_lookup_requested = True
+        return
+    if isinstance(action, SearchUpstream):
+        # v1.9 Stage 5.1 — record the request. Service layer
+        # deduplicates and enqueues one worker job per unique
+        # (integration_id, media_file_id). The action carries
+        # both ``target`` (kind discriminator, redundant with the
+        # integration row's kind but kept for explicit auditing)
+        # and ``integration_id`` (which row to call).
+        result.search_upstream_requests.append(
+            {
+                "target": action.target,
+                "integration_id": action.integration_id,
+            }
+        )
         return
     raise TypeError(f"Unknown action type: {type(action)!r}")

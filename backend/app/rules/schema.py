@@ -338,8 +338,99 @@ class Delete(BaseModel):
 # validation because that literal is no longer in the
 # discriminated union below.
 
+
+# v1.9 Stage 4.6 — VT lookup as a rule action.
+class VtLookup(BaseModel):
+    """Enqueue the matched file for a VirusTotal lookup.
+
+    The action is a write to the VT queue, not a direct API call —
+    the VT plugin's worker drains the queue at its own quota-
+    respecting cadence. Operators use this for scoped lookups
+    that the scanner's automatic enqueue can't express: "lookup
+    only files matching THIS rule" (e.g. extension == 'exe',
+    extension == 'iso', tags contains 'downloaded').
+
+    The action has no parameters today — the VT plugin is the
+    source of truth for which API tier / quota window / wait
+    strategy to use. We keep the schema open for future params
+    (priority, scan-now-vs-deferred) by using ``extra="forbid"``
+    so a typo in a future param fails loudly rather than
+    silently doing nothing.
+
+    Distinct from the scanner-side ``enqueue_for_vt_lookup`` path
+    (which the Stage 4.6 scope-restriction config governs); both
+    paths terminate in the same ``vt_queue`` table.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["vt_lookup"]
+
+
+# v1.9 Stage 5.1 — Cross-integration search trigger.
+class SearchUpstream(BaseModel):
+    """Trigger a search on an upstream integration (Sonarr / Radarr /
+    Bazarr) for the matched file.
+
+    Use cases:
+      * "When a file becomes orphaned, trigger Sonarr to re-search
+        the series."
+      * "When a 4K HEVC file gets flagged crit, kick Bazarr to
+        search for English subtitles."
+
+    The rule engine flags the request on the EvaluationResult; the
+    service layer enqueues a worker job (one per unique
+    (integration_id, media_file_id) pair, deduplicated). The worker
+    calls the provider's ``trigger_search`` method, which resolves
+    the upstream id and submits the search.
+
+    Schema:
+      * ``target`` is the kind discriminator ("sonarr" / "radarr" /
+        "bazarr"). The discriminator is validated against the
+        SEARCH_UPSTREAM_TARGETS set below.
+      * ``integration_id`` is the operator-selected integration row.
+        Required so the operator can have multiple Sonarr
+        integrations and pick which one to fire.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["search_upstream"]
+    target: str = Field(
+        ...,
+        description=(
+            "Upstream integration kind: 'sonarr', 'radarr', or 'bazarr'."
+        ),
+    )
+    integration_id: str = Field(
+        ...,
+        min_length=1,
+        description="ID of the enabled integration to call.",
+    )
+
+    @field_validator("target")
+    @classmethod
+    def _validate_target(cls, v: str) -> str:
+        v_norm = v.strip().lower()
+        if v_norm not in SEARCH_UPSTREAM_TARGETS:
+            raise ValueError(
+                f"target must be one of {sorted(SEARCH_UPSTREAM_TARGETS)}, "
+                f"got {v!r}"
+            )
+        return v_norm
+
+
+SEARCH_UPSTREAM_TARGETS: frozenset[str] = frozenset({"sonarr", "radarr", "bazarr"})
+
+
 Action = Annotated[
-    Union[SetSeverity, AddTag, QueueOptimization, Notify, Delete],
+    Union[
+        SetSeverity,
+        AddTag,
+        QueueOptimization,
+        Notify,
+        Delete,
+        VtLookup,
+        SearchUpstream,
+    ],
     Field(discriminator="type"),
 ]
 

@@ -35,8 +35,8 @@ plugins/my-thing/
 ├── __init__.py
 ├── README.md
 └── tests/
-    ├── __init__.py
-    └── test_plugin.py
+ ├── __init__.py
+ └── test_plugin.py
 ```
 
 Restart Auditarr. The plugin shows up under **Settings → Plugins**.
@@ -47,13 +47,13 @@ Restart Auditarr. The plugin shows up under **Settings → Plugins**.
 
 ```json
 {
-  "id": "my-thing",
-  "name": "My Thing",
-  "version": "0.1.0",
-  "type": "generic",
-  "description": "Does the thing.",
-  "backend_entry": "__init__.py",
-  "capabilities": []
+ "id": "my-thing",
+ "name": "My Thing",
+ "version": "0.1.0",
+ "type": "generic",
+ "description": "Does the thing.",
+ "backend_entry": "__init__.py",
+ "capabilities": []
 }
 ```
 
@@ -85,12 +85,12 @@ lifecycle).
 from app.plugins.contracts import Plugin, PluginContext
 
 class MyPlugin(Plugin):
-    async def on_startup(self):
-        log = self.context.logger()
-        log.info("my_thing.started")
+ async def on_startup(self):
+ log = self.context.logger()
+ log.info("my_thing.started")
 
 async def register(context: PluginContext) -> MyPlugin:
-    return MyPlugin(context)
+ return MyPlugin(context)
 ```
 
 ## The plugin context
@@ -102,8 +102,8 @@ The argument to `register()` is the SDK surface:
 | `context.manifest` | The parsed `manifest.json` |
 | `context.directory` | The plugin's directory on disk |
 | `context.register_capability(name, provider)` | Register an arbitrary capability |
-| `context.register_integration(provider)` | Register an integration (Stage 5 SDK) |
-| `context.register_notification_channel(provider)` | Register a channel (Stage 9 SDK) |
+| `context.register_integration(provider)` | Register an integration |
+| `context.register_notification_channel(provider)` | Register a channel |
 | `context.http_client(base_url=, timeout=, headers=)` | Pre-configured `httpx.AsyncClient` |
 | `context.events` | The shared `EventBus` |
 | `context.logger()` | Structured logger bound to the plugin id |
@@ -141,12 +141,12 @@ Declare a Pydantic model as your `Plugin.settings_schema`:
 from pydantic import BaseModel, Field
 
 class MyThingSettings(BaseModel):
-    enabled: bool = Field(default=True)
-    polling_interval_seconds: int = Field(default=300, ge=30, le=86400)
-    target_url: str | None = None
+ enabled: bool = Field(default=True)
+ polling_interval_seconds: int = Field(default=300, ge=30, le=86400)
+ target_url: str | None = None
 
 class MyPlugin(Plugin):
-    settings_schema = MyThingSettings
+ settings_schema = MyThingSettings
 ```
 
 The host exposes the schema in the UI (**Settings → Plugins → My
@@ -160,13 +160,13 @@ Read persisted values from your plugin code:
 from app.services.plugin_settings import PluginSettingsService
 
 async def my_periodic_task(session):
-    settings = await PluginSettingsService(session).values_or_defaults(
-        "my-thing"
-    )
-    if not settings["enabled"]:
-        return
-    interval = settings["polling_interval_seconds"]
-    ...
+ settings = await PluginSettingsService(session).values_or_defaults(
+ "my-thing"
+)
+ if not settings["enabled"]:
+ return
+ interval = settings["polling_interval_seconds"]
+ ...
 ```
 
 `values_or_defaults` merges the persisted values on top of the schema's
@@ -175,12 +175,12 @@ defaults, so missing keys never raise.
 ### What plugin settings are NOT for
 
 - **Secrets.** Plugin settings are stored unencrypted. If you need API
-  keys or passwords, register an *integration* instead — the
-  `Integration` model carries AES-256-GCM-encrypted secrets and the SDK
-  handles the encryption transparently.
+ keys or passwords, register an *integration* instead — the
+ `Integration` model carries AES-256-GCM-encrypted secrets and the SDK
+ handles the encryption transparently.
 - **Per-resource config.** Settings are per-plugin (one row), not
-  per-thing-the-plugin-manages. A plugin that polls N servers should
-  expose each server as an integration, not pack a list into settings.
+ per-thing-the-plugin-manages. A plugin that polls N servers should
+ expose each server as an integration, not pack a list into settings.
 
 ## Capabilities
 
@@ -216,7 +216,7 @@ correctly:
 
 ```python
 async with self.context.http_client(base_url="https://api.example.test") as client:
-    response = await client.get("/things")
+ response = await client.get("/things")
 ```
 
 The host adds no auth/credentials automatically. Pull them from plugin
@@ -233,11 +233,11 @@ may emit names from that list, or namespace their own
 
 ```python
 async def on_startup(self):
-    self.context.events.subscribe("scan.completed", self._on_scan_done)
+ self.context.events.subscribe("scan.completed", self._on_scan_done)
 
 async def _on_scan_done(self, event):
-    log = self.context.logger()
-    log.info("my_thing.saw_scan", run_id=event.payload.get("run_id"))
+ log = self.context.logger()
+ log.info("my_thing.saw_scan", run_id=event.payload.get("run_id"))
 ```
 
 ## Testing your plugin
@@ -264,15 +264,15 @@ adding an entry like:
 
 ```json
 {
-  "id": "my-thing",
-  "name": "My Thing",
-  "description": "Does the thing.",
-  "author": "@you",
-  "version": "0.1.0",
-  "source_url": "https://github.com/you/my-thing",
-  "install_url": "https://github.com/you/my-thing/releases/download/v0.1.0/my-thing-0.1.0.tar.gz",
-  "install_instructions": "Extract into ./plugins/ and restart Auditarr.",
-  "categories": ["analysis"]
+ "id": "my-thing",
+ "name": "My Thing",
+ "description": "Does the thing.",
+ "author": "@you",
+ "version": "0.1.0",
+ "source_url": "https://github.com/you/my-thing",
+ "install_url": "https://github.com/you/my-thing/releases/download/v0.1.0/my-thing-0.1.0.tar.gz",
+ "install_instructions": "Extract into ./plugins/ and restart Auditarr.",
+ "categories": ["analysis"]
 }
 ```
 
@@ -284,13 +284,13 @@ operator's behalf.
 ## What's NOT in the SDK
 
 - **In-process hot reload.** Reloading a plugin's Python code without
-  restarting the host is technically possible and a footgun in
-  practice — long-running asyncio tasks, stale capability references,
-  and orphaned event subscribers all conspire to make it unreliable.
-  Restart the host (or the container) after changing plugin code.
+ restarting the host is technically possible and a footgun in
+ practice — long-running asyncio tasks, stale capability references,
+ and orphaned event subscribers all conspire to make it unreliable.
+ Restart the host (or the container) after changing plugin code.
 - **Auto-install from the gallery.** See above. Trust boundary lives
-  with the operator.
+ with the operator.
 - **Cross-plugin direct imports.** Plugins should not `import` other
-  plugins. Communicate through capabilities or events. The plugin
-  loader does not guarantee load order, so import-time coupling is a
-  bug waiting to happen.
+ plugins. Communicate through capabilities or events. The plugin
+ loader does not guarantee load order, so import-time coupling is a
+ bug waiting to happen.

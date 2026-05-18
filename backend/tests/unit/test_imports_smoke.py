@@ -1,4 +1,4 @@
-"""v1.8.3 — Import-smoke test for every reachable app.* module.
+"""v1.9.0 — Import-smoke test for every reachable app.* module.
 
 Background: v1.8.0 shipped with a typo in ``app/worker_sse.py`` —
 ``from app.security.box import get_secret_box`` where the real
@@ -78,7 +78,7 @@ def test_module_imports_cleanly(module_name: str) -> None:
 
 
 def test_worker_sse_imports_specifically() -> None:
-    """v1.8.3 explicit regression: ``app.worker_sse`` was broken
+    """v1.9.0 (continued) — v1.8.3 explicit regression: ``app.worker_sse`` was broken
     in v1.8.0-1.8.2 and the gap wasn't caught by parametrized
     coverage above (which is the actual mitigation; this test
     just makes the specific failure mode obvious to the next

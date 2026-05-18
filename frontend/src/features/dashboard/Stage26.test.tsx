@@ -199,6 +199,64 @@ const CATEGORIES = [
   },
 ];
 
+// v1.9 Stage 3.3 — the CategoriesCard now fetches a structured
+// composition payload from /dashboard/composition. The old
+// /dashboard/categories endpoint is still reachable but no longer
+// drives the card. We mock both so any in-flight DashboardPage
+// queries continue to resolve.
+const COMPOSITION = {
+  resolutions: [
+    { key: "1080p", label: "1080p", count: 60, total_size_bytes: 10 * 1024 * 1024 * 1024 },
+    { key: "720p", label: "720p", count: 30, total_size_bytes: 5 * 1024 * 1024 * 1024 },
+    { key: "4k", label: "4K", count: 10, total_size_bytes: 1 * 1024 * 1024 * 1024 },
+  ],
+  extensions: [
+    { key: "mkv", label: "mkv", count: 70, total_size_bytes: 12 * 1024 * 1024 * 1024 },
+    { key: "mp4", label: "mp4", count: 30, total_size_bytes: 4 * 1024 * 1024 * 1024 },
+  ],
+  containers: [
+    { key: "mkv", label: "MKV", count: 70, total_size_bytes: 12 * 1024 * 1024 * 1024 },
+    { key: "mp4", label: "MP4", count: 25, total_size_bytes: 3 * 1024 * 1024 * 1024 },
+  ],
+  subtitle_formats: [
+    { key: "subrip", label: "SRT", count: 40, total_size_bytes: 0 },
+  ],
+  subtitle_languages: [
+    { key: "en", label: "en", count: 50, total_size_bytes: 0 },
+    { key: "es", label: "es", count: 20, total_size_bytes: 0 },
+  ],
+  audio_languages: [
+    { key: "en", label: "en", count: 80, total_size_bytes: 0 },
+  ],
+  unknown_tracks: { video_unknown_count: 0, audio_unknown_count: 2 },
+  subtitles_internal_external: { internal: 40, external: 15 },
+  orphan_count: 3,
+  bitrate_matrix: [
+    {
+      library_id: "lib-aaa",
+      library_name: "Movies",
+      resolution_key: "1080p",
+      video_codec: "h264",
+      container: "MKV",
+      file_count: 60,
+      median_bitrate_kbps: 5000,
+    },
+  ],
+};
+
+const COMPOSITION_EMPTY = {
+  resolutions: [],
+  extensions: [],
+  containers: [],
+  subtitle_formats: [],
+  subtitle_languages: [],
+  audio_languages: [],
+  unknown_tracks: { video_unknown_count: 0, audio_unknown_count: 0 },
+  subtitles_internal_external: { internal: 0, external: 0 },
+  orphan_count: 0,
+  bitrate_matrix: [],
+};
+
 const RECENT_SCAN = {
   id: "scan-aaa",
   library_id: "lib-aaa",
@@ -243,6 +301,7 @@ beforeEach(() => {
     if (path.startsWith("/dashboard/recent-scans")) return [RECENT_SCAN];
     if (path.startsWith("/dashboard/recent-job-runs")) return [RECENT_JOB];
     if (path.startsWith("/dashboard/categories")) return CATEGORIES;
+    if (path.startsWith("/dashboard/composition")) return COMPOSITION;
     if (path === "/dashboard/sidebar-badges") {
       return { issuesOpen: 30, rulesEnabled: 4, activeOptimizations: 0 };
     }
@@ -258,40 +317,62 @@ afterEach(() => {
 // ── CategoriesCard ───────────────────────────────────────────
 
 describe("CategoriesCard", () => {
-  it("renders both group sections with their rows", async () => {
+  it("renders the v1.9 Stage 3.3 structured sections", async () => {
+    // The card now ships ten sections from /dashboard/composition
+    // rather than two bar-graph groups. Pin the sections an operator
+    // would expect to see for a populated library — anything visible
+    // here is a stable contract that downstream test selectors can
+    // rely on.
     render(wrap(<CategoriesCard />));
-    await screen.findByText("Video codec");
-    expect(screen.getByText("Container")).toBeInTheDocument();
+    await screen.findByText("Resolutions");
+    expect(screen.getByText("Containers")).toBeInTheDocument();
+    expect(screen.getByText("Top extensions")).toBeInTheDocument();
+    expect(screen.getByText("Subtitle languages")).toBeInTheDocument();
+    expect(screen.getByText("Audio languages")).toBeInTheDocument();
 
-    // Video codec rows
-    expect(screen.getByText("hevc")).toBeInTheDocument();
-    expect(screen.getByText("h264")).toBeInTheDocument();
-    expect(screen.getByText("av1")).toBeInTheDocument();
+    // Resolution rows surface bucket labels (1080p, 720p, 4K).
+    // The label "1080p" also appears in the bitrate-matrix row,
+    // so we assert ≥1 match rather than getByText (which insists
+    // on exactly one).
+    expect(screen.getAllByText("1080p").length).toBeGreaterThan(0);
+    expect(screen.getByText("720p")).toBeInTheDocument();
+    expect(screen.getByText("4K")).toBeInTheDocument();
 
-    // Container rows
-    expect(screen.getByText("matroska")).toBeInTheDocument();
-    expect(screen.getByText("mp4")).toBeInTheDocument();
+    // Container rows surface NORMALIZED labels — MKV / MP4, not
+    // the raw matroska / mp4 / mov demuxer aliases that the
+    // pre-3.3 card displayed verbatim. "MKV" appears in both the
+    // Containers section and the bitrate-matrix row.
+    expect(screen.getAllByText("MKV").length).toBeGreaterThan(0);
+    expect(screen.getByText("MP4")).toBeInTheDocument();
   });
 
-  it("marks unknown rows with the unprobed badge", async () => {
+  it("surfaces unknown-track and orphan counts when non-zero", async () => {
+    // The pre-1.9 "unknown" row badge moved to a dedicated
+    // section ("Unknown tracks") in Stage 3.3. The unknown-count
+    // signal still surfaces — just in a different DOM shape — so
+    // an operator with probe stragglers still sees them.
     render(wrap(<CategoriesCard />));
-    await screen.findByText("unknown");
-    // The 'unprobed' tag appears alongside the unknown row.
-    expect(screen.getByText(/unprobed/i)).toBeInTheDocument();
+    await screen.findByText("Unknown tracks");
+    expect(screen.getByText(/no audio codec/i)).toBeInTheDocument();
+    // Orphan section appears whenever orphan_count > 0.
+    expect(screen.getByText("Orphan files")).toBeInTheDocument();
   });
 
-  it("renders empty state when the library is empty", async () => {
+  it("renders empty state when the composition is empty", async () => {
     apiGet.mockImplementation(async (path: string) => {
-      if (path.startsWith("/dashboard/categories")) return [];
+      if (path.startsWith("/dashboard/composition")) return COMPOSITION_EMPTY;
       return null;
     });
     render(wrap(<CategoriesCard />));
-    await screen.findByText(/no files yet/i);
+    // Stage 3.3 changed the empty-state copy to talk about
+    // "media" (was "files") since sidecar files are now scoped
+    // out of the composition payload entirely.
+    await screen.findByText(/no media yet/i);
   });
 
   it("renders error state when the request fails", async () => {
     apiGet.mockImplementation(async (path: string) => {
-      if (path.startsWith("/dashboard/categories")) {
+      if (path.startsWith("/dashboard/composition")) {
         throw new Error("oops");
       }
       return null;

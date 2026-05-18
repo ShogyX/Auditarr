@@ -13,11 +13,16 @@ import httpx
 
 from app.core.http import async_client
 
+from app.integrations.path_mapping import (
+    TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+    TAG_DENYLIST_SCHEMA_FRAGMENT,
+)
 from app.integrations.types import (
     DiscoveredLibrary,
     HealthReport,
     IntegrationConfig,
     IntegrationProvider,
+    SearchTriggerResult,
     TagSync,
 )
 from app.plugins import Plugin, PluginContext
@@ -48,6 +53,10 @@ class RadarrProvider(IntegrationProvider):
                 "title": "Mirror tags per file",
                 "default": True,
             },
+            # v1.9 Stage 7.2 — see Sonarr backend for the longer
+            # comment on tag allowlist/denylist semantics.
+            "tag_allowlist": TAG_ALLOWLIST_SCHEMA_FRAGMENT,
+            "tag_denylist": TAG_DENYLIST_SCHEMA_FRAGMENT,
             "source_whitelist": {
                 "type": "array",
                 "title": "Inbound webhook source whitelist",
@@ -162,6 +171,77 @@ class RadarrProvider(IntegrationProvider):
                     )
                 )
         return out
+
+    # ── v1.9 Stage 5.1 — search trigger ─────────────────────────
+    async def trigger_search(
+        self,
+        config: IntegrationConfig,
+        media_file_path: str,
+    ) -> SearchTriggerResult:
+        """Trigger a Radarr MoviesSearch for the movie owning
+        ``media_file_path``.
+
+        Resolution: GET /api/v3/movie, pick the entry whose
+        ``path`` is the longest prefix match. POST a
+        ``MoviesSearch`` command with the single id in ``movieIds``.
+        Mirror of the Sonarr ``trigger_search`` path; the only
+        differences are the list endpoint (``/movie`` vs
+        ``/series``), the command name (``MoviesSearch`` vs
+        ``SeriesSearch``), and the payload key
+        (``movieIds`` vs ``seriesId``).
+        """
+        try:
+            async with self._client(config) as client:
+                list_response = await client.get("/api/v3/movie")
+                list_response.raise_for_status()
+                movie_list = list_response.json()
+
+                # Reuse the Sonarr helper — same shape, same logic.
+                from plugins.sonarr.backend import (
+                    _find_arr_id_by_path_prefix,
+                )
+
+                movie_id = _find_arr_id_by_path_prefix(
+                    movie_list, media_file_path
+                )
+                if movie_id is None:
+                    return SearchTriggerResult(
+                        status="not_found",
+                        detail=(
+                            f"No Radarr movie path is a prefix of "
+                            f"{media_file_path!r}"
+                        ),
+                    )
+
+                cmd_response = await client.post(
+                    "/api/v3/command",
+                    json={"name": "MoviesSearch", "movieIds": [movie_id]},
+                )
+                if cmd_response.status_code >= 400:
+                    return SearchTriggerResult(
+                        status="error",
+                        upstream_id=str(movie_id),
+                        detail=(
+                            f"Radarr rejected MoviesSearch command "
+                            f"(HTTP {cmd_response.status_code})"
+                        ),
+                    )
+                cmd_payload = cmd_response.json() if cmd_response.content else {}
+                return SearchTriggerResult(
+                    status="submitted",
+                    upstream_id=str(movie_id),
+                    detail="MoviesSearch command queued",
+                    metadata={
+                        "command_id": cmd_payload.get("id"),
+                        "command_name": "MoviesSearch",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            return SearchTriggerResult(
+                status="error", detail=f"HTTP error: {exc}"
+            )
+        except ValueError as exc:
+            return SearchTriggerResult(status="error", detail=str(exc))
 
 
 def register(context: PluginContext) -> Plugin:

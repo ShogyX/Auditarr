@@ -7,7 +7,13 @@
  * dirty-check purposes. Booleans don't get confused this way.
  */
 
-export type EditValue = string | number | boolean;
+// v1.10 — ``string[]`` added so the renderer for
+// ``string_list``-typed fields (like ``preferred_audio_languages``)
+// can pass a tokenized list through the edit state instead of a
+// raw string. The backend's pre-coerce accepts either, but
+// keeping the typed list inside the UI state means the chips
+// preview stays accurate without re-parsing on every render.
+export type EditValue = string | number | boolean | string[];
 export type Edits = Record<string, EditValue>;
 
 /** Value equality that tolerates the string-vs-number drift from

@@ -16,7 +16,7 @@ matches your environment:
 
 - **Docker** — recommended for most installs. The rest of this page.
 - **Bare-metal (LXC / VM)** — for hosts where Docker isn't available
-  or desired. See [getting-started/install-bare-metal](install-bare-metal).
+ or desired. See [getting-started/install-bare-metal](install-bare-metal).
 
 The two paths use the same backend, worker, and frontend — they
 differ only in how the runtime is packaged and supervised.
@@ -40,16 +40,16 @@ section below describes what the installer is doing under the hood.
 ## Requirements
 
 - Linux host with **Docker Engine ≥ 24** and the **`docker compose` v2
-  plugin**. Docker Desktop on macOS or Windows also works for kicking
-  the tires; for real deployments use a Linux host with persistent
-  storage.
+ plugin**. Docker Desktop on macOS or Windows also works for kicking
+ the tires; for real deployments use a Linux host with persistent
+ storage.
 - 1 GB RAM free (Postgres + Redis + the app together use ~600 MB at
-  rest, with headroom for scans).
+ rest, with headroom for scans).
 - `openssl` and `python3` available on the host (the installer uses
-  them for key generation and `.env` rewriting).
+ them for key generation and `.env` rewriting).
 - Outbound network access for the initial image pull. After install,
-  Auditarr only reaches out to the update feed and (optionally) the
-  plugin gallery.
+ Auditarr only reaches out to the update feed and (optionally) the
+ plugin gallery.
 
 ## Quick install
 
@@ -64,11 +64,11 @@ The script will:
 1. Verify Docker and the compose plugin.
 2. Generate a 32-byte hex `secret_key` via `openssl rand -hex 32`.
 3. Prompt for the first admin username, email, and password
-   (≥16 chars, confirmed twice).
+ (≥16 chars, confirmed twice).
 4. Prompt for any host paths you want mounted as libraries (read-only).
 5. Write `.env` (mode 600) from `.env.example`.
 6. Optionally write a `docker-compose.override.yml` with your library
-   mounts.
+ mounts.
 7. Run `docker compose pull && docker compose up -d`.
 8. Optionally start the `worker` profile.
 
@@ -81,27 +81,27 @@ rotate the secret key or change the admin credentials.
 ## Compose stack at a glance
 
 ```
-┌──────────┐    ┌──────────┐    ┌──────────┐
-│   app    │───▶│ postgres │    │  redis   │
-│ (FastAPI)│    │   :5432  │    │   :6379  │
-└────┬─────┘    └──────────┘    └────┬─────┘
-     │                                │
-     │                                │
-     ▼                                ▼
-┌──────────┐                    ┌──────────┐
-│  worker  │                    │  worker  │
-│  (ARQ)   │◀───────────────────│ schedules│
-└──────────┘                    └──────────┘
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ app │───▶│ postgres │ │ redis │
+│ (FastAPI)│ │ :5432 │ │ :6379 │
+└────┬─────┘ └──────────┘ └────┬─────┘
+ │ │
+ │ │
+ ▼ ▼
+┌──────────┐ ┌──────────┐
+│ worker │ │ worker │
+│ (ARQ) │◀───────────────────│ schedules│
+└──────────┘ └──────────┘
 ```
 
 - **`app`** — FastAPI + the SPA, exposed on port 8000.
 - **`postgres`** — primary data store. The default volume is
-  `auditarr_pg_data`.
+ `auditarr_pg_data`.
 - **`redis`** — ARQ job queue + ephemeral cache.
 - **`worker`** — the background worker profile. Start with
-  `docker compose --profile worker up -d`. Optional but recommended:
-  without it, scheduled jobs, optimization runs, and the housekeeping
-  trim won't fire.
+ `docker compose --profile worker up -d`. Optional but recommended:
+ without it, scheduled jobs, optimization runs, and the housekeeping
+ trim won't fire.
 
 ## Configuration reference
 
@@ -140,10 +140,10 @@ If you ran the installer and added paths, they're already in
 
 ```yaml
 services:
-  app:
-    volumes:
-      - /srv/media/movies:/mnt/library-1:ro
-      - /srv/media/tv:/mnt/library-2:ro
+ app:
+ volumes:
+ - /srv/media/movies:/mnt/library-1:ro
+ - /srv/media/tv:/mnt/library-2:ro
 ```
 
 In the UI, **Settings → Libraries → Add** points each library at the
@@ -159,7 +159,7 @@ container.
 
 ```bash
 sudo cp docker/updater/auditarr-update.service /etc/systemd/system/
-sudo $EDITOR /etc/systemd/system/auditarr-update.service   # set paths
+sudo $EDITOR /etc/systemd/system/auditarr-update.service # set paths
 sudo systemctl daemon-reload
 sudo systemctl enable --now auditarr-update
 journalctl -u auditarr-update -f
@@ -181,9 +181,9 @@ cp .env.example .env
 $EDITOR .env
 
 # 3. Set bootstrap admin env vars in .env
-#    AUDITARR_BOOTSTRAP_ADMIN_USERNAME=admin
-#    AUDITARR_BOOTSTRAP_ADMIN_EMAIL=admin@yourdomain.example
-#    AUDITARR_BOOTSTRAP_ADMIN_PASSWORD=...
+# AUDITARR_BOOTSTRAP_ADMIN_USERNAME=admin
+# AUDITARR_BOOTSTRAP_ADMIN_EMAIL=admin@yourdomain.example
+# AUDITARR_BOOTSTRAP_ADMIN_PASSWORD=...
 
 # 4. Add library mounts to docker-compose.override.yml if you want any
 
@@ -229,21 +229,21 @@ The updater handles in-place upgrades: see **Updates** in the help
 drawer. If you'd rather upgrade manually:
 
 ```bash
-git pull        # if you cloned the repo, otherwise extract the new release
+git pull # if you cloned the repo, otherwise extract the new release
 docker compose pull
 docker compose up -d
 ```
 
-Database migrations run on container start. The Stage 0..N migration
+Database migrations run on container start. The ..N migration
 chain is forward-only — Auditarr does not support downgrading a Postgres
 database that's been upgraded across releases.
 
 ## What's NOT in v1.0
 
 - **TLS termination.** Put a reverse proxy (Caddy, nginx, Traefik) in
-  front of port 8000.
+ front of port 8000.
 - **Multi-tenant.** One Auditarr instance serves one operator team.
 - **Native (non-Docker) packaging.** The compose stack is the only
-  supported installation path.
+ supported installation path.
 - **High availability.** Single instance, single Postgres. Use volume
-  backups; Auditarr is not designed for active-active.
+ backups; Auditarr is not designed for active-active.

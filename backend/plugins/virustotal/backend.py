@@ -504,6 +504,75 @@ class VirusTotalProvider(IntegrationProvider):
                 "minimum": 1,
                 "maximum": 60,
             },
+            # ── v1.9 Stage 4.6 — scan-scope restriction ────────
+            #
+            # Operators control which files the scanner auto-
+            # enqueues for VT lookup. Pre-1.9 the scanner enqueued
+            # EVERY hashable file in EVERY library — wasteful for
+            # operators whose library is overwhelmingly known-good
+            # media. The three lists below let them narrow:
+            #
+            #   * vt_scan_extensions — allowlist of file
+            #     extensions (no leading dot). Empty list means
+            #     no extension filter (pre-1.9 behavior).
+            #   * vt_scan_categories — allowlist of classifier
+            #     categories. Default ``["media"]`` skips the
+            #     scanner's auto-enqueue for sidecar files
+            #     (.nfo / .jpg / .srt). Operators who want to scan
+            #     EVERYTHING set this to the empty list.
+            #   * vt_scan_required_tags — every listed tag MUST be
+            #     present on the file (AND semantics). Operators
+            #     use this with a curating rule that tags files
+            #     "downloaded" / "untrusted".
+            #
+            # These rules govern the SCANNER's auto-enqueue path
+            # only. The rule-action ``vt_lookup`` (also Stage 4.6)
+            # bypasses the scope filter — the operator wrote that
+            # rule deliberately, so we honor it without applying
+            # scope-restriction.
+            "vt_scan_extensions": {
+                "type": "array",
+                "title": "Auto-enqueue: extensions",
+                "description": (
+                    "Allowlist of file extensions (no leading dot, lower-case) "
+                    "to auto-enqueue for VT scanning. Empty list = all "
+                    "extensions. Affects the scanner only; rule-action "
+                    "vt_lookup ignores this."
+                ),
+                "items": {"type": "string"},
+                "default": [],
+            },
+            "vt_scan_categories": {
+                "type": "array",
+                "title": "Auto-enqueue: categories",
+                "description": (
+                    "Allowlist of classifier categories to auto-enqueue. "
+                    "Default ['media'] excludes sidecars (.nfo, .jpg, .srt). "
+                    "Empty list = all categories."
+                ),
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "media",
+                        "subtitle",
+                        "image",
+                        "metadata",
+                        "junk",
+                        "unknown",
+                    ],
+                },
+                "default": ["media"],
+            },
+            "vt_scan_required_tags": {
+                "type": "array",
+                "title": "Auto-enqueue: required tags",
+                "description": (
+                    "All listed tags must be present on the file (AND). "
+                    "Empty list = no tag filter."
+                ),
+                "items": {"type": "string"},
+                "default": [],
+            },
         },
     }
     secret_fields: tuple[str, ...] = ("api_key",)
@@ -841,3 +910,64 @@ async def drain_vt_queue(
 
     await session.commit()
     return counters
+
+
+# ── v1.9 Stage 4.6 — VT scan-scope filter ──────────────────────
+
+
+def file_passes_vt_scan_scope(
+    *,
+    extension: str | None,
+    category: str | None,
+    tags: list[str] | None,
+    vt_options: dict[str, Any] | None,
+) -> bool:
+    """Return True if a file is in scope for VT auto-enqueue.
+
+    The three lists in the VT integration config form an AND
+    filter:
+      * extension MUST be in vt_scan_extensions (or list is empty)
+      * category MUST be in vt_scan_categories (or list is empty)
+      * EVERY tag in vt_scan_required_tags MUST be on the file
+
+    Pure function — takes the file's fields explicitly so callers
+    in the scanner and elsewhere don't have to construct a
+    MediaFile mock just to test scope. ``vt_options`` is the
+    options dict from the VT IntegrationConfig (i.e.
+    ``config.options``). When None or empty, the function returns
+    True (pre-1.9 behavior: no scope filter).
+    """
+    if not vt_options:
+        return True
+
+    # Extension check.
+    allowed_exts = vt_options.get("vt_scan_extensions") or []
+    if allowed_exts:
+        ext_norm = (extension or "").strip().lower().lstrip(".")
+        normalized_allow = {
+            e.strip().lower().lstrip(".") for e in allowed_exts if isinstance(e, str)
+        }
+        if ext_norm not in normalized_allow:
+            return False
+
+    # Category check.
+    allowed_cats = vt_options.get("vt_scan_categories") or []
+    if allowed_cats:
+        cat_norm = (category or "").strip().lower()
+        normalized_allow_cats = {
+            c.strip().lower() for c in allowed_cats if isinstance(c, str)
+        }
+        if cat_norm not in normalized_allow_cats:
+            return False
+
+    # Required-tags check (AND — every listed tag must be present).
+    required_tags = vt_options.get("vt_scan_required_tags") or []
+    if required_tags:
+        file_tags = {str(t).strip() for t in (tags or []) if t}
+        for needed in required_tags:
+            if not isinstance(needed, str):
+                continue
+            if needed.strip() not in file_tags:
+                return False
+
+    return True

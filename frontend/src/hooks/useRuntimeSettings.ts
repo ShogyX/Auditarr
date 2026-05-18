@@ -39,7 +39,14 @@ import { ApiError, apiClient } from "@/services/apiClient";
 import { invalidateRelated } from "@/lib/invalidate";
 
 // ── Types: shape returned by the backend ───────────────────────
-export type RuntimeFieldType = "boolean" | "integer" | "number" | "string";
+// v1.10 — ``string_list`` for comma-separated lists like
+// ``preferred_audio_languages``.
+export type RuntimeFieldType =
+  | "boolean"
+  | "integer"
+  | "number"
+  | "string"
+  | "string_list";
 export type RuntimeImpact = "immediate" | "next_tick";
 export type RuntimeSensitivity = "normal" | "elevated";
 

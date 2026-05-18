@@ -102,6 +102,12 @@ class _DiscoveryStub:
     async def fetch_live_playbacks(self, _config):  # noqa: ANN001, ANN202
         return []
 
+    # v1.9 Stage 5.1 — trigger_search stub for runtime_checkable.
+    async def trigger_search(self, _config, _media_file_path):  # noqa: ANN001, ANN202
+        from app.integrations.types import SearchTriggerResult
+
+        return SearchTriggerResult(status="error", detail="stub")
+
 
 assert isinstance(_DiscoveryStub(), IntegrationProvider)
 

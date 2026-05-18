@@ -20,6 +20,7 @@ import { RulesPage } from "@/features/rules/RulesPage";
 import { RuleEditorPage } from "@/features/rules/RuleEditorPage";
 import { ScanDetailPage } from "@/features/scans/ScanDetailPage";
 import { SettingsPage } from "@/features/settings/SettingsPage";
+import { LogsPage } from "@/features/system/LogsPage";
 import { usePluginPages } from "@/plugins/registry";
 
 export function AppRoutes() {
@@ -76,6 +77,10 @@ export function AppRoutes() {
             on the backend; the page itself doesn't gate access — a
             non-admin user just sees the API's 403 error state. */}
         <Route path="settings/audit" element={<AuditLogPage />} />
+        {/* v1.9 Stage 8.1 — Logs page. Admin-only at the API
+            layer; non-admins see the React Query 403 error
+            surface inside the page itself. */}
+        <Route path="system/logs" element={<LogsPage />} />
         <Route path="help" element={<HelpPage />} />
         {/* Stage 5 (audit follow-up): self-service account page.
             Linked from the avatar button in TopNav. */}

@@ -26,7 +26,6 @@ import { useUiStore } from "@/stores/uiStore";
 
 import { HousekeepingActionsCard } from "./HousekeepingActionsCard";
 import { LibraryEditDialog } from "./LibraryEditDialog";
-import { PathMappingsPanel } from "./PathMappingsPanel";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import { SecretsPanel } from "./SecretsPanel";
 import { SystemMaintenanceCard } from "./SystemMaintenanceCard";
@@ -62,7 +61,7 @@ export function SettingsPage() {
         sub="Workspace appearance · libraries · admin tools"
         helpKey="settings.admin"
       />
-      <div className="p-6 flex flex-col gap-6 max-w-7xl">
+      <div className="p-6 flex flex-col gap-6 max-w-7xl xl:max-w-none">
         {/* Stage 6: settings sub-category tabs. Reuses the
             ``.segmented`` primitive — same component vocabulary as
             ``RulesTabBar`` — so no new CSS is introduced. role/aria
@@ -86,15 +85,6 @@ export function SettingsPage() {
             onClick={() => setTab("system")}
           >
             System
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "integrations"}
-            className={tab === "integrations" ? "on" : ""}
-            onClick={() => setTab("integrations")}
-          >
-            Integrations
           </button>
           <button
             type="button"
@@ -175,8 +165,11 @@ export function SettingsPage() {
                 full editor is heavy; a 3-line summary here keeps the
                 workspace overview short while making the surface
                 discoverable to operators who don't think to click
-                "Integrations". */}
-            <PathMappingsSummaryCard onJump={() => setTab("integrations")} />
+                "Integrations".
+                v1.9 Stage 2.1: target is now /integrations, not the
+                Settings → Integrations sub-tab (which no longer
+                exists). */}
+            <PathMappingsSummaryCard />
           </>
         ) : null}
 
@@ -285,21 +278,6 @@ export function SettingsPage() {
           </>
         ) : null}
 
-        {tab === "integrations" ? (
-          <>
-            {/* Stage 22: path-mappings aggregator. Each integration
-                carries its own ``config.path_mappings`` list (the
-                scanner's source of truth); this panel surfaces them
-                integration-by-integration so the operator can audit and
-                edit translation rules in one place. Reads are non-admin
-                (routine debugging task); writes are admin-only and
-                per-integration to match the backend's PUT contract —
-                we avoid a cross-integration bulk save so partial
-                failures can't go unreported. */}
-            <PathMappingsPanel />
-          </>
-        ) : null}
-
         {tab === "security" ? (
           <>
             {/* Stage 7 (audit follow-up): self-service account
@@ -355,7 +333,10 @@ export function SettingsPage() {
 // SettingsPage that uses it. Adding a tab is one entry here plus
 // one branch in the render — small enough that hoisting to its
 // own module isn't justified.
-type SettingsTab = "workspace" | "system" | "integrations" | "security";
+// v1.9 Stage 2.1: the "integrations" tab was retired; its only
+// content (PathMappingsPanel) now lives on /integrations as the
+// canonical home for the surface.
+type SettingsTab = "workspace" | "system" | "security";
 
 // Stage 7 (audit follow-up): System sub-tab vocabulary. Adding a
 // new sub-tab is the same one-line-here / one-branch-in-render
@@ -1021,7 +1002,7 @@ function AccountSecurityCard() {
 // navigating, so the operator stays inside the Settings page
 // (preserves any unsaved edits in other panels).
 
-function PathMappingsSummaryCard({ onJump }: { onJump: () => void }) {
+function PathMappingsSummaryCard() {
   return (
     <Card>
       <CardHead
@@ -1033,18 +1014,17 @@ function PathMappingsSummaryCard({ onJump }: { onJump: () => void }) {
           When an integration (Plex, Sonarr, etc.) reports a file
           path that differs from how Auditarr sees the same file,
           a path mapping rewrites it during resolution. The full
-          editor — including the Stage&nbsp;5 global-mapping layer
-          — lives in the Integrations tab.
+          editor — including the global-mapping layer — lives on
+          the Integrations page.
         </p>
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={onJump}
-          aria-label="Jump to Path mappings"
+        <Link
+          to="/integrations"
+          className="inline-flex items-center gap-1.5 px-3 h-8 rounded-[6px] text-[12.5px] border border-border bg-surface-2 text-text-2 hover:bg-[var(--hover)] transition-colors"
+          aria-label="Open Path mappings on the Integrations page"
         >
           <Icon name="folder" size={12} />
-          <span className="ml-1.5">Open Path mappings</span>
-        </Button>
+          <span>Open Path mappings</span>
+        </Link>
       </CardBody>
     </Card>
   );

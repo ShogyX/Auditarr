@@ -217,6 +217,37 @@ export function useReloadDocs() {
   });
 }
 
+// ── v1.9 Stage 2.6 — Factory reset ─────────────────────────────
+
+export interface FactoryResetResult {
+  tables_truncated: number;
+  trash_purged: boolean;
+}
+
+/** Admin-only. Wipes the application back to a fresh-install
+ *  state — every table except ``users``, ``audit_log``, and
+ *  ``alembic_version`` is truncated, the trash directory is
+ *  cleared, and an audit entry is written. The current admin
+ *  user keeps their account so they can stay logged in.
+ *
+ *  ``confirm_phrase`` must be the exact string
+ *  ``"reset auditarr"`` — wrong phrase returns 422. Caller is
+ *  responsible for surfacing the typed-confirmation gate. */
+export function useFactoryReset() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (confirm_phrase: string) =>
+      apiClient.post<FactoryResetResult>("/system/factory-reset", {
+        confirm_phrase,
+      }),
+    onSuccess: () => {
+      // Everything client-side could be stale; clear the whole
+      // cache. The shell re-fetches on next mount.
+      qc.clear();
+    },
+  });
+}
+
 /** Stage 14 (audit follow-up): audit log row shape. */
 export interface AuditLogEntry {
   id: number;

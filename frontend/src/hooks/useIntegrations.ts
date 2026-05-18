@@ -287,3 +287,77 @@ export function useVirustotalStatus() {
     staleTime: 10_000,
   });
 }
+
+
+// ── v1.9 Stage 7.1 — discovery hooks ───────────────────────────
+
+
+export interface PathMappingSuggestion {
+  from: string;
+  to: string;
+  confidence: "high" | "medium" | "low" | "none";
+  library_id: string | null;
+  library_name: string | null;
+}
+
+interface PathMappingDiscoverResponse {
+  integration_id: string;
+  kind: string;
+  suggestions: PathMappingSuggestion[];
+}
+
+interface WebhookSource {
+  ip: string;
+  count: number;
+}
+
+interface WebhookSourcesResponse {
+  integration_id: string;
+  sources: WebhookSource[];
+}
+
+interface UpstreamTagsResponse {
+  integration_id: string;
+  kind: string;
+  tags: string[];
+}
+
+/** v1.9 Stage 7.1 — returns a function that POSTs to the path-
+ *  mapping discovery endpoint and yields the suggestion list.
+ *  The hook itself doesn't fire HTTP on render — the operator
+ *  triggers it via the Auto-discover button. */
+export function makeDiscoverPathMappings(integrationId: string | undefined) {
+  return async (): Promise<PathMappingSuggestion[]> => {
+    if (!integrationId) return [];
+    const body = await apiClient.post<PathMappingDiscoverResponse>(
+      `/integrations/${encodeURIComponent(integrationId)}/discover-path-mappings`,
+    );
+    return body?.suggestions ?? [];
+  };
+}
+
+/** v1.9 Stage 7.1 — webhook source IP discovery. Returns just
+ *  the IP strings (chip editor doesn't surface counts inline;
+ *  that's a future enhancement). */
+export function makeDiscoverWebhookSources(integrationId: string | undefined) {
+  return async (): Promise<string[]> => {
+    if (!integrationId) return [];
+    const body = await apiClient.post<WebhookSourcesResponse>(
+      `/integrations/${encodeURIComponent(integrationId)}/discover-webhook-sources`,
+    );
+    return (body?.sources ?? []).map((s) => s.ip);
+  };
+}
+
+/** v1.9 Stage 7.2 — upstream tag listing. Used by both
+ *  tag_allowlist and tag_denylist editors to populate
+ *  suggestions. Returns a sorted unique string list. */
+export function makeDiscoverUpstreamTags(integrationId: string | undefined) {
+  return async (): Promise<string[]> => {
+    if (!integrationId) return [];
+    const body = await apiClient.get<UpstreamTagsResponse>(
+      `/integrations/${encodeURIComponent(integrationId)}/upstream-tags`,
+    );
+    return body?.tags ?? [];
+  };
+}

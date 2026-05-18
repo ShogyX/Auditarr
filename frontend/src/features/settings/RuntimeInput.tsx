@@ -198,6 +198,57 @@ export function RuntimeInput({ field, value, onChange }: RuntimeInputProps) {
       />
     );
   }
+  // v1.10 — list[str] fields like preferred_audio_languages.
+  // Operators type a comma-separated string; we render the
+  // current state as chips above the input so they see the
+  // tokenized result. The backend pre-coerces strings to lists
+  // before validation, so we can send the raw string through
+  // onChange and the round-trip stays consistent.
+  if (field.type === "string_list") {
+    const tokens = Array.isArray(value)
+      ? (value as string[])
+      : typeof value === "string"
+        ? value
+            .split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean)
+        : [];
+    return (
+      <div className="flex flex-col gap-1.5" style={{ maxWidth: 420 }}>
+        {tokens.length > 0 ? (
+          <div className="flex flex-wrap gap-1" data-testid="string-list-chips">
+            {tokens.map((tok, i) => (
+              <span
+                key={i}
+                className="inline-block px-1.5 py-0.5 rounded bg-surface-2 border border-border text-[11px] font-mono"
+              >
+                {tok}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <Input
+          type="text"
+          variant="mono"
+          value={tokens.join(", ")}
+          placeholder="eng, fra, spa"
+          onChange={(e) => {
+            const raw = e.target.value;
+            // Always send a comma-separated string up. The
+            // backend pre-coerces to list[str]; the runtime
+            // settings store also accepts list, but a string is
+            // simpler at the edit surface and lossless on
+            // whitespace-during-typing edge cases.
+            onChange(raw);
+          }}
+          data-testid="string-list-input"
+        />
+        <span className="text-[10.5px] text-muted-2">
+          Comma-separated. Three-letter ISO 639-2 codes (eng, fra, spa…).
+        </span>
+      </div>
+    );
+  }
   return (
     <Input
       type="text"

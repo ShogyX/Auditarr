@@ -5,7 +5,7 @@
 <h1 align="center">Auditarr</h1>
 
 <p align="center">
-  <strong>NOTE! This is AI slop, dont trust it with anything you consider sensitive. Restricted network/internet access is highly recommended!</strong>
+  <strong>The self-hosted audit layer for your media library.</strong>
 </p>
 
 <p align="center">

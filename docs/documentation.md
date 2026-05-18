@@ -1,6 +1,6 @@
 # Auditarr — Documentation
 
-This file is the canonical home of Auditarr's user-facing documentation. Stage 3
+This file is the canonical home of Auditarr's user-facing documentation. 
 implements the Markdown rendering engine, search index, and contextual help
 system that surfaces this content inside the application.
 
@@ -9,18 +9,18 @@ system that surfaces this content inside the application.
 - Architecture overview
 - API reference (auto-generated from OpenAPI)
 - Feature documentation
-  - Media core
-  - Rules engine — examples
-  - Automation engine — examples
-  - Notifications
-  - Optimization
+ - Media core
+ - Rules engine — examples
+ - Automation engine — examples
+ - Notifications
+ - Optimization
 - Integration documentation (Plex, Jellyfin, Sonarr, Radarr, Bazarr, Tdarr)
 - Plugin development guide
 - Troubleshooting
 - Install instructions
 - Update instructions
 
-## Stage 1 status
+## status
 
 The foundation ships:
 

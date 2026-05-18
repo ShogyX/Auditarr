@@ -20,18 +20,18 @@ classified by category and decorated with the most recent
 The page has three sections, top to bottom:
 
 1. **Scope bar** — the segmented control (`All` / `Media` /
-   `Non-media`) and the severity chip row. Toggling severities
-   filters which rows the table shows; toggling the scope narrows
-   the chip row to the relevant subset.
+ `Non-media`) and the severity chip row. Toggling severities
+ filters which rows the table shows; toggling the scope narrows
+ the chip row to the relevant subset.
 2. **Toolbar** — search across the path, library / category
-   dropdowns, codec / container filter popover, and the
-   per-column-filter toggle (Stage 02 v1.7) plus the
-   column-visibility menu. The pre-v1.7 quarantine-view
-   dropdown was removed in Stage 05 along with the
-   quarantine feature itself.
+ dropdowns, codec / container filter popover, and the
+ per-column-filter toggle plus the
+ column-visibility menu. The quarantine-view
+ dropdown was removed in along with the
+ quarantine feature itself.
 3. **Table** — sortable, resizable columns. Click a column edge
-   and drag to resize; your widths persist across reloads. Click
-   a header to sort.
+ and drag to resize; your widths persist across reloads. Click
+ a header to sort.
 
 ## Columns
 
@@ -45,7 +45,7 @@ identifying a row.
 ## Severity meanings
 
 Severity reflects the most-severe rule that fired against a row.
-Stage 02 v1.7 aligned the column pill colour to the scope-bar
+ v1.7 aligned the column pill colour to the scope-bar
 swatch — both render from the same ``sev-*`` CSS variable.
 
 | Severity | Meaning |
@@ -70,7 +70,7 @@ The filterable columns are:
 - **Codec** — substring match against the video codec.
 - **Container** — exact match (matroska, mp4, …).
 - **Ext** — exact match. You can type with or without a leading
-  dot (`.mkv` and `mkv` both work).
+ dot (`.mkv` and `mkv` both work).
 
 ## Multi-select and bulk actions
 
@@ -90,6 +90,6 @@ matching codec or container filter applied.
 ## See also
 
 - [Rules](/help/rules.overview) — the engine that drives the
-  severity column.
+ severity column.
 - [Settings → Scanner](/help/settings.scanner) — controls what
-  the scanner considers "media" and what it skips.
+ the scanner considers "media" and what it skips.

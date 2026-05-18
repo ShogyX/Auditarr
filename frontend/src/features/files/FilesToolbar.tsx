@@ -57,6 +57,12 @@ export interface FilesToolbarProps {
   shown: number;
   selectionCount: number;
   selectedIds: Set<string>;
+  /** v1.9 Stage 2.4 — optional id→filename map for the delete
+   *  confirmation dialog. The page passes the currently-rendered
+   *  rows; the toolbar threads it through to the selection bar.
+   *  Optional so callers that don't have names on hand still work
+   *  (the dialog falls back to a placeholder). */
+  selectedNames?: Map<string, string>;
   onClearSelection: () => void;
   /** Stage 02 — per-column filter row toggle. When true, the
    *  ``<FilesTable>`` renders a filter input beneath each
@@ -197,6 +203,7 @@ export function FilesToolbar(props: FilesToolbarProps) {
         <FilesSelectionActions
           count={selectionCount}
           selectedIds={selectedIds}
+          selectedNames={props.selectedNames}
           onClear={onClearSelection}
         />
       ) : null}

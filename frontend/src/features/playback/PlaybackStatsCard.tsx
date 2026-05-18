@@ -56,14 +56,22 @@ export function PlaybackStatsCard() {
   // still render the card frame + tabs when at least one tab has
   // data — the empty state only fires when there's literally no
   // playback to discuss.
+  //
+  // v1.9 Stage 6.5 — be defensive about the response shape. The
+  // backend can occasionally return partial payloads (a 200 with
+  // ``items: null`` on a transient analyzer error, or a 200 with
+  // the wrong shape entirely if a downstream is misconfigured).
+  // Use chained optional-chains so a missing field reads as 0
+  // rows rather than crashing the panel.
   const isLoading =
     transcoded.isLoading || matrix.isLoading || trend.isLoading;
   const isError =
     transcoded.isError || matrix.isError || trend.isError;
+  const transcodedCount = transcoded.data?.items?.length ?? 0;
+  const matrixCount = matrix.data?.cells?.length ?? 0;
+  const trendCount = trend.data?.points?.length ?? 0;
   const allEmpty =
-    (transcoded.data?.items.length ?? 0) === 0 &&
-    (matrix.data?.cells.length ?? 0) === 0 &&
-    (trend.data?.points.length ?? 0) === 0;
+    transcodedCount === 0 && matrixCount === 0 && trendCount === 0;
 
   return (
     <Card>
@@ -113,21 +121,21 @@ export function PlaybackStatsCard() {
                 <TabButton
                   active={tab === "transcoded"}
                   onClick={() => setTab("transcoded")}
-                  count={transcoded.data?.items.length ?? 0}
+                  count={transcodedCount}
                 >
                   Top transcoded
                 </TabButton>
                 <TabButton
                   active={tab === "devices"}
                   onClick={() => setTab("devices")}
-                  count={matrix.data?.cells.length ?? 0}
+                  count={matrixCount}
                 >
                   Device matrix
                 </TabButton>
                 <TabButton
                   active={tab === "trend"}
                   onClick={() => setTab("trend")}
-                  count={trend.data?.points.length ?? 0}
+                  count={trendCount}
                 >
                   Decision trend
                 </TabButton>
@@ -192,76 +200,106 @@ function TabButton({
 
 // ── Tab panels ─────────────────────────────────────────────────
 function TopTranscodedPanel({ items }: { items: TopTranscodedFile[] }) {
-  if (items.length === 0) {
+  // v1.9 Stage 6.5 — accept either an empty array OR a missing
+  // ``items`` field (the prop site applies ``?? []`` upstream,
+  // but defending here too keeps the component robust if it gets
+  // mounted independently in a test or storybook).
+  const safeItems = Array.isArray(items) ? items : [];
+  if (safeItems.length === 0) {
     return (
       <div className="px-3 py-4 text-[12.5px] text-muted italic">
         No transcodes in the last 30 days.
       </div>
     );
   }
-  // Find the largest count so we can scale the inline bars.
-  const max = Math.max(...items.map((i) => i.transcode_count), 1);
+  // v1.9 Stage 6.5 — guard ``transcode_count`` access. A 200
+  // response with a null count would produce ``Math.max(NaN, 1)``
+  // which is NaN and then divide-by-NaN further down. Treat
+  // null/undefined as 0.
+  const max = Math.max(
+    ...safeItems.map((i) => (typeof i.transcode_count === "number" ? i.transcode_count : 0)),
+    1,
+  );
   return (
     <ul
       className="m-0 p-0 list-none"
       data-testid="playback-top-transcoded-list"
     >
-      {items.map((item) => (
-        <li
-          key={item.media_file_id ?? `unresolved-${item.path}`}
-          className="grid grid-cols-[1fr_auto] gap-3 items-center py-1.5 border-b border-border last:border-b-0"
-        >
-          <div className="min-w-0">
-            <div className="text-[12.5px] truncate">
-              {item.media_file_id === null ? (
-                <Pill>unresolved</Pill>
+      {safeItems.map((item, idx) => {
+        const count = typeof item.transcode_count === "number"
+          ? item.transcode_count
+          : 0;
+        // v1.9 Stage 6.5 — key resolution. The pre-1.9 key fell
+        // back to ``unresolved-${item.path}``, which collides
+        // across rows when ``path`` is null. Include the row
+        // index as a tiebreaker.
+        const key =
+          item.media_file_id ?? `unresolved-${item.path ?? "?"}-${idx}`;
+        const label = item.filename || item.path || "(unknown file)";
+        return (
+          <li
+            key={key}
+            className="grid grid-cols-[1fr_auto] gap-3 items-center py-1.5 border-b border-border last:border-b-0"
+          >
+            <div className="min-w-0">
+              <div className="text-[12.5px] truncate">
+                {item.media_file_id === null ? (
+                  <Pill>unresolved</Pill>
+                ) : null}
+                <span className="ml-1 font-mono text-[11.5px] text-muted-2">
+                  {label}
+                </span>
+              </div>
+              {item.source_codec || item.target_codec ? (
+                <div className="text-[11px] text-muted-2 mt-0.5">
+                  {item.source_codec ?? "?"} → {item.target_codec ?? "?"}
+                </div>
               ) : null}
-              <span className="ml-1 font-mono text-[11.5px] text-muted-2">
-                {item.filename ?? item.path}
+            </div>
+            <div className="flex items-center gap-2">
+              <div
+                className="h-1.5 rounded-full bg-accent/30 relative"
+                style={{ width: 80 }}
+                aria-hidden="true"
+              >
+                <div
+                  className="h-full bg-accent rounded-full"
+                  style={{
+                    width: `${Math.max(4, (count / max) * 100)}%`,
+                  }}
+                />
+              </div>
+              <span className="text-[12px] tabular-nums w-8 text-right">
+                {fmtNum(count)}
               </span>
             </div>
-            {item.source_codec || item.target_codec ? (
-              <div className="text-[11px] text-muted-2 mt-0.5">
-                {item.source_codec ?? "?"} → {item.target_codec ?? "?"}
-              </div>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-2">
-            <div
-              className="h-1.5 rounded-full bg-accent/30 relative"
-              style={{ width: 80 }}
-              aria-hidden="true"
-            >
-              <div
-                className="h-full bg-accent rounded-full"
-                style={{
-                  width: `${Math.max(4, (item.transcode_count / max) * 100)}%`,
-                }}
-              />
-            </div>
-            <span className="text-[12px] tabular-nums w-8 text-right">
-              {fmtNum(item.transcode_count)}
-            </span>
-          </div>
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ul>
   );
 }
 
 function DeviceMatrixPanel({ cells }: { cells: DeviceMatrixCell[] }) {
-  // Pivot the flat cells into a row-per-device, column-per-decision
-  // table. ``devices`` and ``decisions`` are the unique sorted axes.
+  // v1.9 Stage 6.5 — accept either an empty array or a missing
+  // cells field. Each cell is also defended against null fields:
+  // a null device_kind or decision lands in a single
+  // "(unknown)" bucket rather than producing a NaN-keyed entry.
+  const safeCells = Array.isArray(cells) ? cells : [];
   const { devices, decisions, cellMap, maxCount } = useMemo(() => {
     const devs = new Set<string>();
     const decs = new Set<string>();
     const map = new Map<string, number>();
     let max = 0;
-    for (const c of cells) {
-      devs.add(c.device_kind);
-      decs.add(c.decision);
-      map.set(`${c.device_kind}\u0001${c.decision}`, c.count);
-      if (c.count > max) max = c.count;
+    for (const c of safeCells) {
+      if (!c) continue;
+      const dev = c.device_kind ?? "(unknown)";
+      const dec = c.decision ?? "(unknown)";
+      const count = typeof c.count === "number" ? c.count : 0;
+      devs.add(dev);
+      decs.add(dec);
+      map.set(`${dev}\u0001${dec}`, count);
+      if (count > max) max = count;
     }
     return {
       devices: Array.from(devs).sort(),
@@ -269,9 +307,9 @@ function DeviceMatrixPanel({ cells }: { cells: DeviceMatrixCell[] }) {
       cellMap: map,
       maxCount: max || 1,
     };
-  }, [cells]);
+  }, [safeCells]);
 
-  if (cells.length === 0) {
+  if (safeCells.length === 0) {
     return (
       <div className="px-3 py-4 text-[12.5px] text-muted italic">
         No playback events recorded yet for the matrix.
@@ -329,17 +367,23 @@ function DeviceMatrixPanel({ cells }: { cells: DeviceMatrixCell[] }) {
 }
 
 function DecisionTrendPanel({ points }: { points: DecisionDayPoint[] }) {
-  // Aggregate points by day, summing per-decision counts. The
-  // backend already returns one row per (day, decision); we just
-  // pivot into a per-day struct for the stacked-bar render.
+  // v1.9 Stage 6.5 — same defense pattern as the other panels.
+  // A null/undefined ``points``, or individual points with
+  // missing fields, must not crash. We map missing day/decision
+  // to "(unknown)" buckets and missing count to 0.
+  const safePoints = Array.isArray(points) ? points : [];
   const { days, byDay, decisions, maxTotal } = useMemo(() => {
     const dayMap = new Map<string, Record<string, number>>();
     const decSet = new Set<string>();
-    for (const p of points) {
-      if (!dayMap.has(p.day)) dayMap.set(p.day, {});
-      const row = dayMap.get(p.day)!;
-      row[p.decision] = (row[p.decision] ?? 0) + p.count;
-      decSet.add(p.decision);
+    for (const p of safePoints) {
+      if (!p) continue;
+      const day = p.day ?? "(unknown)";
+      const decision = p.decision ?? "(unknown)";
+      const count = typeof p.count === "number" ? p.count : 0;
+      if (!dayMap.has(day)) dayMap.set(day, {});
+      const row = dayMap.get(day)!;
+      row[decision] = (row[decision] ?? 0) + count;
+      decSet.add(decision);
     }
     const sortedDays = Array.from(dayMap.keys()).sort();
     let max = 0;
@@ -356,9 +400,9 @@ function DecisionTrendPanel({ points }: { points: DecisionDayPoint[] }) {
       decisions: Array.from(decSet).sort(),
       maxTotal: max || 1,
     };
-  }, [points]);
+  }, [safePoints]);
 
-  if (points.length === 0) {
+  if (safePoints.length === 0) {
     return (
       <div className="px-3 py-4 text-[12.5px] text-muted italic">
         No daily trend data yet.

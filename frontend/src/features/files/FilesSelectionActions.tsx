@@ -18,28 +18,38 @@ import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
 import {
+  useBulkDeleteMedia,
   useBulkReevaluate,
   useBulkReprobe,
 } from "@/hooks/useMedia";
 import { toast } from "@/lib/toast";
 
+import { DeleteFilesDialog } from "./DeleteFilesDialog";
 import { FilesOptimizeProfilePicker } from "./FilesOptimizeProfilePicker";
 
 export interface FilesSelectionActionsProps {
   count: number;
   selectedIds: Set<string>;
+  /** Optional map of id → filename for the confirmation dialog's
+   *  preview. Missing entries render as "(file …)" so the dialog
+   *  still works when the page only has ids on hand. */
+  selectedNames?: Map<string, string>;
   onClear: () => void;
 }
 
 export function FilesSelectionActions({
   count,
   selectedIds,
+  selectedNames,
   onClear,
 }: FilesSelectionActionsProps) {
   const bulkReevaluate = useBulkReevaluate();
   // Stage 27: re-probe bulk mutation. The quarantine bulk
   // mutation that lived here pre-Stage-05 is gone (Section A.0).
   const bulkReprobe = useBulkReprobe();
+  // v1.9 Stage 2.4 — bulk delete.
+  const bulkDelete = useBulkDeleteMedia();
+  const [deleteOpen, setDeleteOpen] = useState(false);
   // Keep a local ``running`` flag for the optimize picker so the
   // button can show a spinner while the picker's mutation is in flight.
   const [optimizing, setOptimizing] = useState(false);
@@ -106,6 +116,33 @@ export function FilesSelectionActions({
   // quarantine button. Operators who want to remove a selection
   // now write a rule with a Delete action.
 
+  // v1.9 Stage 2.4 — direct (non-rule) delete. Replaces the
+  // "write a rule to delete this" workaround for ad-hoc removals.
+  async function runDelete(args: { remove_from_disk: boolean; reason: string | null }) {
+    try {
+      const result = await bulkDelete.mutateAsync({
+        ids: Array.from(selectedIds),
+        remove_from_disk: args.remove_from_disk,
+        reason: args.reason,
+      });
+      const removed = result.deleted.length;
+      const missing = result.not_found.length;
+      const movedOnDisk = result.deleted.filter((d) => d.removed_from_disk).length;
+      const parts: string[] = [`Removed ${removed} file${removed === 1 ? "" : "s"}`];
+      if (movedOnDisk > 0) parts.push(`${movedOnDisk} moved to trash`);
+      if (missing > 0) parts.push(`${missing} not found`);
+      toast(parts.join(", "), missing > 0 ? "warn" : "ok");
+      setDeleteOpen(false);
+      onClear();
+    } catch (err) {
+      toast(
+        `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+        5000,
+      );
+    }
+  }
+
   return (
     <div className="files-selection-bar">
       <span className="text-[12.5px] font-medium">{count} selected</span>
@@ -145,6 +182,19 @@ export function FilesSelectionActions({
         />
         {bulkReprobe.isPending ? "Re-probing…" : "Re-probe"}
       </Button>
+      {/* v1.9 Stage 2.4 — direct delete. Default mode is index-
+          only (safe); the dialog gates remove-from-disk behind a
+          typed-confirmation phrase. */}
+      <Button
+        size="sm"
+        variant="danger"
+        onClick={() => setDeleteOpen(true)}
+        disabled={bulkDelete.isPending || count === 0}
+        title="Remove the selected files from Auditarr. Default is index-only; the dialog offers an on-disk trash option."
+      >
+        <Icon name="trash" size={12} />
+        Delete
+      </Button>
       <Button
         size="sm"
         variant="ghost"
@@ -154,6 +204,16 @@ export function FilesSelectionActions({
       >
         <Icon name="x" size={12} />
       </Button>
+
+      <DeleteFilesDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        fileNames={Array.from(selectedIds).map(
+          (id) => selectedNames?.get(id) ?? `(file ${id.slice(0, 8)}…)`,
+        )}
+        onConfirm={runDelete}
+        isPending={bulkDelete.isPending}
+      />
     </div>
   );
 }

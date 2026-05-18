@@ -20,22 +20,22 @@ atomically swaps it into place.
 
 ```json
 {
-  "video": {
-    "codec": "libx265",
-    "crf": 22,
-    "preset": "medium",
-    "max_bitrate_kbps": null,
-    "scale_height": null
-  },
-  "audio": { "codec": "copy", "bitrate_kbps": 128, "channels": null },
-  "subtitles": { "handling": "copy" },
-  "output": {
-    "container": "mkv",
-    "replace_input": true,
-    "keep_backup": true
-  },
-  "extra_args": [],
-  "skip_if_bitrate_below_kbps": null
+ "video": {
+ "codec": "libx265",
+ "crf": 22,
+ "preset": "medium",
+ "max_bitrate_kbps": null,
+ "scale_height": null
+ },
+ "audio": { "codec": "copy", "bitrate_kbps": 128, "channels": null },
+ "subtitles": { "handling": "copy" },
+ "output": {
+ "container": "mkv",
+ "replace_input": true,
+ "keep_backup": true
+ },
+ "extra_args": [],
+ "skip_if_bitrate_below_kbps": null
 }
 ```
 
@@ -60,14 +60,14 @@ For each item it claims, the worker:
 2. Confirms the input file still exists on disk.
 3. Checks the input is under `max_input_bytes` (on the profile, if set).
 4. Checks the input's bitrate is above `skip_if_bitrate_below_kbps`
-   (on the profile, if set) — otherwise marks the item `skipped`.
+ (on the profile, if set) — otherwise marks the item `skipped`.
 5. Runs ffmpeg writing to `<input>.auditarr.tmp.<ext>`.
 6. Runs ffprobe on the temp output — must have a video stream and
-   duration within ±2% of the input.
+ duration within ±2% of the input.
 7. Atomically swaps:
-   - If `keep_backup` is true: renames original to `<input>.bak`.
-   - Otherwise: deletes the original.
-   - Then `os.replace`s the temp output to `<input stem>.<new ext>`.
+ - If `keep_backup` is true: renames original to `<input>.bak`.
+ - Otherwise: deletes the original.
+ - Then `os.replace`s the temp output to `<input stem>.<new ext>`.
 
 Failure at any step leaves the original untouched and writes the error
 detail to the item row.
@@ -84,20 +84,20 @@ re-queries the queue every 5 seconds while items are active.
 
 ```
 queued → running → completed
-              ↘ → failed
-              ↘ → cancelled
-queued ───→ skipped     (precondition failed)
+ ↘ → failed
+ ↘ → cancelled
+queued ───→ skipped (precondition failed)
 ```
 
 - **queued** — waiting for the next worker tick.
 - **running** — ffmpeg is in flight; `progress_pct` ticks up.
 - **completed** — output validated and swapped (or saved alongside).
 - **failed** — ffmpeg returned non-zero, validation failed, or the swap
-  raised. `error` carries the detail.
+ raised. `error` carries the detail.
 - **cancelled** — operator clicked cancel; running items are best-effort
-  signalled to terminate.
+ signalled to terminate.
 - **skipped** — preconditions (size, bitrate, disabled profile) were
-  not met.
+ not met.
 
 Failed/cancelled/skipped items can be **retried** from the UI, which
 resets them back to `queued`.
@@ -126,13 +126,13 @@ most one queued item per minute. Run the worker container with
 `docker compose --profile worker up -d`; without it, items sit in the
 queue until you click **Run next** or **Run** on a specific item.
 
-## What's deferred to Stage 13 polish
+## What's deferred to polish
 
 - Parallel workers — currently one-at-a-time, which is what most
-  self-hosted boxes want anyway given CPU contention.
+ self-hosted boxes want anyway given CPU contention.
 - Hardware acceleration (VAAPI/NVENC) — profiles can be hand-coerced
-  into using these via `extra_args`, but the schema doesn't yet model
-  device selection.
+ into using these via `extra_args`, but the schema doesn't yet model
+ device selection.
 - Detection of "no useful work to do" — a re-transcode of an already-x265
-  file at the same CRF will produce a similar-sized output. Stage 13 may
-  add a "only run if expected savings > X%" pre-flight.
+ file at the same CRF will produce a similar-sized output. may
+ add a "only run if expected savings > X%" pre-flight.

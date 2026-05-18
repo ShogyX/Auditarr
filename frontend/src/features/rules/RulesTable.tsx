@@ -347,7 +347,18 @@ function RuleRow({
               <Pill sev="info" title="Seeded by Auditarr; read-only">
                 Built-in
               </Pill>
-            ) : null}
+            ) : (
+              /* v1.9 audit fix (OP-4): operator-authored rules
+                 get a "Custom" badge so the built-in/custom
+                 distinction is symmetric and unambiguous in
+                 the table. */
+              <Pill
+                title="Operator-authored rule"
+                className="text-[10px] text-muted-2 border-border bg-surface-2"
+              >
+                Custom
+              </Pill>
+            )}
             {!rule.enabled ? (
               <span className="text-[10.5px] uppercase tracking-wide text-muted-2 font-semibold">
                 disabled

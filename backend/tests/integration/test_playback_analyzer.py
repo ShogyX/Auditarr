@@ -546,3 +546,154 @@ async def test_analyzer_respects_recent_dismissal(analyzer_env) -> None:
         out = await PlaybackAnalyzer(session=session).analyze()
     assert out.skipped_dismissed >= 1
     assert out.suggestions_created == 0
+
+
+# ── v1.9 OP-10 — analyzer reads sessions + events with dedup ───
+
+
+@pytest.mark.asyncio
+async def test_analyzer_reads_sessions_as_primary_source(
+    analyzer_env,
+) -> None:
+    """v1.9 OP-10 caveat 6: stopped sessions in the analysis
+    window with media_file_id non-null feed the heuristics as
+    the primary source (events are the fallback)."""
+    from app.models.playback import PlaybackSession
+
+    db = analyzer_env["db"]
+    iid = analyzer_env["integration_id"]
+    fids = analyzer_env["file_ids"]
+
+    # Seed 20 STOPPED sessions all transcoding hevc — enough to
+    # cross both MIN_EVENTS_TOTAL and the per-heuristic floor.
+    now = _dt.datetime.now(_dt.UTC)
+    async with db.session() as session:
+        for i in range(20):
+            session.add(
+                PlaybackSession(
+                    integration_id=iid,
+                    session_key=f"sk-{i}",
+                    rating_key=f"rk-{i}",
+                    media_file_id=fids[i],
+                    source_path=f"/mnt/media/Movies/sess-{i}.mkv",
+                    state="stopped",
+                    decision="transcode",
+                    source_codec="hevc",
+                    started_at=now - _dt.timedelta(minutes=60),
+                    last_event_at=now - _dt.timedelta(minutes=30),
+                )
+            )
+        await session.commit()
+
+    async with db.session() as session:
+        outcome = await PlaybackAnalyzer(session=session).analyze()
+
+    # Sessions show up in the examined count (caveat 6 — primary).
+    assert outcome.examined_events_resolved >= 20
+    # The high-transcode-codec heuristic should have fired.
+    assert outcome.candidates_generated >= 1
+
+
+@pytest.mark.asyncio
+async def test_analyzer_dedup_skips_reconciled_events(
+    analyzer_env,
+) -> None:
+    """v1.9 OP-10 caveat 5: an event tagged
+    ``reconciled_with_session_id`` is represented by its session
+    row — the analyzer's events-fallback read filters it out so
+    the play is counted exactly once.
+
+    Seed: 20 sessions (all reconciled-with-history=True) AND a
+    matching reconciled event per session. Without the dedup the
+    analyzer would see 40 plays; with the dedup it sees 20.
+    """
+    from app.models.playback import PlaybackSession
+
+    db = analyzer_env["db"]
+    iid = analyzer_env["integration_id"]
+    fids = analyzer_env["file_ids"]
+
+    now = _dt.datetime.now(_dt.UTC)
+    async with db.session() as session:
+        for i in range(20):
+            sess = PlaybackSession(
+                integration_id=iid,
+                session_key=f"sk-dedup-{i}",
+                rating_key=f"rk-dedup-{i}",
+                media_file_id=fids[i],
+                source_path=f"/mnt/media/Movies/dedup-{i}.mkv",
+                state="stopped",
+                decision="transcode",
+                source_codec="hevc",
+                started_at=now - _dt.timedelta(minutes=60),
+                last_event_at=now - _dt.timedelta(minutes=30),
+                reconciled_with_history=True,
+            )
+            session.add(sess)
+        await session.flush()
+        # Reconciled events — each tagged with its session id.
+        sessions_seeded = (
+            (await session.execute(select(PlaybackSession)))
+            .scalars()
+            .all()
+        )
+        for sess in sessions_seeded:
+            session.add(
+                _make_event(
+                    integration_id=iid,
+                    file_id=sess.media_file_id,
+                    upstream_id=f"evt-{sess.session_key}",
+                    decision="transcode",
+                    source_codec="hevc",
+                )
+            )
+        # Tag events with reconciled_with_session_id.
+        await session.flush()
+        events_seeded = (
+            (await session.execute(select(PlaybackEvent)))
+            .scalars()
+            .all()
+        )
+        sess_by_key = {s.session_key: s for s in sessions_seeded}
+        for ev in events_seeded:
+            sk = ev.upstream_id.removeprefix("evt-")
+            ev.reconciled_with_session_id = sess_by_key[sk].id
+        await session.commit()
+
+    async with db.session() as session:
+        outcome = await PlaybackAnalyzer(session=session).analyze()
+
+    # 20 sessions + 0 fallback events (all reconciled) — not 40.
+    assert outcome.examined_events_resolved == 20
+
+
+@pytest.mark.asyncio
+async def test_analyzer_falls_back_to_unreconciled_events(
+    analyzer_env,
+) -> None:
+    """v1.9 OP-10 caveat 6 / 5: events WITHOUT a matching session
+    (Jellyfin plays, or Plex plays that completed before SSE was
+    running) still drive heuristics via the fallback read."""
+    db = analyzer_env["db"]
+    iid = analyzer_env["integration_id"]
+    fids = analyzer_env["file_ids"]
+
+    async with db.session() as session:
+        # 20 unreconciled events (reconciled_with_session_id=None).
+        for i in range(20):
+            session.add(
+                _make_event(
+                    integration_id=iid,
+                    file_id=fids[i],
+                    upstream_id=f"unrec-{i}",
+                    decision="transcode",
+                    source_codec="hevc",
+                )
+            )
+        await session.commit()
+
+    async with db.session() as session:
+        outcome = await PlaybackAnalyzer(session=session).analyze()
+
+    assert outcome.examined_events_resolved == 20
+    assert outcome.candidates_generated >= 1
