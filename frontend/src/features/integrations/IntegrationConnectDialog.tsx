@@ -177,7 +177,15 @@ export function IntegrationConnectDialog({
         title={isEdit ? `Edit ${integration!.name}` : `Connect ${kind.label}`}
         onClose={onClose}
       />
-      <form onSubmit={onSubmit}>
+      {/* autoComplete="off" on the <form> + autoComplete="new-password"
+          on each secret input below prevents Chrome / Firefox / Safari
+          from layering a saved-credential autofill dropdown over the
+          api_key / token field — which intercepts clicks and keystrokes
+          and makes the input appear unfocusable. The behaviour is
+          most visible when the operator has saved a password for the
+          Auditarr UI itself: the browser's autofill heuristic treats
+          ANY type="password" input on the page as the same login form. */}
+      <form onSubmit={onSubmit} autoComplete="off">
         <ModalBody className="flex flex-col gap-3">
           <Field label="Name">
             <Input
@@ -224,6 +232,16 @@ export function IntegrationConnectDialog({
               <Input
                 required={!isEdit}
                 type="password"
+                // ``new-password`` tells the browser this is an
+                // operator-chosen secret being captured (not a login
+                // password being recalled), which suppresses the
+                // autofill dropdown that otherwise overlays the
+                // input and captures the operator's clicks.
+                autoComplete="new-password"
+                // Unique name per field so the browser's autofill
+                // heuristic doesn't collapse multiple integrations'
+                // secret inputs into one "current-password" target.
+                name={`integration-secret-${kind.kind}-${field}`}
                 value={secrets[field] ?? ""}
                 onChange={(e) =>
                   setSecrets({ ...secrets, [field]: e.target.value })
