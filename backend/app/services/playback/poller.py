@@ -185,6 +185,12 @@ class PlaybackPoller:
             )
             outcome.inserted += synthesized
             outcome.fetched += synthesized
+            # Zero-history poll cycles still need an explicit commit:
+            # _touch_cursor and any rows synthesized by the live-merge
+            # are otherwise discarded when the worker's session
+            # closes. The non-empty path commits at the end of
+            # poll_one; this branch returns early and must mirror it.
+            await self._session.commit()
             return outcome
 
         # Apply path mappings.
@@ -677,24 +683,35 @@ class PlaybackPoller:
             synth_id = f"live:{live.upstream_id}"
             if synth_id in existing_set:
                 continue
-            self._session.add(
-                PlaybackEvent(
-                    integration_id=integration.id,
-                    upstream_id=synth_id,
-                    media_file_id=resolved.get(live.source_path),
-                    source_path=live.source_path,
-                    decision=live.decision,
-                    started_at=live.started_at,
-                    device_kind=live.device_kind,
-                    device_name=live.device_name,
-                    source_codec=live.source_codec,
-                    source_bitrate_kbps=live.source_bitrate_kbps,
-                    source_width=live.source_width,
-                    source_height=live.source_height,
-                )
-            )
             try:
-                await self._session.flush()
+                # Wrap each synthesized insert in a SAVEPOINT so a
+                # unique-constraint race (concurrent poller or the
+                # history scrape arriving just before us) only rolls
+                # back this one row. The historical-events branch
+                # above uses the same begin_nested() pattern; this
+                # call site originally documented but did not
+                # implement it, and the bare ``self._session.rollback()``
+                # in the except path was wiping the entire outer
+                # transaction — including any history rows already
+                # inserted in this poll cycle.
+                async with self._session.begin_nested():
+                    self._session.add(
+                        PlaybackEvent(
+                            integration_id=integration.id,
+                            upstream_id=synth_id,
+                            media_file_id=resolved.get(live.source_path),
+                            source_path=live.source_path,
+                            decision=live.decision,
+                            started_at=live.started_at,
+                            device_kind=live.device_kind,
+                            device_name=live.device_name,
+                            source_codec=live.source_codec,
+                            source_bitrate_kbps=live.source_bitrate_kbps,
+                            source_width=live.source_width,
+                            source_height=live.source_height,
+                        )
+                    )
+                    await self._session.flush()
                 inserted_count += 1
                 # v1.9 Stage 9.1 — upsert device for live merge too.
                 try:
@@ -711,11 +728,10 @@ class PlaybackPoller:
                         integration_id=integration.id,
                     )
             except IntegrityError:
-                # Concurrent poller or rare race with the history
-                # scrape — drop, the unique constraint did its
-                # job. Roll back the savepoint so the rest of
-                # the batch keeps going.
-                await self._session.rollback()
+                # Duplicate (integration_id, upstream_id) — the
+                # savepoint already rolled the bad insert back;
+                # carry on with the rest of the batch.
+                pass
         return inserted_count
 
     def _live_session_eligible(

@@ -441,3 +441,41 @@ async def test_provider_without_live_method_is_a_noop(
         await conn.run_sync(Base.metadata.drop_all)
     await db.disconnect()
     get_settings.cache_clear()
+
+
+# ── Regression: poll_one must commit on the zero-history early
+# return so synthesized live rows survive when the caller (the
+# arq worker) opens a session, calls poll_one, and closes it
+# without an outer commit. Previously the zero-events early
+# return path flushed but never committed, so n_tup_ins stayed
+# at 0 for the playback tables on installs where the operator
+# never crossed Plex's ~90% watched threshold in a poll window.
+@pytest.mark.asyncio
+async def test_zero_history_live_synth_persists_without_outer_commit(
+    env,
+) -> None:
+    env["stub"].history = []
+    env["stub"].live = [_live(upstream_id="s-noc", elapsed_seconds=60)]
+
+    db = env["db"]
+    make_manager = env["make_manager"]
+    async with db.session() as sess:
+        manager = make_manager(sess)
+        poller = PlaybackPoller(session=sess, manager=manager)
+        integration = (
+            await sess.execute(
+                select(Integration).where(
+                    Integration.id == env["integration_id"]
+                )
+            )
+        ).scalar_one()
+        await poller.poll_one(integration)
+        # Deliberately do NOT call sess.commit() here — this
+        # mirrors backend/app/worker.py:poll_playback which opens
+        # a session per integration and relies on the poller's
+        # internal commit. If poll_one's early return forgets to
+        # commit, the synthesized row is silently dropped on
+        # session close.
+
+    events = await _events_for(env)
+    assert [e.upstream_id for e in events] == ["live:s-noc"]

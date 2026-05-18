@@ -38,7 +38,7 @@ log = get_logger("auditarr.worker", category="queue")
 # Stage 16: which integration kinds support playback telemetry. The
 # poller skips others to avoid spurious noise — Sonarr/Radarr/Bazarr
 # don't implement ``fetch_playback_events`` and would just return [].
-PLAYBACK_KINDS = {"plex", "jellyfin"}
+PLAYBACK_KINDS = {"plex", "jellyfin", "tracearr"}
 
 
 # ── Job functions ────────────────────────────────────────────
