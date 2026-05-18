@@ -340,6 +340,40 @@ class PlexProvider(IntegrationProvider):
                 return []
             entries = payload.get("Metadata", []) or []
 
+            # ── 2026-05-19 bugfix ────────────────────────────────
+            # ``/status/sessions/history/all`` returns lightweight
+            # entries — ratingKey, viewedAt, title, deviceID, but
+            # NO ``Media[]`` / ``Part[]`` and therefore NO file path.
+            # The mapper below requires ``Media[0].Part[0].file`` and
+            # was silently dropping 100% of history events for that
+            # reason. Fix: follow up with a batched
+            # ``/library/metadata/{rk1,rk2,…}`` to attach the Media
+            # tree on entries that need it, then run the mapper on
+            # the merged entries. Skip the follow-up entirely if
+            # every entry already carries Media (older builds /
+            # mocked test payloads).
+            keys_needing_metadata = [
+                str(e.get("ratingKey"))
+                for e in entries
+                if e.get("ratingKey") is not None and not e.get("Media")
+            ]
+            metadata_by_rk = (
+                await self._batched_library_metadata(client, keys_needing_metadata)
+                if keys_needing_metadata
+                else {}
+            )
+            metadata_missing = 0
+            for entry in entries:
+                if entry.get("Media"):
+                    continue
+                rk = str(entry.get("ratingKey") or "")
+                full = metadata_by_rk.get(rk)
+                if full is None:
+                    metadata_missing += 1
+                    continue
+                if isinstance(full.get("Media"), list):
+                    entry["Media"] = full["Media"]
+
         events: list[PlaybackEventDTO] = []
         filtered_out = 0
         for entry in entries:
@@ -358,9 +392,59 @@ class PlexProvider(IntegrationProvider):
             count=len(events),
             raw_count=len(entries),
             filtered_out_pre_cutoff=filtered_out,
+            metadata_missing=metadata_missing,
             cutoff_unix=cutoff_unix,
         )
         return events
+
+    # ── 2026-05-19 bugfix helper ─────────────────────────────────
+    # Plex's batched-metadata endpoint accepts a comma-separated list
+    # of ratingKeys: ``/library/metadata/2598,22588,22573``. We chunk
+    # to keep URL length sane on installs with deep history caches.
+    _METADATA_BATCH_SIZE = 50
+
+    async def _batched_library_metadata(
+        self, client: httpx.AsyncClient, rating_keys: list[str]
+    ) -> dict[str, dict]:
+        """Fetch ``/library/metadata/{rk1,rk2,…}`` in chunks and
+        return a ``{ratingKey: metadata_entry}`` map. Missing or
+        404'd ratingKeys are simply absent from the result; the
+        caller drops the corresponding history entry.
+
+        Each chunk is one HTTP round trip. Failures inside a chunk
+        are logged and skipped — they don't propagate to the
+        history poll as a hard error.
+        """
+        if not rating_keys:
+            return {}
+        # Dedupe while preserving order.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for rk in rating_keys:
+            if rk and rk not in seen:
+                seen.add(rk)
+                ordered.append(rk)
+        out: dict[str, dict] = {}
+        for i in range(0, len(ordered), self._METADATA_BATCH_SIZE):
+            chunk = ordered[i : i + self._METADATA_BATCH_SIZE]
+            path = f"/library/metadata/{','.join(chunk)}"
+            try:
+                response = await client.get(path)
+                response.raise_for_status()
+                payload = response.json().get("MediaContainer", {}) or {}
+            except (httpx.HTTPError, ValueError) as exc:
+                self._log.warning(
+                    "plex.metadata.batch_failed",
+                    chunk_size=len(chunk),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                continue
+            for entry in payload.get("Metadata", []) or []:
+                rk = entry.get("ratingKey")
+                if rk is not None:
+                    out[str(rk)] = entry
+        return out
 
     # ── Stage 09 (v1.7) — live (in-progress) playback ────────────
     async def fetch_live_playbacks(
@@ -1439,53 +1523,54 @@ def _plex_live_to_dto(entry: dict, _log: Any = None) -> LivePlaybackDTO | None:
                 title=entry.get("title") or entry.get("grandparentTitle"),
             )
             return None
-        first_media = media_list[0]
-        if not isinstance(first_media, dict):
-            log.warning(
-                "plex.live.session_dropped",
-                session_key=sk,
-                reason="Media[0]_not_a_dict",
-                media_0_type=type(first_media).__name__,
-                entry_type=entry.get("type"),
-            )
-            return None
 
-        parts = first_media.get("Part") or []
-        if not isinstance(parts, list) or not parts:
-            log.warning(
-                "plex.live.session_dropped",
-                session_key=sk,
-                reason="missing_or_empty_Part",
-                entry_type=entry.get("type"),
-                media_keys=sorted(first_media.keys())[:20],
-                title=entry.get("title") or entry.get("grandparentTitle"),
-            )
-            return None
-        first_part = parts[0]
-        if not isinstance(first_part, dict):
-            log.warning(
-                "plex.live.session_dropped",
-                session_key=sk,
-                reason="Part[0]_not_a_dict",
-                part_0_type=type(first_part).__name__,
-            )
-            return None
+        # ── 2026-05-19 bugfix ────────────────────────────────
+        # Plex's ``/status/sessions`` response for a transcoded
+        # session typically carries multiple ``Media`` entries:
+        # one describes the source library file (with
+        # ``Part[0].file``) and a second describes the output
+        # transcode stream (with ``decision``, ``protocol``,
+        # ``optimizedForStreaming`` but NO ``file``). The order
+        # is not guaranteed — some builds put the transcode
+        # entry first. Scan every Media/Part combination and
+        # pick the first one with a real file path; this matches
+        # what the path-mapping layer needs to do anyway.
+        first_media: dict | None = None
+        first_part: dict | None = None
+        source_path: str | None = None
+        for media in media_list:
+            if not isinstance(media, dict):
+                continue
+            for part in media.get("Part") or []:
+                if not isinstance(part, dict):
+                    continue
+                candidate = part.get("file")
+                if isinstance(candidate, str) and candidate:
+                    first_media = media
+                    first_part = part
+                    source_path = candidate
+                    break
+            if source_path:
+                break
 
-        source_path = first_part.get("file")
-        if not source_path or not isinstance(source_path, str):
+        if first_media is None or first_part is None or source_path is None:
+            # No Media/Part in this entry has a file path. Most
+            # commonly this is Live TV, Plex News, or another
+            # synthetic stream — legitimate skip. Log enough to
+            # distinguish that case from a malformed payload.
             log.warning(
                 "plex.live.session_dropped",
                 session_key=sk,
-                reason="missing_Part.file",
+                reason="no_Part.file_across_any_Media",
                 entry_type=entry.get("type"),
-                part_keys=sorted(first_part.keys())[:20],
+                media_count=len(media_list),
                 title=entry.get("title") or entry.get("grandparentTitle"),
                 detail=(
-                    "Plex returned a session without a real file "
-                    "path. Live TV / synthetic streams / Plex News "
-                    "and similar surfaces don't carry a Part.file "
-                    "so they can't be path-mapped to a library "
-                    "file. Skip is correct, log is informational."
+                    "No ``Part.file`` found across any ``Media`` "
+                    "entry — Live TV / synthetic streams / Plex "
+                    "News don't carry one, so they can't be "
+                    "path-mapped to a library file. Skip is "
+                    "correct, log is informational."
                 ),
             )
             return None
