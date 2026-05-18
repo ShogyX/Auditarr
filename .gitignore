@@ -23,3 +23,8 @@ htmlcov/
 
 # Frontend
 node_modules/
+
+# Working-doc scratchpads (kept locally, not shipped)
+AUDIT.md
+PLAN.md
+STATE.md
