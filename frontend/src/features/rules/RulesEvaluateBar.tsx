@@ -16,6 +16,8 @@ export interface RulesEvaluateBarProps {
   onSelectLibrary: (id: string) => void;
   onEvaluate: () => void;
   isEvaluating: boolean;
+  onEvaluateAll: () => void;
+  isEvaluatingAll: boolean;
 }
 
 export function RulesEvaluateBar({
@@ -24,7 +26,10 @@ export function RulesEvaluateBar({
   onSelectLibrary,
   onEvaluate,
   isEvaluating,
+  onEvaluateAll,
+  isEvaluatingAll,
 }: RulesEvaluateBarProps) {
+  const busy = isEvaluating || isEvaluatingAll;
   return (
     <>
       <select
@@ -32,6 +37,7 @@ export function RulesEvaluateBar({
         onChange={(e) => onSelectLibrary(e.target.value)}
         className="settings-input"
         aria-label="Library to evaluate"
+        disabled={busy}
       >
         <option value="">Pick a library to evaluate…</option>
         {libraries.map((lib) => (
@@ -43,12 +49,24 @@ export function RulesEvaluateBar({
       <Button
         size="sm"
         variant="ghost"
-        disabled={!selectedLibrary || isEvaluating}
+        disabled={!selectedLibrary || busy}
         onClick={onEvaluate}
         title="Re-evaluate every file in the chosen library against all enabled rules"
       >
         <Icon name="refresh" size={12} />
         <span className="ml-1">{isEvaluating ? "Evaluating…" : "Evaluate"}</span>
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={busy || libraries.length === 0}
+        onClick={onEvaluateAll}
+        title="Re-evaluate every file in every library against all enabled rules"
+      >
+        <Icon name="refresh" size={12} />
+        <span className="ml-1">
+          {isEvaluatingAll ? "Evaluating all…" : "Evaluate all libraries"}
+        </span>
       </Button>
     </>
   );

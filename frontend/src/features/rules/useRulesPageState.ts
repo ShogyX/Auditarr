@@ -28,6 +28,7 @@ import { useLibraries } from "@/hooks/useMedia";
 import {
   useDeleteRule,
   useDuplicateRule,
+  useEvaluateAllLibraries,
   useEvaluateLibrary,
   useRuleSuggestions,
   useRules,
@@ -51,6 +52,7 @@ export interface UseRulesPageState {
   update: ReturnType<typeof useUpdateRule>;
   duplicate: ReturnType<typeof useDuplicateRule>;
   evaluate: ReturnType<typeof useEvaluateLibrary>;
+  evaluateAll: ReturnType<typeof useEvaluateAllLibraries>;
 
   /* Tab + search + library-eval state. */
   tab: RulesTab;
@@ -111,6 +113,7 @@ export function useRulesPageState(): UseRulesPageState {
   const update = useUpdateRule();
   const duplicate = useDuplicateRule();
   const evaluate = useEvaluateLibrary();
+  const evaluateAll = useEvaluateAllLibraries();
 
   const [tab, setTab] = useTabFromUrl();
   const [creatingSchedule, setCreatingSchedule] = useCreatingScheduleFromUrl();
@@ -177,6 +180,7 @@ export function useRulesPageState(): UseRulesPageState {
     update,
     duplicate,
     evaluate,
+    evaluateAll,
     tab,
     setTab,
     search,

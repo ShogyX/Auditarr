@@ -110,6 +110,11 @@ class RuleEvaluateRuleResponse(BaseModel):
     files_evaluated: int
 
 
+class RuleEvaluateAllLibrariesResponse(BaseModel):
+    libraries_evaluated: int
+    files_evaluated: int
+
+
 # ── Stage 15: rule vocabulary ────────────────────────────────
 class RuleVocabularyField(BaseModel):
     """One condition-field the visual builder can offer."""

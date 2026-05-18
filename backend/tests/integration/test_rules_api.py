@@ -683,3 +683,204 @@ async def test_evaluate_rule_now_returns_400_for_disabled_rule(
     assert response.status_code == 422
     assert "disabled" in response.json().get("message", "").lower() or \
            "disabled" in response.text.lower()
+
+
+# ── Regression: single-rule evaluation must not wipe other rules' history.
+# The pre-fix evaluate_file() deleted every rule_evaluations row that
+# wasn't in the matched-set of the *current* call. When evaluate_rule()
+# fed it a one-rule list, every other rule's row was wiped — visible
+# in the UI as "all evaluations dropped after I evaluated one rule".
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rule_preserves_other_rules_evaluations(
+    client: AsyncClient,
+) -> None:
+    headers = await _admin_headers(client)
+    _, media_id = await _seed_one_file()
+
+    rule_a = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Rule A — flag hevc",
+            "definition": {
+                "match": {"field": "video_codec", "op": "eq", "value": "hevc"},
+                "actions": [{"type": "set_severity", "severity": "info"}],
+            },
+        },
+    )
+    assert rule_a.status_code == 201, rule_a.text
+    rule_a_id = rule_a.json()["id"]
+
+    rule_b = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Rule B — flag mkv",
+            "definition": {
+                "match": {"field": "extension", "op": "eq", "value": "mkv"},
+                "actions": [{"type": "set_severity", "severity": "warn"}],
+            },
+        },
+    )
+    assert rule_b.status_code == 201, rule_b.text
+    rule_b_id = rule_b.json()["id"]
+
+    # Establish baseline: both rules have stored evaluations against
+    # the file (run a full library re-evaluation first).
+    lib_eval = await client.post(
+        f"/api/v1/rules/libraries/{(await _library_id_for(media_id))}/evaluate",
+        headers=headers,
+    )
+    assert lib_eval.status_code == 200, lib_eval.text
+
+    a_before = await client.get(
+        f"/api/v1/rules/{rule_a_id}/evaluations", headers=headers
+    )
+    b_before = await client.get(
+        f"/api/v1/rules/{rule_b_id}/evaluations", headers=headers
+    )
+    assert len(a_before.json()) >= 1
+    assert len(b_before.json()) >= 1
+
+    # Now run targeted evaluation on rule A only.
+    targeted = await client.post(
+        f"/api/v1/rules/{rule_a_id}/evaluate-now", headers=headers
+    )
+    assert targeted.status_code == 200, targeted.text
+
+    # Rule B's evaluation row must survive the single-rule pass.
+    b_after = await client.get(
+        f"/api/v1/rules/{rule_b_id}/evaluations", headers=headers
+    )
+    assert len(b_after.json()) >= 1, (
+        "Rule B's evaluation row was wiped by single-rule evaluation "
+        "of Rule A — regression of the stale-delete scoping bug."
+    )
+
+
+async def _library_id_for(media_id: str) -> str:
+    async with get_database().session() as sess:
+        from app.models.media import MediaFile
+
+        m = await sess.get(MediaFile, media_id)
+        assert m is not None
+        return m.library_id
+
+
+# ── POST /rules/libraries/evaluate-all — fan-out across every library.
+
+
+@pytest.mark.asyncio
+async def test_evaluate_all_libraries_fans_out(client: AsyncClient) -> None:
+    headers = await _admin_headers(client)
+
+    # Seed two libraries, each with a file the rule will match.
+    async with get_database().session() as sess:
+        for i, name in enumerate(("Movies", "Shows")):
+            lib = Library(
+                name=name, root_path=f"/data/{name.lower()}", kind="movies"
+            )
+            sess.add(lib)
+            await sess.flush()
+            sess.add(
+                MediaFile(
+                    library_id=lib.id,
+                    path=f"/data/{name.lower()}/file{i}.mkv",
+                    relative_path=f"file{i}.mkv",
+                    filename=f"file{i}.mkv",
+                    extension="mkv",
+                    size_bytes=1_000_000,
+                    mtime=utcnow(),
+                    category="media",
+                    severity="ok",
+                    severity_rank=10,
+                    container="matroska",
+                    video_codec="hevc",
+                    audio_codec="eac3",
+                    width=1920,
+                    height=1080,
+                    duration_seconds=60.0,
+                    bitrate_kbps=5000,
+                    has_subtitles=False,
+                    seen_at=utcnow(),
+                    is_orphaned=False,
+                )
+            )
+        await sess.commit()
+
+    create = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Tag hevc",
+            "definition": {
+                "match": {"field": "video_codec", "op": "eq", "value": "hevc"},
+                "actions": [{"type": "add_tag", "tag": "hevc"}],
+            },
+        },
+    )
+    assert create.status_code == 201, create.text
+
+    response = await client.post(
+        "/api/v1/rules/libraries/evaluate-all", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["libraries_evaluated"] == 2
+    assert body["files_evaluated"] == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluate_all_libraries_requires_admin(
+    client: AsyncClient,
+) -> None:
+    response = await client.post("/api/v1/rules/libraries/evaluate-all")
+    assert response.status_code == 401
+
+
+# ── DELETE /rules/{id} removes the rule cleanly.
+
+
+@pytest.mark.asyncio
+async def test_delete_rule_removes_it_from_listing(
+    client: AsyncClient,
+) -> None:
+    headers = await _admin_headers(client)
+    library_id, _ = await _seed_one_file()
+
+    create = await client.post(
+        "/api/v1/rules",
+        headers=headers,
+        json={
+            "name": "Delete me",
+            "definition": {
+                "match": {"field": "video_codec", "op": "eq", "value": "hevc"},
+                "actions": [{"type": "add_tag", "tag": "delete-me"}],
+            },
+        },
+    )
+    rule_id = create.json()["id"]
+
+    # Establish that the rule actually matched something before delete.
+    lib_eval = await client.post(
+        f"/api/v1/rules/libraries/{library_id}/evaluate", headers=headers
+    )
+    assert lib_eval.status_code == 200
+    before = await client.get(
+        f"/api/v1/rules/{rule_id}/evaluations", headers=headers
+    )
+    assert len(before.json()) >= 1
+
+    deleted = await client.delete(f"/api/v1/rules/{rule_id}", headers=headers)
+    assert deleted.status_code == 204
+
+    # Rule is gone from the listing — subsequent CRUD cannot target it.
+    listing = await client.get("/api/v1/rules", headers=headers)
+    assert listing.status_code == 200
+    assert rule_id not in {r["id"] for r in listing.json()}
+
+    # A second delete returns 404 (idempotency boundary).
+    second = await client.delete(f"/api/v1/rules/{rule_id}", headers=headers)
+    assert second.status_code == 404

@@ -94,6 +94,8 @@ export function RulesPage() {
                 onSelectLibrary={s.setSelectedLibrary}
                 onEvaluate={() => s.evaluate.mutate(s.selectedLibrary)}
                 isEvaluating={s.evaluate.isPending}
+                onEvaluateAll={() => s.evaluateAll.mutate()}
+                isEvaluatingAll={s.evaluateAll.isPending}
               />
               <Button
                 size="sm"
@@ -121,6 +123,16 @@ export function RulesPage() {
             <div className="px-4 py-3 text-[13px]">
               Re-evaluated {s.evaluate.data.files_evaluated} file(s) in the
               selected library.
+            </div>
+          </Card>
+        ) : null}
+
+        {s.evaluateAll.data && s.tab !== "automation" ? (
+          <Card>
+            <div className="px-4 py-3 text-[13px]">
+              Re-evaluated {s.evaluateAll.data.files_evaluated} file(s) across{" "}
+              {s.evaluateAll.data.libraries_evaluated} librar
+              {s.evaluateAll.data.libraries_evaluated === 1 ? "y" : "ies"}.
             </div>
           </Card>
         ) : null}

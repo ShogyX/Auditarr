@@ -300,6 +300,18 @@ export function useEvaluateLibrary() {
   });
 }
 
+export function useEvaluateAllLibraries() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiClient.post<{
+        libraries_evaluated: number;
+        files_evaluated: number;
+      }>(`/rules/libraries/evaluate-all`, {}),
+    onSuccess: () => invalidateMany(qc, ["rule", "media"]),
+  });
+}
+
 // v1.9 OP-15 — targeted single-rule re-evaluation.
 // Fires the named rule against every file in every library.
 // Used by the rule editor's "Save & Evaluate" affordance: after
