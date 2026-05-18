@@ -265,6 +265,49 @@ async def test_submit_handles_4xx_5xx_as_error(
     assert "401" in (result.detail or "")
 
 
+@pytest.mark.asyncio
+async def test_submit_returns_rejected_for_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOG-AUDIT-2: a 403 is a permanent failure (token lacks the
+    manage claim, server forbids the operation). Must map to
+    ``rejected`` so the worker doesn't retry forever."""
+    transport = _MockTransport(
+        [
+            (
+                "/library/metadata/12345/optimize",
+                httpx.Response(403, content=b"forbidden"),
+            ),
+        ]
+    )
+    _install_transport(monkeypatch, transport)
+    result = await _provider().submit_transcode_job(_config(), _job_spec())
+    assert result.status == "rejected"
+    assert "403" in (result.detail or "")
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_rejected_for_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LOG-AUDIT-2: a 404 means the ratingKey doesn't exist on this
+    Plex server (operator pinned a stale ID, item was deleted, etc.).
+    Permanent — ``rejected`` — so the worker fails the item terminally
+    and the operator sees an actionable error rather than retry spam."""
+    transport = _MockTransport(
+        [
+            (
+                "/library/metadata/12345/optimize",
+                httpx.Response(404, content=b"not found"),
+            ),
+        ]
+    )
+    _install_transport(monkeypatch, transport)
+    result = await _provider().submit_transcode_job(_config(), _job_spec())
+    assert result.status == "rejected"
+    assert "404" in (result.detail or "")
+
+
 # ── Auto-lookup of ratingKey from path ─────────────────────────
 
 
@@ -704,6 +747,49 @@ async def test_status_returns_running_when_ratingKey_in_queue(
                             "MediaContainer": {
                                 "Metadata": [
                                     {"sourceRatingKey": "12345"},
+                                ]
+                            }
+                        }
+                    ).encode(),
+                ),
+            ),
+        ]
+    )
+    _install_transport(monkeypatch, transport)
+    status = await _provider().get_transcode_job_status(
+        _config(), "plex:12345:2"
+    )
+    assert status.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_status_returns_running_when_rating_key_nested_under_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plex's actual /library/optimize response nests the source
+    ratingKey under ``Metadata[*].Item[*].ratingKey`` — that's the
+    shape ``verify_optimization_started`` already walks. The
+    pre-fix get_transcode_job_status only read the flat
+    ``Metadata[*].sourceRatingKey`` which doesn't exist in the
+    real payload, so routed items were marked completed on the
+    first poll even while Plex was still transcoding them.
+    """
+    transport = _MockTransport(
+        [
+            (
+                "/library/optimize",
+                httpx.Response(
+                    200,
+                    content=json.dumps(
+                        {
+                            "MediaContainer": {
+                                "Metadata": [
+                                    {
+                                        "title": "Mobile job",
+                                        "Item": [
+                                            {"ratingKey": "12345"},
+                                        ],
+                                    }
                                 ]
                             }
                         }
