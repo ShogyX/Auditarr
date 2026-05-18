@@ -77,3 +77,81 @@ def test_update_feed_url_default_points_at_shogyx_auditarr() -> None:
     assert s.update_feed_url == (
         "https://api.github.com/repos/ShogyX/Auditarr/releases/latest"
     )
+
+
+# ── v1.9.x: update sentinel paths derive from state_dir ────────
+
+
+def test_apply_sentinel_defaults_to_state_dir_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """``AUDITARR_STATE_DIR`` set in auditarr.env (the bare-metal
+    installer writes this to ``/var/lib/auditarr``) must steer the
+    apply-request and apply-status sentinels to the same directory
+    the host-side update watcher polls.
+
+    Pre-fix the API ignored ``AUDITARR_STATE_DIR`` (no field in
+    Settings), so the sentinel resolved against gunicorn's
+    ``WorkingDirectory=/opt/auditarr/backend`` to
+    ``/opt/auditarr/backend/data/updater/apply.request`` while the
+    watcher polled ``/var/lib/auditarr/updater/apply.request``. Every
+    update apply hit the 15-minute reaper with "host helper never
+    reported back".
+    """
+    state = tmp_path / "state"
+    monkeypatch.setenv("AUDITARR_STATE_DIR", str(state))
+    # Belt-and-suspenders: the operator may also have lingering
+    # explicit sentinel overrides from an older auditarr.env. Clear
+    # them so we exercise the derivation path.
+    monkeypatch.delenv("AUDITARR_UPDATE_APPLY_SENTINEL", raising=False)
+    monkeypatch.delenv("AUDITARR_UPDATE_APPLY_STATUS_PATH", raising=False)
+
+    s = Settings()
+    assert s.state_dir == state.resolve()
+    assert s.update_apply_sentinel == (
+        state / "updater" / "apply.request"
+    ).resolve()
+    assert s.update_apply_status_path == (
+        state / "updater" / "apply.status"
+    ).resolve()
+
+
+def test_apply_sentinel_explicit_override_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Operators who pin ``AUDITARR_UPDATE_APPLY_SENTINEL`` (e.g. a
+    custom host helper at a non-default location) keep that value;
+    the after-validator only fills the None slot."""
+    custom = tmp_path / "elsewhere" / "apply.request"
+    monkeypatch.setenv("AUDITARR_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("AUDITARR_UPDATE_APPLY_SENTINEL", str(custom))
+
+    s = Settings()
+    assert s.update_apply_sentinel == custom.resolve()
+    # The status path still defaults from state_dir.
+    assert s.update_apply_status_path == (
+        tmp_path / "state" / "updater" / "apply.status"
+    ).resolve()
+
+
+def test_apply_sentinel_defaults_to_data_dir_when_state_dir_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Docker installs that don't separate state_dir from data_dir
+    keep working: with neither env var set, both default to ``./data``
+    and the sentinel lands at ``./data/updater/apply.request`` —
+    which is what the in-container helper sees on the bind-mounted
+    volume."""
+    monkeypatch.delenv("AUDITARR_STATE_DIR", raising=False)
+    monkeypatch.delenv("AUDITARR_UPDATE_APPLY_SENTINEL", raising=False)
+    monkeypatch.delenv("AUDITARR_UPDATE_APPLY_STATUS_PATH", raising=False)
+
+    s = Settings()
+    # Resolved against whatever CWD pytest is running from; we
+    # check the relative tail to stay environment-agnostic.
+    assert s.update_apply_sentinel is not None
+    assert s.update_apply_sentinel.parts[-3:] == (
+        "data",
+        "updater",
+        "apply.request",
+    )
