@@ -1,0 +1,22 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# uv lock — environments resolved per-host
+uv.lock
+
+# Virtualenvs
+.venv/
+venv/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store

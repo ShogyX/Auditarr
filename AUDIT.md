@@ -224,13 +224,36 @@ totalled anywhere.
 on the dashboard; clickable to filtered Files.
 
 ### OP-10 (BUG, HIGH) — Plex live playback not appearing
-**Location**: `backend/plugins/plex/backend.py` or
-`backend/app/services/playback/poller.py`
+**Location**: `backend/plugins/plex/backend.py`,
+`backend/app/api/v1/playback.py`
 **Issue**: Plex integration neither surfaces live playback nor
 ingests historical playback. Operator sees empty playback data.
-**Fix**: Investigate Plex provider — likely the endpoint URLs or
-auth shape have shifted. May need to check actual HTTP responses
-from a running Plex.
+**Root cause**: three compounding defects —
+  1. The live aggregator read only the SSE-written
+     `playback_sessions` table for Plex; integrations whose SSE
+     listener wasn't running (proxy strips SSE, token lacks
+     subscribe scope, supervisor crashed) showed an empty tile
+     with no fallback and no diagnostic.
+  2. `fetch_live_playbacks` only logged `plex.live.fetched` when
+     the response contained at least one entry, so an operator
+     debugging the empty tile couldn't tell from the logs whether
+     we polled at all.
+  3. `get_transcode_job_status` read the optimize queue at
+     `Metadata[*].sourceRatingKey`, but Plex's actual shape puts
+     the source ratingKey at `Metadata[*].Item[*].ratingKey`
+     (`verify_optimization_started` already did this correctly).
+     Routed items were marked completed on the first poll.
+**Fix**: live aggregator falls through to `fetch_live_playbacks`
+for any Plex integration that contributed zero SSE rows, with
+session-key dedupe so a row that appears in both sources only
+renders once. `fetch_live_playbacks` now logs every poll with a
+`metadata_present` flag. `get_transcode_job_status` walks the
+`Item[*]` nesting first and keeps the flat shape as a
+back-compat fallback. `fetch_playback_events` also normalizes a
+naive `since` to UTC defensively (latent crash uncovered while
+auditing). Tests added in
+`backend/tests/unit/test_plex_optimize_endpoint_stage08.py` and
+`backend/tests/integration/test_plex_playback_wire_shape.py`.
 
 ### OP-11 (BUG, HIGH) — Tracearr healthcheck 404
 **Location**: `backend/plugins/tracearr/backend.py`
@@ -301,3 +324,4 @@ button or fix the trigger.
 | AI-10    | pending  | persist model_dump()               |
 | STALE-1  | pending  | factor ratio out of per-rule loop  |
 | STALE-2  | deferred | needs per-file tracking            |
+| OP-10    | resolved | live SSE fallback + queue nesting  |

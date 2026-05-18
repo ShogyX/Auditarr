@@ -300,6 +300,11 @@ class PlexProvider(IntegrationProvider):
         """
         async with self._client(config) as client:
             cutoff = since or (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1))
+            # Normalize naive datetimes to UTC so the cutoff comparison
+            # below doesn't raise TypeError mid-poll (LOG-1 in AUDIT.md
+            # tracks the cursor side that can produce a naive value).
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=_dt.UTC)
             cutoff_unix = int(cutoff.timestamp())
             try:
                 response = await client.get(
@@ -410,6 +415,10 @@ class PlexProvider(IntegrationProvider):
                     content_type=response.headers.get("content-type"),
                 )
                 return []
+            # Plex returns the Metadata key only when there are
+            # active sessions; distinguish "no sessions" from
+            # "shape we didn't expect" in the log payload below.
+            metadata_present = "Metadata" in payload
             entries = payload.get("Metadata", []) or []
 
         sessions: list[LivePlaybackDTO] = []
@@ -420,16 +429,17 @@ class PlexProvider(IntegrationProvider):
                 sessions.append(dto)
             else:
                 skipped += 1
-        if entries:
-            # Always log when Plex returned ANY entries, so we
-            # have a paper trail of whether the request actually
-            # found sessions on the server.
-            self._log.info(
-                "plex.live.fetched",
-                count=len(sessions),
-                raw_count=len(entries),
-                skipped=skipped,
-            )
+        # Always log — even on zero-entry polls. The history
+        # fetcher logs every cycle; live must match so operators
+        # can tell "we polled, nothing was playing" from "we
+        # never polled / something silently failed".
+        self._log.info(
+            "plex.live.fetched",
+            count=len(sessions),
+            raw_count=len(entries),
+            skipped=skipped,
+            metadata_present=metadata_present,
+        )
         return sessions
 
     # ── Stage 08 (v1.7) — transcode hand-off (addendum B.6) ──────
@@ -1009,8 +1019,20 @@ class PlexProvider(IntegrationProvider):
                     for entry in items:
                         if not isinstance(entry, dict):
                             continue
-                        # Plex's optimize queue carries the
-                        # source ratingKey on each entry.
+                        # Plex's actual /library/optimize shape carries
+                        # the source ratingKey on Metadata[*].Item[*]
+                        # — this is what verify_optimization_started
+                        # also walks. Older PMS builds (and the
+                        # original Stage 08 fixture) put it flat on the
+                        # entry itself; we accept both so the poller
+                        # works against either shape.
+                        for sub in entry.get("Item") or []:
+                            if isinstance(sub, dict):
+                                inner = sub.get("ratingKey") or sub.get(
+                                    "sourceRatingKey"
+                                )
+                                if inner:
+                                    rating_keys_in_queue.add(str(inner))
                         src = entry.get("sourceRatingKey") or entry.get(
                             "ratingKey"
                         )
@@ -1019,12 +1041,23 @@ class PlexProvider(IntegrationProvider):
                 except ValueError:
                     try:
                         root = ET.fromstring(response.text)
-                        for video in root.iter():
-                            src = video.get(
+                        # Prefer the Item element shape (matches Plex's
+                        # actual queue payload); fall back to any
+                        # element carrying ratingKey for compatibility
+                        # with older PMS shapes.
+                        for item in root.iter("Item"):
+                            src = item.get("ratingKey") or item.get(
                                 "sourceRatingKey"
-                            ) or video.get("ratingKey")
+                            )
                             if src:
                                 rating_keys_in_queue.add(src)
+                        if not rating_keys_in_queue:
+                            for video in root.iter():
+                                src = video.get(
+                                    "sourceRatingKey"
+                                ) or video.get("ratingKey")
+                                if src:
+                                    rating_keys_in_queue.add(src)
                     except ET.ParseError:
                         pass
         except httpx.HTTPError as exc:

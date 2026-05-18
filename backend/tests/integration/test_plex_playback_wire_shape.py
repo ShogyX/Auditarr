@@ -430,3 +430,48 @@ async def test_fetch_live_playbacks_logs_parse_failure_on_non_json(
         if event == "plex.live.fetch_parse_failed"
     )
     assert parse_record.get("content_type") == "application/xml"
+
+
+# ── Test 7 — fetch_live_playbacks always logs the poll outcome
+#            (OP-10 diagnostic gap)
+
+
+@pytest.mark.asyncio
+async def test_fetch_live_playbacks_logs_even_when_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-10: pre-fix, ``fetch_live_playbacks`` only logged
+    ``plex.live.fetched`` when Plex returned at least one entry.
+    That made "live tile is empty" un-debuggable — the operator
+    couldn't tell from the logs whether we polled and got nothing,
+    or never polled at all.
+
+    Post-fix, every poll logs ``plex.live.fetched`` with the count,
+    and the payload includes ``metadata_present`` so the operator
+    can distinguish "Plex responded, no active sessions" (key
+    absent) from "Plex responded with the shape we expected and
+    nothing was playing".
+    """
+    transport = _CaptureTransport(
+        # No Metadata key — Plex's shape when nothing is playing.
+        response_body={"MediaContainer": {"size": 0}}
+    )
+    _install_transport(monkeypatch, transport)
+
+    rec_log = _RecordingLog()
+    provider = PlexProvider(log=rec_log)
+    sessions = await provider.fetch_live_playbacks(_plex_config())
+
+    assert sessions == []
+    # The poll outcome IS logged even though Metadata is missing.
+    assert "plex.live.fetched" in rec_log.events("info"), (
+        f"expected 'plex.live.fetched' info; saw {rec_log.records}"
+    )
+    fetched_record = next(
+        kwargs
+        for lvl, event, kwargs in rec_log.records
+        if event == "plex.live.fetched"
+    )
+    assert fetched_record.get("count") == 0
+    assert fetched_record.get("raw_count") == 0
+    assert fetched_record.get("metadata_present") is False

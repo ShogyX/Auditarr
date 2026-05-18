@@ -319,6 +319,17 @@ async def list_live_playbacks(
         )
         plex_rows = list(plex_rows_iter.scalars().all())
 
+    # Track which Plex integrations the SSE table actually
+    # contributed rows for. Any enabled Plex integration with
+    # zero rows falls through to the HTTP poll below so the
+    # tile isn't blank when the SSE listener is unavailable
+    # (proxy strips SSE, token without subscribe scope, worker
+    # not started, etc.). The dedupe set keys live (integration_id,
+    # session_key) so a session that's in BOTH sources only
+    # renders once — the SSE row wins because it ran first.
+    plex_with_sse_rows: set[int] = {row.integration_id for row in plex_rows}
+    plex_seen_session_keys: set[tuple[int, str]] = set()
+
     for row in plex_rows:
         ig = integration_by_id.get(row.integration_id)
         if ig is None:
@@ -362,15 +373,26 @@ async def list_live_playbacks(
             media_file_id=row.media_file_id,
         )
         out.append(live_row)
+        if row.session_key:
+            plex_seen_session_keys.add(
+                (row.integration_id, str(row.session_key))
+            )
         if mapped_path and live_row.media_file_id is None:
             pending_path_to_dto.append((mapped_path, live_row))
 
-    # ── Non-Plex integrations (Jellyfin etc) still poll inline ──
+    # ── Inline poll for non-Plex AND for Plex without SSE data ──
     # Jellyfin doesn't expose SSE; until we wire its equivalent
     # (WebSocket session notifications, planned for v1.8.x) we
-    # keep the per-poll path for these providers.
+    # keep the per-poll path for those providers. Plex normally
+    # gets its sessions from the SSE-written playback_sessions
+    # table, but we fall through to fetch_live_playbacks for any
+    # Plex integration that contributed zero rows — that way the
+    # tile still works if the SSE listener is unavailable, while
+    # the table read remains the primary source when SSE works.
     for integration in enabled:
-        if integration.kind == "plex":
+        if integration.kind == "plex" and (
+            integration.id in plex_with_sse_rows
+        ):
             continue
         provider = manager.provider_for(integration.kind)
         if provider is None or not hasattr(provider, "fetch_live_playbacks"):
@@ -397,6 +419,15 @@ async def list_live_playbacks(
             (integration.config or {}).get("path_mappings")
         )
         for dto in live_dtos:
+            # Dedupe Plex sessions that the SSE table may have
+            # written between the table read above and this poll
+            # returning. Non-Plex providers can't collide because
+            # they don't write to playback_sessions.
+            if integration.kind == "plex" and (
+                (integration.id, str(dto.upstream_id))
+                in plex_seen_session_keys
+            ):
+                continue
             mapped_path = remap_path_chain(
                 dto.source_path, ig_mappings, global_mappings
             )
