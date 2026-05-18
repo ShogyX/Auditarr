@@ -19,6 +19,11 @@ class UpdaterStatusRead(BaseModel):
     # Stage 19: install environment context for the UI.
     install_mode: str
     apply_enabled: bool
+    # Stage 1.6 (v1.9.1) — populated for Docker installs with the
+    # canonical host commands the operator must run to upgrade.
+    # None for bare-metal (Apply button does the work) and unmanaged
+    # (operator's own config tool drives the upgrade).
+    manual_apply_command: str | None = None
 
 
 class UpdateCheckRead(BaseModel):

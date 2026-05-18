@@ -58,7 +58,9 @@ async def client(
     monkeypatch.setenv(
         "AUDITARR_UPDATE_APPLY_STATUS_PATH", str(status_path)
     )
-    monkeypatch.setenv("AUDITARR_UPDATE_INSTALL_MODE", "docker")
+    # v1.9.1 Stage 1.6 — reaper exercises the apply flow, which is now
+    # bare-metal-only. Docker installs no longer auto-apply.
+    monkeypatch.setenv("AUDITARR_UPDATE_INSTALL_MODE", "bare-metal")
     # Short timeout so tests don't have to backdate by 30 minutes.
     monkeypatch.setenv("AUDITARR_UPDATE_APPLY_TIMEOUT_SECONDS", "60")
 

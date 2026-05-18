@@ -325,3 +325,4 @@ button or fix the trigger.
 | STALE-1  | pending  | factor ratio out of per-rule loop  |
 | STALE-2  | deferred | needs per-file tracking            |
 | OP-10    | resolved | live SSE fallback + queue nesting  |
+| OP-UPD-1 | resolved | bare-metal updater rewrite + Docker auto-apply removal |

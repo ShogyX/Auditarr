@@ -18,6 +18,10 @@ export interface UpdaterStatus {
   // Stage 19: install-environment context.
   install_mode: InstallMode;
   apply_enabled: boolean;
+  // v1.9.1 Stage 1.6 — populated for Docker installs with the
+  // copy-paste-ready host commands the operator must run to
+  // update. Null for bare-metal and unmanaged.
+  manual_apply_command?: string | null;
 }
 
 export interface UpdateCheck {

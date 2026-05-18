@@ -150,23 +150,32 @@ In the UI, **Settings → Libraries → Add** points each library at the
 *container* path (e.g. `/mnt/library-1`), not the host path. Read-only
 is recommended; Auditarr never needs to write to your library.
 
-## Updater helper (optional)
+## Updates
 
-Auditarr's apply flow writes a sentinel file the host watches; a tiny
-helper script reads the sentinel and runs `docker compose pull && up -d`
-on the host. This avoids mounting the docker socket into the
-container.
+Docker installs update by hand from the host — Auditarr can't
+recreate its own container without mounting the Docker socket, and
+that gives the container full control over the host's daemon. The
+**Updates** panel in the UI shows the exact command set you need to
+run, plus a Copy button; the in-container Apply flow is disabled
+in Docker mode and `POST /api/v1/updater/apply` returns 409.
+
+The canonical update sequence (the same string the API returns via
+`manual_apply_command`):
 
 ```bash
-sudo cp docker/updater/auditarr-update.service /etc/systemd/system/
-sudo $EDITOR /etc/systemd/system/auditarr-update.service # set paths
-sudo systemctl daemon-reload
-sudo systemctl enable --now auditarr-update
-journalctl -u auditarr-update -f
+# In the directory containing your docker-compose.yml:
+cd /path/to/auditarr
+git pull origin main          # or: git fetch && git checkout v<new-version>
+docker compose pull
+docker compose up -d --force-recreate
+docker compose ps             # confirm app + worker are 'running'
 ```
 
-See **Updates** (`docs/updater/overview.md`) for the sentinel protocol
-and rollback flow.
+If you originally cloned from a fork or non-default branch,
+substitute the URL or branch accordingly. Database migrations run
+automatically on container start; the migration chain is
+forward-only, so back up your Postgres volume before upgrading
+across major versions.
 
 ## Manual setup
 
@@ -225,18 +234,9 @@ and accept re-entering integration credentials.
 
 ## Upgrading
 
-The updater handles in-place upgrades: see **Updates** in the help
-drawer. If you'd rather upgrade manually:
-
-```bash
-git pull # if you cloned the repo, otherwise extract the new release
-docker compose pull
-docker compose up -d
-```
-
-Database migrations run on container start. The ..N migration
-chain is forward-only — Auditarr does not support downgrading a Postgres
-database that's been upgraded across releases.
+See the **Updates** section above. The full reference (rollback
+flow, endpoint surface, mirror configuration) is in
+[`docs/updater/overview.md`](../updater/overview.md).
 
 ## What's NOT in v1.0
 

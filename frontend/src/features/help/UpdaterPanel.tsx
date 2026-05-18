@@ -79,14 +79,17 @@ export function UpdaterPanel() {
   const applyButtonText = (() => {
     if (s.apply_in_progress) return "Apply in progress…";
     if (!s.latest_version) return "Apply";
-    if (s.install_mode === "docker") {
-      return `Apply ${s.latest_version} (Docker)`;
-    }
     if (s.install_mode === "bare-metal") {
       return `Apply ${s.latest_version} (systemd)`;
     }
     return `Apply ${s.latest_version}`;
   })();
+
+  // v1.9.1 Stage 1.6 — Docker installs surface the manual host
+  // commands instead of an Apply button. Containers can't recreate
+  // themselves without holding the docker socket, which defeats
+  // isolation, so the operator drives the upgrade from the host.
+  const showDockerManualBlock = s.install_mode === "docker";
 
   return (
     <Card>
@@ -108,17 +111,28 @@ export function UpdaterPanel() {
       />
       <CardBody>
         <div className="flex flex-col gap-3">
-          {/* Stage 19: warn the operator when apply is disabled. */}
-          {!s.apply_enabled ? (
+          {/* v1.9.1 Stage 1.6 — Docker installs get install-mode-specific
+              copy with the host commands inline; unmanaged keeps the
+              generic warning. */}
+          {showDockerManualBlock ? (
+            <div className="text-[12px] p-2.5 rounded-md bg-sev-info/10 text-sev-info border border-sev-info/30">
+              <Icon name="info" size={11} className="inline mr-1" />
+              <span className="font-semibold">Docker install.</span> Auditarr can't recreate
+              its own container — update by running these commands on the host:
+            </div>
+          ) : !s.apply_enabled ? (
             <div className="text-[12px] p-2.5 rounded-md bg-sev-warn/10 text-sev-warn border border-sev-warn/30">
               <Icon name="alert" size={11} className="inline mr-1" />
               Auto-apply is disabled — install environment is{" "}
               <code className="font-mono">{s.install_mode}</code>. Set{" "}
-              <code className="font-mono">AUDITARR_UPDATE_INSTALL_MODE</code> in your config to{" "}
-              <code className="font-mono">docker</code> or{" "}
-              <code className="font-mono">bare-metal</code> (and install the matching helper
-              script), or update Auditarr by hand.
+              <code className="font-mono">AUDITARR_UPDATE_INSTALL_MODE</code> in your config
+              to <code className="font-mono">bare-metal</code> to enable in-UI apply, or
+              update Auditarr by hand.
             </div>
+          ) : null}
+
+          {showDockerManualBlock && s.manual_apply_command ? (
+            <ManualCommandBlock command={s.manual_apply_command} />
           ) : null}
 
           <div className="flex items-center gap-3 flex-wrap">
@@ -128,20 +142,22 @@ export function UpdaterPanel() {
                   Update available
                 </Pill>
                 <Tag>{s.latest_version}</Tag>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  onClick={() => s.latest_version && requestApply.mutate(s.latest_version)}
-                  disabled={requestApply.isPending || s.apply_in_progress || !s.apply_enabled}
-                  title={
-                    !s.apply_enabled
-                      ? "Apply disabled — install environment isn't auto-update-capable"
-                      : undefined
-                  }
-                >
-                  <Icon name="download" size={12} />
-                  <span className="ml-1">{applyButtonText}</span>
-                </Button>
+                {showDockerManualBlock ? null : (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => s.latest_version && requestApply.mutate(s.latest_version)}
+                    disabled={requestApply.isPending || s.apply_in_progress || !s.apply_enabled}
+                    title={
+                      !s.apply_enabled
+                        ? "Apply disabled — install environment isn't auto-update-capable"
+                        : undefined
+                    }
+                  >
+                    <Icon name="download" size={12} />
+                    <span className="ml-1">{applyButtonText}</span>
+                  </Button>
+                )}
               </>
             ) : (
               <Pill className="text-sev-ok border-sev-ok/40 bg-sev-ok/10">Up to date</Pill>
@@ -247,4 +263,33 @@ function applyStatusClass(status: string): string {
     default:
       return "";
   }
+}
+
+// v1.9.1 Stage 1.6 — Docker manual-apply command block with a
+// copy-to-clipboard affordance. The command string is rendered as-is
+// from the API so docs and UI can't drift.
+function ManualCommandBlock({ command }: { command: string }) {
+  const onCopy = () => {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(command).catch(() => {
+        // Clipboard access blocked (e.g. insecure context).
+        // Selection-based copy works as a fallback in any browser.
+      });
+    }
+  };
+  return (
+    <div className="relative rounded-md bg-surface-2 border border-border">
+      <button
+        onClick={onCopy}
+        className="absolute top-1.5 right-1.5 text-[10.5px] text-muted-2 hover:text-text px-1.5 py-0.5 rounded border border-border bg-surface-1"
+        title="Copy command to clipboard"
+      >
+        <Icon name="duplicate" size={10} className="inline mr-1" />
+        Copy
+      </button>
+      <pre className="text-[11.5px] font-mono p-2.5 pr-14 overflow-x-auto whitespace-pre">
+        {command}
+      </pre>
+    </div>
+  );
 }

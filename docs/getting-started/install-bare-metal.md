@@ -145,58 +145,79 @@ Useful subcommands:
 
 ## Updating
 
-When a new release ships:
+### One-click from the UI (recommended)
 
-1. Download and extract the new tarball alongside the current one.
-2. Stop the services:
+The installer wires up `auditarr-update-watcher.service` and ships
+`/opt/auditarr/updater/auditarr-update-preflight.sh` alongside it.
+When a new release is detected, click **Apply** in **Help &
+updates** and the watcher will:
+
+1. Run preflight checks (binaries, systemd unit access, network,
+   disk space, permissions, app user).
+2. Download the release tarball and (optionally) verify its SHA256.
+3. Snapshot the current `/opt/auditarr` tree for rollback.
+4. Stop services with a hard timeout (force-kill if a unit hangs).
+5. Re-run `install-bare-metal.sh --auto` from the extracted tree —
+   the same idempotent installer you ran by hand the first time.
+6. Probe `/api/v1/health` until it responds, or roll back if not.
+
+If anything fails the snapshot is restored, services are restarted
+on the old version, and the apply row in the UI shows the failure
+detail. Detailed installer output for the most recent apply is at
+`/var/lib/auditarr/updater/last-apply.log`.
+
+See [`docs/updater/overview.md`](../updater/overview.md) for the
+full apply flow, timeout knobs, and the preflight script reference.
+
+### Validate the host before clicking Apply
+
+You can run the preflight standalone — useful when commissioning a
+new host or after changing the network policy:
+
+```bash
+sudo /opt/auditarr/updater/auditarr-update-preflight.sh
+```
+
+Exits 0 with a green table when the host is ready; non-zero with
+the failing checks otherwise.
+
+### Manual fallback
+
+If you'd rather drive the upgrade by hand (the watcher is down,
+you're on an air-gapped host, you want to inspect the new tarball
+before installing it):
+
+1. Stop the services:
    ```bash
    sudo systemctl stop auditarr-api auditarr-worker
    ```
+2. Download and extract the new tarball alongside the current one.
 3. Re-run the installer from the new tarball:
    ```bash
-   cd auditarr-1.3.0
-   sudo ./install-bare-metal.sh
+   cd auditarr-1.9.1
+   sudo ./install-bare-metal.sh --auto
    ```
-   It detects the existing install, preserves the env file (and the
+   `--auto` is what the watcher uses; running it the same way means
+   your manual flow exercises the same code path. The installer
+   detects the existing install, preserves the env file (and the
    secret key + admin user), refreshes the application files,
    re-runs migrations, and restarts the services.
 
-### Automatic updates from the UI
+### Configuring the release source
 
-The installer also lays down `auditarr-update-watcher.service`, a
-small daemon that watches `/var/lib/auditarr/updater/apply.request`.
-When you click **Apply update** in the UI, the backend writes a
-sentinel file; the watcher reads it and runs the equivalent of the
-manual flow above: download the new release tarball, snapshot the
-current install, swap files, refresh deps, run migrations, restart
-services. If anything fails, it rolls back to the snapshot.
+By default the watcher pulls release tarballs from the GitHub
+repository configured in `AUDITARR_UPDATE_FEED_URL`. For a private
+mirror or non-GitHub source, set
+`AUDITARR_RELEASE_TARBALL_URL` in `/etc/auditarr/updater.env`:
 
-**Auto-updates are OPT-IN.** The default
-`/etc/auditarr/updater.env` ships with the relevant URLs commented
-out. To enable:
+```
+AUDITARR_RELEASE_TARBALL_URL=https://example.com/auditarr/v%s/auditarr-%s.tar.gz
+AUDITARR_RELEASE_CHECKSUM_URL=https://example.com/auditarr/v%s/auditarr-%s.tar.gz.sha256
+```
 
-1. Edit `/etc/auditarr/updater.env`:
-   ```bash
-   sudo nano /etc/auditarr/updater.env
-   ```
-2. Uncomment and set `AUDITARR_RELEASE_TARBALL_URL`:
-   ```
-   AUDITARR_RELEASE_TARBALL_URL=https://github.com/auditarr/auditarr/releases/download/v%s/auditarr-%s.tar.gz
-   ```
-   The `%s` placeholders are substituted with the requested version
-   (e.g. `1.4.0`). If you mirror releases internally, point this at
-   your artifact store instead.
-3. Optionally also set `AUDITARR_RELEASE_CHECKSUM_URL` to enable
-   SHA256 verification of the downloaded tarball:
-   ```
-   AUDITARR_RELEASE_CHECKSUM_URL=https://github.com/auditarr/auditarr/releases/download/v%s/auditarr-%s.tar.gz.sha256
-   ```
-4. Restart the watcher:
-   ```bash
-   sudo systemctl restart auditarr-update-watcher
-   ```
-
-The watcher's logs go to the systemd journal:
+`%s` is substituted with the requested version (e.g. `1.9.1`). After
+editing, `sudo systemctl restart auditarr-update-watcher`. The
+watcher's logs go to the systemd journal:
 
 ```bash
 journalctl -u auditarr-update-watcher -f
