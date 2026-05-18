@@ -319,15 +319,25 @@ class RulesService:
                             )
 
         if persist:
-            # Drop stale evaluation rows for rules that no longer match.
-            stale = await self._session.execute(
-                select(RuleEvaluation).where(
-                    RuleEvaluation.media_file_id == media_file.id
+            # Drop stale evaluation rows for rules that no longer
+            # match — but only for rules included in *this* pass.
+            # When the caller hands us a subset (e.g. ``evaluate_rule``
+            # firing one rule against every file), the rows for rules
+            # that weren't evaluated must be left untouched; otherwise
+            # a single-rule re-run would wipe every other rule's
+            # history on those files.
+            evaluated_rule_ids = [rule.id for rule, _ in rules]
+            if evaluated_rule_ids:
+                matched_set = set(matched_rule_ids)
+                stale = await self._session.execute(
+                    select(RuleEvaluation).where(
+                        RuleEvaluation.media_file_id == media_file.id,
+                        RuleEvaluation.rule_id.in_(evaluated_rule_ids),
+                    )
                 )
-            )
-            for row in stale.scalars().all():
-                if row.rule_id not in matched_rule_ids:
-                    await self._session.delete(row)
+                for row in stale.scalars().all():
+                    if row.rule_id not in matched_set:
+                        await self._session.delete(row)
 
             # Apply severity + tags to the media row.
             media_file.severity = aggregate.severity or "ok"
@@ -1050,6 +1060,24 @@ class RulesService:
             rule.last_match_count = count
 
         return len(files)
+
+    async def evaluate_all_libraries(self) -> tuple[int, int]:
+        """Re-evaluate every file in every library against all enabled rules.
+
+        Returns ``(libraries_evaluated, files_evaluated)``. Walks
+        libraries server-side so the operator gets one HTTP call and
+        one transaction surface; per-library bookkeeping (last_evaluated_at,
+        last_match_count) still happens via ``evaluate_library``.
+        """
+        from app.models.library import Library
+
+        library_rows = (
+            await self._session.execute(select(Library))
+        ).scalars().all()
+        files_total = 0
+        for lib in library_rows:
+            files_total += await self.evaluate_library(lib.id)
+        return len(library_rows), files_total
 
     # ── Helpers ──────────────────────────────────────────────────
     async def _upsert_tag(self, media_file_id: str, tag: str) -> None:

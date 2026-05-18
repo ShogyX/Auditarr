@@ -32,6 +32,7 @@ from app.schemas.rules import (
     RuleCreate,
     RuleDryRunRequest,
     RuleDryRunResponse,
+    RuleEvaluateAllLibrariesResponse,
     RuleEvaluateLibraryResponse,
     RuleEvaluateRuleResponse,
     RuleEvaluationFileRow,
@@ -761,6 +762,24 @@ async def evaluate_library(
     count = await service.evaluate_library(library_id)
     return RuleEvaluateLibraryResponse(
         library_id=library_id, files_evaluated=count
+    )
+
+
+@router.post(
+    "/libraries/evaluate-all",
+    response_model=RuleEvaluateAllLibrariesResponse,
+    summary="Re-evaluate every file in every library against all enabled rules",
+)
+async def evaluate_all_libraries(
+    _admin: AdminUser,
+    session: SessionDep,
+    bus: EventBusDep,
+    registry: RegistryDep,
+) -> RuleEvaluateAllLibrariesResponse:
+    service = RulesService(session=session, event_bus=bus, registry=registry)
+    libs, files = await service.evaluate_all_libraries()
+    return RuleEvaluateAllLibrariesResponse(
+        libraries_evaluated=libs, files_evaluated=files
     )
 
 
