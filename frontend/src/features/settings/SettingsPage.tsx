@@ -29,6 +29,7 @@ import { LibraryEditDialog } from "./LibraryEditDialog";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import { SecretsPanel } from "./SecretsPanel";
 import { SystemMaintenanceCard } from "./SystemMaintenanceCard";
+import { TagsPanel } from "./TagsPanel";
 
 export function SettingsPage() {
   useHelpKey("settings.admin");
@@ -226,6 +227,15 @@ export function SettingsPage() {
               >
                 Housekeeping
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={systemSubTab === "tags"}
+                className={systemSubTab === "tags" ? "on" : ""}
+                onClick={() => setSystemSubTab("tags")}
+              >
+                Tags
+              </button>
             </div>
 
             {systemSubTab === "runtime" ? (
@@ -274,6 +284,15 @@ export function SettingsPage() {
                 <SystemMaintenanceCard />
                 <RuntimeSettingsPanel categoryFilter="housekeeping" />
               </>
+            ) : null}
+
+            {systemSubTab === "tags" ? (
+              /* v1.10 — tag-catalog management. Admin-only delete
+                 actions for tags imported from Sonarr/Radarr/Bazarr
+                 and applied by rules. The list itself is visible
+                 to any authenticated user so non-admins can audit
+                 what's in the catalog. */
+              <TagsPanel />
             ) : null}
           </>
         ) : null}
@@ -341,7 +360,12 @@ type SettingsTab = "workspace" | "system" | "security";
 // Stage 7 (audit follow-up): System sub-tab vocabulary. Adding a
 // new sub-tab is the same one-line-here / one-branch-in-render
 // pattern.
-type SystemSubTab = "runtime" | "secrets" | "config" | "housekeeping";
+type SystemSubTab =
+  | "runtime"
+  | "secrets"
+  | "config"
+  | "housekeeping"
+  | "tags";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (

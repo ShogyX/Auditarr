@@ -49,6 +49,7 @@ export type MutationKind =
   | "path-mapping"
   | "updater"
   | "playback"
+  | "tags"
   | "auth";
 
 /**
@@ -146,6 +147,11 @@ const GRAPH: Record<MutationKind, readonly string[]> = {
   // future write paths into the playback namespace flow back into
   // the dashboard's transcode panels.
   playback: ["playback", "dashboard"],
+
+  // Tag mutations affect the management table, the rule editor /
+  // automation autocomplete (cached under ``tags``), and the Files
+  // page's tag column.
+  tags: ["tags", "media", "files", "rules"],
 
   // Auth changes (login, logout, password reset) impact who can see
   // what — invalidate everything user-scoped.
