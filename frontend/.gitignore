@@ -1,0 +1,9 @@
+# Vite build output
+dist/
+
+# TypeScript incremental build cache
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Editor / OS cruft
+.DS_Store

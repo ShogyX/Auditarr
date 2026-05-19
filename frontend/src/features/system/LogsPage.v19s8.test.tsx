@@ -63,7 +63,7 @@ function withProviders(node: ReactNode) {
 }
 
 function mockResponse(overrides: Partial<{
-  records: any[];
+  records: unknown[];
   total_buffered: number;
   count: number;
   last_error_at: string | null;
@@ -274,10 +274,10 @@ describe("LogsPage", () => {
         "content-disposition": 'attachment; filename="audit.ndjson"',
       }),
     }));
-    (globalThis as any).fetch = fetchSpy as never;
+    (globalThis as unknown as { fetch: typeof fetch }).fetch = fetchSpy as never;
     const createUrl = vi.fn(() => "blob:mock-url");
-    (globalThis as any).URL.createObjectURL = createUrl;
-    (globalThis as any).URL.revokeObjectURL = vi.fn();
+    (globalThis as unknown as { URL: typeof URL }).URL.createObjectURL = createUrl;
+    (globalThis as unknown as { URL: typeof URL }).URL.revokeObjectURL = vi.fn();
     // Seed the localStorage so the bearer header gets added.
     localStorage.setItem(
       "auditarr.auth",
