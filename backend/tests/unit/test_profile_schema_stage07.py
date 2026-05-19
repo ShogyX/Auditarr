@@ -171,14 +171,52 @@ def test_routing_target_values_match_literal() -> None:
 
 
 def test_routing_target_accepts_each_known_target() -> None:
+    # ``tdarr`` requires a provider_profile_id; ``jellyfin`` is the
+    # Literal value but is rejected at validation time because the
+    # provider always refuses at runtime.
     for target in ROUTING_TARGET_VALUES:
-        p = ProfileDefinition.model_validate({"routing_target": target})
+        if target == "jellyfin":
+            continue
+        payload: dict = {"routing_target": target}
+        if target == "tdarr":
+            payload["provider_metadata"] = {
+                "provider_profile_id": "tdarr-plugin-h265"
+            }
+        p = ProfileDefinition.model_validate(payload)
         assert p.routing_target == target
 
 
 def test_routing_target_rejects_unknown() -> None:
     with pytest.raises(pydantic.ValidationError):
         ProfileDefinition.model_validate({"routing_target": "handbrake"})
+
+
+def test_routing_target_jellyfin_rejected_at_validation() -> None:
+    """Plan §443: Jellyfin's API has no job-submission endpoint, so
+    surfacing it as a valid routing_target only sets operators up to
+    fail at the first queue tick. Reject at save time instead."""
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        ProfileDefinition.model_validate({"routing_target": "jellyfin"})
+    assert "Jellyfin" in str(exc_info.value)
+
+
+def test_routing_target_tdarr_requires_provider_profile_id() -> None:
+    """Without provider_metadata.provider_profile_id the Tdarr provider
+    rejects every routed item with the same error. Catch the missing
+    hint at the profile boundary instead."""
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        ProfileDefinition.model_validate({"routing_target": "tdarr"})
+    assert "provider_profile_id" in str(exc_info.value)
+
+    # Empty string also rejected — operator may have left the input
+    # blank by accident.
+    with pytest.raises(pydantic.ValidationError):
+        ProfileDefinition.model_validate(
+            {
+                "routing_target": "tdarr",
+                "provider_metadata": {"provider_profile_id": "   "},
+            }
+        )
 
 
 # ── schedule_window ────────────────────────────────────────────

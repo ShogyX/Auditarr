@@ -294,6 +294,40 @@ class ProfileDefinition(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_routing_target(self) -> "ProfileDefinition":
+        """Reject routing targets that look configurable but always
+        fail at worker time.
+
+        * ``jellyfin`` — the Literal advertises it but
+          ``JellyfinProvider.submit_transcode_job`` always returns
+          ``status="rejected"`` because Jellyfin's API has no
+          job-submission endpoint. Catching it here gives the
+          operator a 400 at save time instead of a silent failure on
+          the next queue tick.
+        * ``tdarr`` — the Tdarr provider requires
+          ``provider_metadata.provider_profile_id`` (the Tdarr plugin
+          / flow id). Without it, every routed item fails with the
+          same "Tdarr requires a provider profile id" message until
+          the profile is edited.
+        """
+        if self.routing_target == "jellyfin":
+            raise ValueError(
+                "routing_target='jellyfin' is not supported: Jellyfin's "
+                "API does not expose a job-submission endpoint. Use "
+                "'tdarr' or 'in_process' instead."
+            )
+        if self.routing_target == "tdarr":
+            profile_id = self.provider_metadata.get("provider_profile_id")
+            if not isinstance(profile_id, str) or not profile_id.strip():
+                raise ValueError(
+                    "routing_target='tdarr' requires "
+                    "provider_metadata.provider_profile_id to be set to "
+                    "the Tdarr plugin (transcode flow) id. Pick one from "
+                    "the integration's plugin list in the profile editor."
+                )
+        return self
+
 
 def schedule_window_is_open(
     window: ScheduleWindow | None,
