@@ -274,6 +274,20 @@ class PlexProvider(IntegrationProvider):
         # Stage 5 ships read-only Plex; tag mirroring is a later add.
         return []
 
+    # ── v1.9.x — paginated history fetch ─────────────────────────
+    # Plex's history endpoint is paginated via X-Plex-Container-Start
+    # + X-Plex-Container-Size headers. Pre-v1.9.x we fetched a single
+    # 500-entry page; bursty households with > 500 plays in the window
+    # silently lost the oldest entries because they fell off the page
+    # before the next 15-minute poll. We now walk pages until either
+    # (a) the page returns < container_size entries (Plex's signal
+    # that we've reached the end of history), or (b) every entry in
+    # the page is already older than the cutoff (we've gone past the
+    # since= filter — no point fetching further), or (c) we hit the
+    # safety cap.
+    _HISTORY_PAGE_SIZE = 500
+    _HISTORY_PAGE_CAP = 20  # 20 * 500 = 10,000 entries per poll — generous
+
     async def fetch_playback_events(
         self, config: IntegrationConfig, since: _dt.datetime | None
     ) -> list[PlaybackEventDTO]:
@@ -299,9 +313,9 @@ class PlexProvider(IntegrationProvider):
             comparison per entry and gives us a deterministic
             cutoff that works against every PMS version.
           * We sort desc by viewedAt so the newest events are at
-            the front of the page; combined with a generous
-            container size (500), even a busy server's last hour
-            of history fits in one page.
+            the front of the page; combined with paginated
+            container starts (v1.9.x), bursty households with
+            thousands of plays in a poll window are covered.
         """
         async with self._client(config) as client:
             cutoff = since or (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1))
@@ -311,39 +325,84 @@ class PlexProvider(IntegrationProvider):
             if cutoff.tzinfo is None:
                 cutoff = cutoff.replace(tzinfo=_dt.UTC)
             cutoff_unix = int(cutoff.timestamp())
-            try:
-                response = await client.get(
-                    "/status/sessions/history/all",
-                    params={"sort": "viewedAt:desc"},
-                    headers={
-                        # Pagination as HEADERS per Plex docs.
-                        "X-Plex-Container-Start": "0",
-                        "X-Plex-Container-Size": "500",
-                    },
-                )
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                self._log.warning(
-                    "plex.playback.fetch_failed",
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                )
-                return []
 
-            try:
-                payload = response.json().get("MediaContainer", {})
-            except ValueError as exc:
-                # Plex returned non-JSON (XML, an HTML error page, etc.).
-                # The default Accept on _client is application/json, but
-                # an upstream proxy or a misconfigured reverse proxy can
-                # strip it.
-                self._log.warning(
-                    "plex.playback.fetch_parse_failed",
-                    error=str(exc),
-                    content_type=response.headers.get("content-type"),
+            entries: list[dict] = []
+            pages_walked = 0
+            stop_reason = "unknown"
+            for page_idx in range(self._HISTORY_PAGE_CAP):
+                container_start = page_idx * self._HISTORY_PAGE_SIZE
+                try:
+                    response = await client.get(
+                        "/status/sessions/history/all",
+                        params={"sort": "viewedAt:desc"},
+                        headers={
+                            "X-Plex-Container-Start": str(container_start),
+                            "X-Plex-Container-Size": str(self._HISTORY_PAGE_SIZE),
+                        },
+                    )
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    self._log.warning(
+                        "plex.playback.fetch_failed",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                        page_idx=page_idx,
+                    )
+                    # If we already have entries from earlier pages,
+                    # return what we have rather than discarding the
+                    # whole batch on a transient mid-pagination error.
+                    if entries:
+                        stop_reason = "http_error_mid_pagination"
+                        break
+                    return []
+
+                try:
+                    payload = response.json().get("MediaContainer", {})
+                except ValueError as exc:
+                    self._log.warning(
+                        "plex.playback.fetch_parse_failed",
+                        error=str(exc),
+                        content_type=response.headers.get("content-type"),
+                        page_idx=page_idx,
+                    )
+                    if entries:
+                        stop_reason = "parse_error_mid_pagination"
+                        break
+                    return []
+
+                page_entries = payload.get("Metadata", []) or []
+                pages_walked = page_idx + 1
+                if not page_entries:
+                    stop_reason = "empty_page"
+                    break
+                entries.extend(page_entries)
+
+                # Plex returned fewer than a full page → we've
+                # reached the end of history. Stop pulling.
+                if len(page_entries) < self._HISTORY_PAGE_SIZE:
+                    stop_reason = "short_page"
+                    break
+
+                # Every entry on this page is older than the cutoff →
+                # subsequent pages will also be older (sort is desc).
+                # Save the round trip.
+                youngest_on_page = max(
+                    (int(e.get("viewedAt") or 0) for e in page_entries),
+                    default=0,
                 )
-                return []
-            entries = payload.get("Metadata", []) or []
+                if youngest_on_page and youngest_on_page < cutoff_unix:
+                    stop_reason = "past_cutoff"
+                    break
+            else:
+                # for/else: ran to the page cap without breaking. Log
+                # so operators know to widen the cap or shorten their
+                # poll window.
+                stop_reason = "page_cap"
+                self._log.warning(
+                    "plex.playback.page_cap_hit",
+                    pages=self._HISTORY_PAGE_CAP,
+                    page_size=self._HISTORY_PAGE_SIZE,
+                )
 
             # ── 2026-05-19 bugfix ────────────────────────────────
             # ``/status/sessions/history/all`` returns lightweight
@@ -399,6 +458,8 @@ class PlexProvider(IntegrationProvider):
             filtered_out_pre_cutoff=filtered_out,
             metadata_missing=metadata_missing,
             cutoff_unix=cutoff_unix,
+            pages_walked=pages_walked,
+            stop_reason=stop_reason,
         )
         return events
 

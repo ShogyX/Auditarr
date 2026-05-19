@@ -52,23 +52,29 @@ _RESPAWN_BACKOFF = (5.0, 15.0, 60.0, 300.0)
 
 async def spawn_plex_listeners(
     db: Any, registry: Any
-) -> list[asyncio.Task]:
+) -> dict[str, asyncio.Task]:
     """Query enabled Plex integrations and spawn one supervisor
-    task per. Returns the task list so the caller can cancel
-    them on shutdown.
+    task per. Returns ``{integration_id: task}`` so callers can
+    reconcile + cancel by id.
 
     The supervisor wraps :func:`_run_plex_listener`. Each
     supervisor task is named ``plex-sse-<integration_id>`` so
     journalctl / ps output shows which integration each is
     serving.
+
+    v1.9.x — return shape changed from ``list[Task]`` to
+    ``dict[str, Task]`` so ``reconcile_plex_listeners`` can
+    spawn / cancel per-integration without walking the list.
+    Callers iterating ``.values()`` for cancellation get the
+    same effect as before.
     """
     async with db.session() as session:
         rows = await IntegrationRepository(session).list_all(enabled_only=True)
         plex_rows = [r for r in rows if r.kind == "plex"]
 
-    tasks: list[asyncio.Task] = []
+    tasks: dict[str, asyncio.Task] = {}
     for integration in plex_rows:
-        task = asyncio.create_task(
+        tasks[integration.id] = asyncio.create_task(
             _supervise_listener(
                 integration_id=integration.id,
                 integration_name=integration.name,
@@ -77,8 +83,99 @@ async def spawn_plex_listeners(
             ),
             name=f"plex-sse-{integration.id}",
         )
-        tasks.append(task)
     return tasks
+
+
+async def reconcile_plex_listeners(
+    tasks: dict[str, asyncio.Task],
+    *,
+    db: Any,
+    registry: Any,
+) -> dict[str, int]:
+    """v1.9.x — bring the listener set in line with the current
+    set of enabled Plex integrations.
+
+    Called from the worker's ``poll_integrations`` cron tick
+    (every minute) so operators who add a new Plex integration,
+    re-enable a disabled one, or change the token on an
+    existing one get an SSE listener without restarting the
+    worker. The previous "spawn at startup only" path is the
+    documented v1.8.0 behaviour but it is hostile in operator
+    practice — the user paths reported in v1.9.0 were exactly
+    "I rotated my Plex token and live playback stopped working
+    until I restarted the worker."
+
+    Mutates ``tasks`` in place. Returns counters for log
+    visibility.
+
+    Token-change detection: a listener that died from a
+    ``_PermanentListenerError`` (auth failure) has already been
+    removed by the supervisor. The reconciler observes the
+    missing-task state and respawns — when the operator updates
+    the integration row with a fresh token, the next iteration
+    picks it up because ``_run_plex_listener`` re-reads the row
+    on every supervision cycle.
+    """
+    spawned = 0
+    cancelled = 0
+    cleaned = 0
+
+    async with db.session() as session:
+        rows = await IntegrationRepository(session).list_all(enabled_only=True)
+        enabled_plex_ids = {r.id for r in rows if r.kind == "plex"}
+        names_by_id = {r.id: r.name for r in rows if r.kind == "plex"}
+
+    # Cancel listeners whose integration is no longer enabled or
+    # is no longer Plex-kind.
+    for integration_id in list(tasks.keys()):
+        task = tasks[integration_id]
+        if integration_id not in enabled_plex_ids:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            tasks.pop(integration_id, None)
+            cancelled += 1
+            continue
+        if task.done():
+            # Supervisor exited (clean integration_disabled return,
+            # or a _PermanentListenerError that broke the respawn
+            # loop). Forget about it; the spawn loop below will
+            # respawn if the integration is still enabled.
+            tasks.pop(integration_id, None)
+            cleaned += 1
+
+    # Spawn listeners for any enabled Plex integration that
+    # doesn't currently have one.
+    for integration_id in enabled_plex_ids:
+        if integration_id in tasks:
+            continue
+        tasks[integration_id] = asyncio.create_task(
+            _supervise_listener(
+                integration_id=integration_id,
+                integration_name=names_by_id.get(integration_id, "plex"),
+                db=db,
+                registry=registry,
+            ),
+            name=f"plex-sse-{integration_id}",
+        )
+        spawned += 1
+
+    if spawned or cancelled or cleaned:
+        log.info(
+            "worker.sse.reconciled",
+            spawned=spawned,
+            cancelled=cancelled,
+            cleaned=cleaned,
+            active=len(tasks),
+        )
+    return {
+        "spawned": spawned,
+        "cancelled": cancelled,
+        "cleaned": cleaned,
+        "active": len(tasks),
+    }
 
 
 async def _supervise_listener(
@@ -124,6 +221,28 @@ async def _supervise_listener(
                 integration_name=integration_name,
                 detail=str(exc),
             )
+            # v1.9.x — surface to the integration row so the
+            # operator sees a red dot on the dashboard. Pre-fix
+            # the supervisor exited silently (only into the log
+            # buffer, which is per-process and invisible to the
+            # API); rotated tokens looked like "the app just
+            # stopped seeing playback." Writing to health_status
+            # makes the failure mode operator-actionable.
+            try:
+                await _mark_integration_unhealthy(
+                    db=db,
+                    integration_id=integration_id,
+                    detail=(
+                        f"SSE listener stopped: {exc}. "
+                        "Re-save the integration to retry."
+                    ),
+                )
+            except Exception as mark_exc:  # noqa: BLE001
+                log.warning(
+                    "worker.sse.health_mark_failed",
+                    integration_id=integration_id,
+                    error=str(mark_exc),
+                )
             return
         except Exception as exc:  # noqa: BLE001
             # Unexpected. Backoff + respawn.
@@ -156,6 +275,29 @@ class _PermanentListenerError(Exception):
     permanently misconfigured (4xx auth, missing endpoint,
     etc.). The supervisor catches this and stops respawning.
     """
+
+
+async def _mark_integration_unhealthy(
+    *,
+    db: Any,
+    integration_id: str,
+    detail: str,
+) -> None:
+    """v1.9.x — flip the integration's ``health_status`` to
+    ``"error"`` with an operator-readable detail. Best-effort:
+    a DB failure inside this helper does not propagate (the
+    caller wraps in try/except).
+    """
+    from app.utils.datetime import utcnow
+
+    async with db.session() as session:
+        integration = await IntegrationRepository(session).get(integration_id)
+        if integration is None:
+            return
+        integration.health_status = "error"
+        integration.health_detail = detail
+        integration.health_checked_at = utcnow()
+        await session.commit()
 
 
 async def _run_plex_listener(

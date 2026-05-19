@@ -173,12 +173,43 @@ async def poll_integrations(ctx: dict[str, Any]) -> dict[str, Any]:
             )
             enqueued.append(integration.id)
 
+    # v1.9.x — keep the Plex SSE listener set in sync with the
+    # current set of enabled Plex integrations. Pre-fix, listeners
+    # were spawned only at worker startup; an operator who added
+    # a Plex integration / re-saved a token had to restart the
+    # worker before live playback resumed. The reconciler is
+    # cheap (one IntegrationRepository.list_all + set diff) and
+    # piggybacks on the existing every-minute cadence.
+    sse_reconciler_outcome: dict[str, int] | None = None
+    listener_tasks = ctx.get("plex_listener_tasks")
+    if isinstance(listener_tasks, dict):
+        from app.worker_sse import reconcile_plex_listeners
+
+        try:
+            sse_reconciler_outcome = await reconcile_plex_listeners(
+                listener_tasks, db=db, registry=ctx["registry"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "worker.sse.reconcile_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+
     log.info(
         "worker.poll_integrations",
         enqueued=len(enqueued),
         skipped=skipped,
+        sse=sse_reconciler_outcome,
     )
-    return {"enqueued": enqueued, "skipped": skipped}
+    # v1.9.x — Compact return so arq's truncated tick log shows
+    # the key counters first (sse + counts). Full enqueue id list
+    # was rarely useful in the truncated form anyway.
+    return {
+        "sse": sse_reconciler_outcome,
+        "enqueued": len(enqueued),
+        "skipped": skipped,
+    }
 
 
 # ── Stage 16: playback telemetry tick ────────────────────────
@@ -238,12 +269,64 @@ async def poll_playback(ctx: dict[str, Any]) -> dict[str, Any]:
                     {"integration_id": integration.id, "error": str(exc)}
                 )
 
+    # v1.9.x — Tracearr reconciler. Tracearr emits pseudo-paths
+    # (``tracearr://...``) that never join media_files.path, so
+    # every Tracearr PlaybackEvent lands with media_file_id=NULL.
+    # The analyzer filters NOT NULL, silently excluding 100% of
+    # Tracearr playback from rule suggestions. The reconciler
+    # parses the pseudo-path back into media identity and matches
+    # MediaFile.filename via cross-source pairing + title
+    # heuristics. Runs in-line here (not as its own cron tick)
+    # because it should always run after a Tracearr poll; doing
+    # it on a separate cadence buys nothing and means freshly-
+    # imported Tracearr events sit unreconciled for up to 15
+    # minutes.
+    reconciler_outcome: dict[str, int] | None = None
+    if any(r.get("integration_id") for r in results):
+        async with db.session() as session:
+            from app.services.playback.tracearr_reconciler import (
+                reconcile_tracearr_playback,
+            )
+
+            try:
+                outcome = await reconcile_tracearr_playback(session)
+                reconciler_outcome = {
+                    "examined": outcome.examined,
+                    "matched_cross_source": outcome.matched_cross_source,
+                    "matched_title_heuristic": outcome.matched_title_heuristic,
+                    "unmatched": outcome.unmatched,
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "worker.tracearr_reconciler.failed",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+
     log.info(
         "worker.poll_playback",
         integrations=len(results),
         total_inserted=sum(int(r.get("inserted") or 0) for r in results),
+        reconciler=reconciler_outcome,
     )
-    return {"results": results}
+    # v1.9.x — Put the reconciler stats FIRST in the return dict
+    # and slim per-integration results to just the integration_id
+    # so arq's job-completion log line (truncated at ~100 chars)
+    # surfaces the values an operator cares about. ARQ logs the
+    # return value via stdlib's logger which propagates to root —
+    # this is the most reliable path to the shared log file.
+    compact_results = [
+        {
+            "id": r.get("integration_id", "?")[:8],
+            "fetched": r.get("fetched"),
+            "inserted": r.get("inserted"),
+        }
+        for r in results
+    ]
+    return {
+        "reconciler": reconciler_outcome,
+        "results": compact_results,
+    }
 
 
 # ── Stage 16 Turn 2: daily analyzer tick ────────────────────
@@ -343,6 +426,10 @@ async def startup(ctx: dict[str, Any]) -> None:
     # since integration churn is rare in practice.
     from app.worker_sse import spawn_plex_listeners
 
+    # v1.9.x — ``spawn_plex_listeners`` now returns
+    # ``dict[integration_id, Task]`` so the per-minute reconciler
+    # in ``poll_integrations`` can spawn / cancel per integration
+    # without walking a list.
     ctx["plex_listener_tasks"] = await spawn_plex_listeners(db, ctx["registry"])
     log.info(
         "worker.plex_listeners_spawned",
@@ -357,10 +444,19 @@ async def shutdown(ctx: dict[str, Any]) -> None:
     # Cancel the SSE listeners first — they're the longest-running
     # tasks and their reconnect loop will keep the connection alive
     # until we cancel.
-    plex_tasks = ctx.get("plex_listener_tasks") or []
-    for task in plex_tasks:
+    plex_tasks_obj = ctx.get("plex_listener_tasks") or {}
+    # v1.9.x — accept both the legacy list shape (in case an
+    # older startup hook is still in flight during a rolling
+    # upgrade) and the new dict shape.
+    plex_tasks_iter = (
+        plex_tasks_obj.values()
+        if isinstance(plex_tasks_obj, dict)
+        else plex_tasks_obj
+    )
+    plex_tasks_list = list(plex_tasks_iter)
+    for task in plex_tasks_list:
         task.cancel()
-    for task in plex_tasks:
+    for task in plex_tasks_list:
         try:
             await task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001

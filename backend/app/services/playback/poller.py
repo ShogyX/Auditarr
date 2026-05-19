@@ -244,7 +244,23 @@ class PlaybackPoller:
         # SQLAlchemy "MissingGreenlet" diagnostic.
         inserted = 0
         latest_started_at: _dt.datetime | None = None
+        # v1.9.x — Track the latest started_at across ALL fetched
+        # dtos (not just newly-inserted ones). When every event in
+        # a batch is a duplicate (a healthy steady-state poll
+        # against a server with no fresh activity since last
+        # cursor advance is exactly this), the previous "only
+        # advance on insert" rule kept replaying the same window
+        # forever — wasted bandwidth on the next poll. Advancing
+        # on any seen event with the 60-second safety skew is
+        # still safe because dedup is enforced by the unique
+        # constraint above.
+        latest_seen_started_at: _dt.datetime | None = None
         for dto in dtos:
+            if dto.started_at is not None and (
+                latest_seen_started_at is None
+                or dto.started_at > latest_seen_started_at
+            ):
+                latest_seen_started_at = dto.started_at
             # v1.9 OP-10 — find a matching SSE-tracked session.
             # When found, we still insert the event (caveat 4 —
             # preserve diagnosability) but tag it with the
@@ -325,17 +341,24 @@ class PlaybackPoller:
         # CURSOR_SAFETY_SKEW`` so slightly-out-of-order events
         # arriving on the next poll aren't dropped. Dedup is
         # handled by the unique constraint above; replays are
-        # harmless. We only advance when something was inserted
-        # (preserves the previous "no progress → no advance"
-        # contract that protects against a transient empty
-        # provider response stomping a known-good cursor).
+        # harmless.
         #
         # v1.9 Stage 6.2 — zero-event polls take the early
         # return above (which now also touches the cursor's
         # ``updated_at``); by the time we reach here, dtos was
-        # non-empty and ``latest_started_at`` is set.
-        if latest_started_at is not None:
-            cursor_value = latest_started_at - CURSOR_SAFETY_SKEW
+        # non-empty.
+        #
+        # v1.9.x — Prefer ``latest_seen_started_at`` (set on every
+        # fetched dto) over ``latest_started_at`` (set only on
+        # successful insert). When every event in the batch is a
+        # duplicate, the previous "only advance on insert" rule
+        # left the cursor stuck and every subsequent poll re-fetched
+        # the same window. Replays are still harmless via the
+        # unique constraint, but the cursor now keeps pace with
+        # the most-recent observed event.
+        advance_to = latest_started_at or latest_seen_started_at
+        if advance_to is not None:
+            cursor_value = advance_to - CURSOR_SAFETY_SKEW
             await self._upsert_cursor(integration.id, cursor_value)
 
         # v1.9 Stage 6.3 — Live + history merge. The history
