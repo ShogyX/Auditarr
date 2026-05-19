@@ -23,16 +23,27 @@ import {
   type LogRecord,
 } from "@/hooks/useLogs";
 
+// Kept in sync with backend/app/core/logging.py LOG_CATEGORIES + the
+// categories the backend actually emits via get_logger(category=...).
+// "worker" was previously listed but the backend never emits that
+// label — its worker-process logs land under "queue" / "automation" /
+// "playback" / "integrations" depending on what the worker is doing.
 const SERVICE_OPTIONS = [
   { value: "all", label: "All" },
   { value: "api", label: "API" },
-  { value: "worker", label: "Worker" },
-  { value: "scheduler", label: "Scheduler" },
   { value: "playback", label: "Playback" },
   { value: "integrations", label: "Integrations" },
   { value: "rules", label: "Rules" },
+  { value: "automation", label: "Automation" },
+  { value: "queue", label: "Queue" },
+  { value: "scanner", label: "Scanner" },
   { value: "database", label: "Database" },
   { value: "events", label: "Events" },
+  { value: "notifications", label: "Notifications" },
+  { value: "updater", label: "Updater" },
+  { value: "security", label: "Security" },
+  { value: "plugin", label: "Plugin" },
+  { value: "system", label: "System" },
 ];
 
 const LEVEL_OPTIONS = [

@@ -484,8 +484,15 @@ async def list_logs(
     from app.core.log_buffer import get_log_buffer
 
     buffer = get_log_buffer()
+    # v1.9.x — prefer the shared log file when it exists. Each
+    # process maintains its own LogRingBuffer in RAM; only the
+    # gunicorn worker handling THIS request has its own buffer.
+    # Worker-process logs (Plex SSE, playback poller, analyzer)
+    # are otherwise invisible. The shared file is appended to by
+    # every process so the operator sees a unified view.
+    records = _load_records_preferring_shared_file(buffer)
     records = _apply_log_filters(
-        buffer.snapshot(),
+        records,
         service=service,
         since=since,
         level=level,
@@ -545,8 +552,9 @@ async def export_logs(
     from app.core.log_buffer import get_log_buffer
 
     buffer = get_log_buffer()
+    records = _load_records_preferring_shared_file(buffer)
     records = _apply_log_filters(
-        buffer.snapshot(),
+        records,
         service=service,
         since=since,
         level=level,
@@ -566,6 +574,63 @@ async def export_logs(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+def _load_records_preferring_shared_file(buffer) -> list:
+    """v1.9.x — return the union of the shared log file's tail
+    and this process's in-memory ring buffer, deduplicated by
+    ``(timestamp, logger, event)``.
+
+    The file is the source of truth across processes; the buffer
+    holds anything emitted between the last file flush and now.
+    We prefer the file when present and fall back to the buffer
+    on installs where the file isn't writable (Docker, custom
+    paths).
+
+    Records are returned in ascending-time order (oldest first)
+    so the caller's existing ``newest_first`` pagination
+    inversion keeps working unchanged.
+    """
+    import os as _os
+    from app.core.log_buffer import tail_log_file
+
+    raw_path = _os.environ.get("AUDITARR_LOG_FILE") or "/var/log/auditarr/auditarr.log"
+    file_records: list = []
+    try:
+        # Tail up to the buffer's capacity to keep memory pressure
+        # bounded and the response size predictable. 5000 matches
+        # the default ring buffer.
+        file_records = list(tail_log_file(raw_path, max_records=buffer.capacity))
+    except Exception:  # noqa: BLE001
+        file_records = []
+
+    if not file_records:
+        # File missing / unreadable / empty — fall back to the
+        # legacy per-process buffer.
+        return buffer.snapshot()
+
+    # Merge: shared file rows + this-process buffer rows. Dedup
+    # against (timestamp, logger, event) so a record that has
+    # been flushed to the file AND is still in this process's
+    # buffer doesn't appear twice.
+    seen: set[tuple[str, str, str]] = set()
+    merged: list = []
+    for r in file_records:
+        key = (r.timestamp, r.logger, r.event)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(r)
+    for r in buffer.snapshot():
+        key = (r.timestamp, r.logger, r.event)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(r)
+    # Sort ascending by timestamp so the existing newest-first
+    # reverse() at the call site stays correct.
+    merged.sort(key=lambda r: r.timestamp)
+    return merged
 
 
 def _parse_record_ts(ts: str) -> _dt.datetime:
