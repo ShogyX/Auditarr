@@ -214,6 +214,58 @@ async def test_scan_progress_payload_shape(
         }
 
 
+@pytest.mark.asyncio
+async def test_scanner_reuses_pre_existing_run_row(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """When the API enqueues a scan it pre-creates a ``queued`` ScanRun
+    and passes the row to the worker. Scanner.scan() must mutate that
+    row instead of creating a second one, otherwise the pre-created
+    queued row stays at ``queued`` forever and the single-flight
+    check 409s subsequent triggers.
+    """
+    from sqlalchemy import select
+
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    _seed_files(library_root, count=3)
+    library = Library(
+        name="movies", root_path=str(library_root / "lib"), kind="movies"
+    )
+    await LibraryRepository(session).add(library)
+    await session.commit()
+
+    pre = ScanRun(
+        library_id=library.id,
+        mode="full",
+        status="queued",
+        options={"follow_symlinks": False},
+    )
+    session.add(pre)
+    await session.commit()
+    pre_id = pre.id
+
+    scanner = Scanner(
+        session=session,
+        event_bus=EventBus(),
+        ffprobe=StubFfprobe(),  # type: ignore[arg-type]
+    )
+    report = await scanner.scan(
+        library, options=ScanOptions(mode="full"), run=pre
+    )
+
+    rows = (
+        await session.execute(
+            select(ScanRun).where(ScanRun.library_id == library.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1, "scanner should reuse the pre-existing run row"
+    assert rows[0].id == pre_id
+    assert rows[0].status in {"completed", "failed"}
+    assert rows[0].started_at is not None
+    assert report.run_id == pre_id
+
+
 # ── /scans/all + async default — live API tests ─────────────────
 @pytest_asyncio.fixture
 async def client(
