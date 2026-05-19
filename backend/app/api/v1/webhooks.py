@@ -266,7 +266,7 @@ def _matches_source_whitelist(
                 return True
             continue
         except ValueError:
-            pass
+            pass  # entry isn't a literal IP; fall through to hostname resolution
 
         # Hostname — resolve to IP and compare. We use
         # ``getaddrinfo`` rather than ``gethostbyname`` so

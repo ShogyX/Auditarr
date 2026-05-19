@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
 
 from app.models.playback import PlaybackEvent
 from app.models.playback_device import PlaybackDevice
@@ -195,7 +194,6 @@ async def test_overzealous_flagged_when_direct_play_dominates(
     samples → flagged."""
     from app.models.integration import Integration
     from app.models.library import Library
-    from app.models.media import MediaFile
 
     async with db_session.session() as sess:
         # Library + integration so PlaybackEvent FKs validate

@@ -59,4 +59,4 @@ class NotificationProvider(Protocol):
     async def send(
         self, config: ChannelConfig, message: NotificationMessage
     ) -> DeliveryReport:
-        ...
+        pass

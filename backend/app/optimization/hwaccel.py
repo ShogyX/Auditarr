@@ -151,7 +151,7 @@ async def probe_hwaccels(
         try:
             proc.kill()
         except ProcessLookupError:
-            pass
+            pass  # probe call timed out or returned non-zero; treat as no-hwaccel
         return HwaccelProbeResult(
             available=False,
             timed_out=True,

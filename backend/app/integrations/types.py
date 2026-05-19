@@ -376,7 +376,8 @@ class IntegrationProvider(Protocol):
     #: manager encrypts them at rest.
     secret_fields: tuple[str, ...]
 
-    async def healthcheck(self, config: IntegrationConfig) -> HealthReport: ...
+    async def healthcheck(self, config: IntegrationConfig) -> HealthReport:
+        pass
 
     async def discover_libraries(
         self, config: IntegrationConfig
@@ -385,11 +386,11 @@ class IntegrationProvider(Protocol):
 
         Optional — providers that don't expose libraries can return ``[]``.
         """
-        ...
+        pass
 
     async def sync_tags(self, config: IntegrationConfig) -> list[TagSync]:
         """Return tag mirrors. Optional — return ``[]`` if not supported."""
-        ...
+        pass
 
     async def fetch_playback_events(
         self, config: IntegrationConfig, since: _dt.datetime | None
@@ -450,7 +451,7 @@ class IntegrationProvider(Protocol):
         ``optimization.routed_completed`` / ``routed_failed``
         events (Stage 08) flip the item to ``completed`` / ``failed``.
         """
-        ...
+        pass
 
     # ── Stage 08 (v1.7): list pre-existing transcode profiles ────
     # Optional, per plan §438-441. Lets the operator pick a
@@ -486,7 +487,7 @@ class IntegrationProvider(Protocol):
         execution must implement this; otherwise the worker
         treats routed items as terminal and never polls them.
         """
-        ...
+        pass
 
     # ── v1.9 Stage 5.1: cross-integration search trigger ─────────
     # Optional, per plan §301-308. Sonarr/Radarr/Bazarr implement
@@ -518,4 +519,4 @@ class IntegrationProvider(Protocol):
         ``status="error"`` so the audit log records the failure
         rather than the worker job retrying indefinitely.
         """
-        ...
+        pass

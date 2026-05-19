@@ -157,9 +157,7 @@ class Settings(BaseSettings):
     # Operators can still override via AUDITARR_APP_VERSION if their
     # deployment tooling needs a different value (e.g. ``rc-<git-sha>``
     # for staging environments).
-    app_version: str = Field(
-        default_factory=lambda: _default_app_version()
-    )
+    app_version: str = Field(default_factory=_default_app_version)
     # v1.9.x — the updater now tracks the latest commit on the
     # configured branch instead of the latest release tag, so
     # contributors and self-hosters notice fixes the moment they land
@@ -168,12 +166,8 @@ class Settings(BaseSettings):
     # *upstream* commit. They default to whatever
     # :mod:`app` resolved at import time (env vars first, then
     # ``git rev-parse HEAD``, then ``"unknown"``).
-    app_commit_sha: str = Field(
-        default_factory=lambda: _default_app_commit_sha()
-    )
-    app_commit_date: str = Field(
-        default_factory=lambda: _default_app_commit_date()
-    )
+    app_commit_sha: str = Field(default_factory=_default_app_commit_sha)
+    app_commit_date: str = Field(default_factory=_default_app_commit_date)
     # Where the updater pulls upstream metadata from. v1.9.x default
     # points at the GitHub *commits* API for the ``main`` branch (any
     # newer commit triggers "update available"). Operators who prefer

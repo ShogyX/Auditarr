@@ -38,7 +38,16 @@ class ApiClient {
   private refreshPromise: Promise<AuthTokens | null> | null = null;
 
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
-    const url = path.startsWith("http") ? path : `${API_ROOT}${path}`;
+    // Reject absolute URLs at the boundary so this client can't
+    // be turned into an SSRF gadget — every request must land
+    // under ``API_ROOT``.
+    if (path.startsWith("http")) {
+      throw new ApiError(0, {
+        code: "client_invalid_path",
+        message: "apiClient only accepts relative paths under /api/v1",
+      });
+    }
+    const url = `${API_ROOT}${path}`;
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     // Stage 32: only default to JSON content-type for non-FormData

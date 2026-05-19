@@ -16,7 +16,11 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.automation.catalogue import JobCatalogue, JobSpec
+# ``JobSpec`` + ``JobCatalogue`` live in ``app.automation.types``
+# rather than ``app.automation.catalogue`` so this module has no
+# import edge back into ``catalogue`` (which would itself reach
+# ``jobs`` to populate the singleton).
+from app.automation.types import JobCatalogue, JobSpec
 from app.core.exceptions import NotFoundError
 from app.integrations.manager import IntegrationManager
 from app.integrations.tag_sync import IntegrationTagSync

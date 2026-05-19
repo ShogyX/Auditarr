@@ -27,6 +27,8 @@ class EmailProvider(Protocol):
 
     name: str
 
-    async def send(self, message: EmailMessage) -> None: ...
+    async def send(self, message: EmailMessage) -> None:
+        pass
 
-    async def healthcheck(self) -> bool: ...
+    async def healthcheck(self) -> bool:
+        pass

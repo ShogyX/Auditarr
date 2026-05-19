@@ -25,7 +25,6 @@ import datetime as _dt
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -37,7 +36,6 @@ from app.main import create_app
 from app.models.audit_log import AuditLogEntry
 from app.models.integration import Integration
 from app.models.library import Library
-from app.models.media import MediaFile
 from app.models.playback import PlaybackEvent
 from app.models.rule import Rule
 from app.models.rule_suggestion import RuleSuggestion
@@ -419,7 +417,7 @@ async def test_send_paths_external_false_redacts_top_files(env) -> None:
     client = env["client"]
     db = env["db"]
     stub = env["stub"]
-    integ_id = await _seed_ai_integration(db, send_paths_external=False)
+    await _seed_ai_integration(db, send_paths_external=False)
     # Seed a playback event so top_files has something to show.
     async with db.session() as sess:
         lib = Library(name="L", root_path="/m", kind="movies")

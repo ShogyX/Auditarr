@@ -253,5 +253,6 @@ async def test_stream_events_cancellation_cleanly_propagates(
     task = asyncio.create_task(run())
     await asyncio.sleep(0.01)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as excinfo:
         await task
+    assert excinfo.type is asyncio.CancelledError

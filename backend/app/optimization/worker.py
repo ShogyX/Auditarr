@@ -351,7 +351,7 @@ class OptimizationWorker:
             try:
                 tmp_output.unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # tmp output may not exist if rename already happened
             return await self._fail(
                 item,
                 f"ffmpeg failed (rc={result.return_code}): "
@@ -367,7 +367,7 @@ class OptimizationWorker:
             try:
                 tmp_output.unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # tmp output may not exist if rename already happened
             return await self._fail(
                 item, f"output validation failed: {reason}"
             )
@@ -388,7 +388,7 @@ class OptimizationWorker:
             try:
                 tmp_output.unlink(missing_ok=True)
             except OSError:
-                pass
+                pass  # tmp output may not exist if rename already happened
             return await self._fail(item, f"swap failed: {exc!s}")
 
         return await self._complete(

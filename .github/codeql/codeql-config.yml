@@ -1,0 +1,22 @@
+name: "Auditarr CodeQL config"
+
+# Run the same suite the workflow asks for (security-and-quality).
+# Override here only when we want to scope which files get analysed.
+queries:
+  - uses: security-and-quality
+
+paths-ignore:
+  # Alembic migration files declare ``revision``, ``down_revision``,
+  # ``branch_labels``, and ``depends_on`` as module-level constants.
+  # Alembic reads them via introspection; CodeQL's
+  # ``py/unused-global-variable`` rule flags every one of them
+  # (~100 alerts across 25 migration files). Pure noise — exclude
+  # the directory.
+  - backend/migrations/**
+
+  # vite build output and the frontend's tsbuild cache.
+  - frontend/dist/**
+  - frontend/tsconfig.tsbuildinfo
+
+  # The pinned package-lock isn't source.
+  - frontend/package-lock.json

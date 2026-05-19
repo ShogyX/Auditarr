@@ -1148,7 +1148,7 @@ class PlexProvider(IntegrationProvider):
                                 if src:
                                     rating_keys_in_queue.add(src)
                     except ET.ParseError:
-                        pass
+                        pass  # best-effort fetch; missing field is acceptable
         except httpx.HTTPError as exc:
             return TranscodeJobStatus(
                 status="unknown",

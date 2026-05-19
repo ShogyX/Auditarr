@@ -62,7 +62,7 @@ def fresh_db():
         try:
             db_path.unlink()
         except FileNotFoundError:
-            pass
+            pass  # best-effort schema introspection in setup helper
 
 
 def test_full_chain_reaches_head_without_errors(fresh_db: Path) -> None:

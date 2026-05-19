@@ -31,7 +31,6 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -400,7 +399,7 @@ class UpdaterService:
             try:
                 status_path.unlink()
             except OSError:
-                pass
+                pass  # best-effort cleanup of consumed status file
             return None
 
         row.status = new_status
@@ -437,7 +436,7 @@ class UpdaterService:
         try:
             status_path.unlink()
         except OSError:
-            pass
+            pass  # best-effort cleanup of consumed status file
         return row
 
     # ── Force-clear (v1.9 Stage 1.2) ────────────────────────────
