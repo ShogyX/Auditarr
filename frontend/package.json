@@ -37,23 +37,23 @@
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
-    "@types/node": "^22.7.0",
+    "@types/node": "^25.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@eslint/js": "^9.13.0",
     "@typescript-eslint/eslint-plugin": "^8.13.0",
     "@typescript-eslint/parser": "^8.13.0",
-    "@vitejs/plugin-react": "^4.3.3",
+    "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.4.20",
-    "eslint": "^9.13.0",
+    "eslint": "^10.4.0",
     "eslint-plugin-react": "^7.37.0",
-    "eslint-plugin-react-hooks": "^5.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "jsdom": "^25.0.0",
     "postcss": "^8.4.47",
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10",
-    "vitest": "^2.1.4"
+    "vite": "^8.0.13",
+    "vitest": "^4.1.6"
   }
 }
