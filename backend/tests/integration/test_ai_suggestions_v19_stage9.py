@@ -220,17 +220,21 @@ async def test_ai_generate_unauthenticated_returns_401(env) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_generate_no_provider_returns_error_string(env) -> None:
+async def test_ai_generate_no_provider_returns_422_with_actionable_message(
+    env,
+) -> None:
+    """When no AI provider integration is configured, the endpoint
+    must 422 instead of 200ing with empty counts — operators were
+    misreading the 200 as "the call ran and produced nothing."
+    """
     client = env["client"]
     headers = await _admin_headers(client)
     r = await client.post(
         "/api/v1/rules/suggestions/ai-generate", headers=headers
     )
-    assert r.status_code == 200, r.text
+    assert r.status_code == 422, r.text
     body = r.json()
-    assert body["suggestions_created"] == 0
-    assert body["error"] is not None
-    assert "no enabled" in body["error"].lower()
+    assert "no enabled" in body["message"].lower()
 
 
 # ── Happy path ─────────────────────────────────────────────────
@@ -553,9 +557,9 @@ async def test_missing_provider_kind_fails_fast(env) -> None:
     r = await client.post(
         "/api/v1/rules/suggestions/ai-generate", headers=headers
     )
+    assert r.status_code == 422, r.text
     body = r.json()
-    assert body["error"] is not None
-    assert "provider_kind" in body["error"]
+    assert "provider_kind" in body["message"]
 
 
 @pytest.mark.asyncio

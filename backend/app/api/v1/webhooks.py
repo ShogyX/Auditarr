@@ -44,7 +44,13 @@ log = get_logger("auditarr.webhooks.api", category="webhooks")
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
-_SUPPORTED_KINDS = {"sonarr", "radarr", "plex", "jellyfin"}
+# Integration kinds the receiver knows how to dispatch. The
+# ``/integrations/{id}/webhook-secret`` rotate endpoint imports this
+# set so it can refuse to mint a URL the receiver would just 404 on.
+WEBHOOK_RECEIVER_KINDS: frozenset[str] = frozenset(
+    {"sonarr", "radarr", "plex", "jellyfin"}
+)
+_SUPPORTED_KINDS = WEBHOOK_RECEIVER_KINDS
 
 
 @router.post(

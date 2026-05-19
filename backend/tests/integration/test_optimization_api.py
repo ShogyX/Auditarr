@@ -156,6 +156,57 @@ async def test_profile_crud(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_profile_delete_blocked_while_active_items_reference_it(
+    client: AsyncClient,
+) -> None:
+    """Deleting a profile that still has active (queued/running/routed)
+    items would orphan those items: the worker keeps failing them with
+    "profile X not found" forever. 409 instead, with a hint about
+    ?force=true for operators who accept the orphans."""
+    headers = await _admin_headers(client)
+
+    create = await client.post(
+        "/api/v1/optimization/profiles",
+        headers=headers,
+        json={
+            "name": "Shrink HEVC",
+            "description": "",
+            "settings": {
+                "video": {"codec": "libx265", "crf": 22, "preset": "medium"},
+                "audio": {"codec": "copy"},
+                "output": {"container": "mkv"},
+            },
+        },
+    )
+    assert create.status_code == 201
+    profile_id = create.json()["id"]
+    media_file_id = await _seed_media()
+
+    enqueue = await client.post(
+        "/api/v1/optimization/enqueue",
+        headers=headers,
+        json={"media_file_id": media_file_id, "profile": "Shrink HEVC"},
+    )
+    assert enqueue.status_code == 201
+
+    blocked = await client.delete(
+        f"/api/v1/optimization/profiles/{profile_id}", headers=headers
+    )
+    assert blocked.status_code == 409, blocked.text
+    body = blocked.json()
+    assert "active" in body["message"].lower()
+    assert body["details"]["active_item_count"] == 1
+
+    # ?force=true overrides — operator confirmed they'll deal with
+    # the orphans manually.
+    forced = await client.delete(
+        f"/api/v1/optimization/profiles/{profile_id}?force=true",
+        headers=headers,
+    )
+    assert forced.status_code == 204
+
+
+@pytest.mark.asyncio
 async def test_profile_rejects_unsupported_codec(client: AsyncClient) -> None:
     headers = await _admin_headers(client)
     response = await client.post(

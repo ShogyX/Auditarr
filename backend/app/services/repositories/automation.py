@@ -158,6 +158,24 @@ class OptimizationRepository:
         result = await self._session.execute(stmt)
         return result.scalars().all()
 
+    async def count_active_for_profile(self, profile_name: str) -> int:
+        """Number of non-terminal items referencing ``profile_name``.
+
+        Active = ``queued``, ``running``, or ``routed``. Deleting a
+        profile that still has active items leaves them looping with
+        the worker raising "profile X not found" forever, so the
+        delete endpoint uses this to 409 instead.
+        """
+        from sqlalchemy import func
+
+        result = await self._session.execute(
+            select(func.count(OptimizationItem.id)).where(
+                OptimizationItem.profile == profile_name,
+                OptimizationItem.status.in_(("queued", "running", "routed")),
+            )
+        )
+        return int(result.scalar_one() or 0)
+
 
 class OptimizationProfileRepository:
     """Profile CRUD; new in Stage 10."""

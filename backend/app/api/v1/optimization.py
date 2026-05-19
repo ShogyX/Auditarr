@@ -158,15 +158,45 @@ async def update_profile(
 @router.delete(
     "/profiles/{profile_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a profile (existing queue items keep their profile name)",
+    summary="Delete a profile (refuses if active queue items reference it)",
 )
 async def delete_profile(
-    profile_id: str, _admin: AdminUser, session: SessionDep
+    profile_id: str,
+    _admin: AdminUser,
+    session: SessionDep,
+    force: bool = Query(
+        default=False,
+        description=(
+            "Delete the profile even when active queue items still "
+            "reference it. The items will keep failing with "
+            "\"profile X not found\" until they're cancelled or "
+            "re-queued against a surviving profile. Use only when "
+            "the operator has confirmed they'll deal with the "
+            "orphans."
+        ),
+    ),
 ) -> None:
     repo = OptimizationProfileRepository(session)
     profile = await repo.get(profile_id)
     if profile is None:
         raise NotFoundError("Profile not found")
+    if not force:
+        active = await OptimizationRepository(session).count_active_for_profile(
+            profile.name
+        )
+        if active > 0:
+            raise ConflictError(
+                f"Cannot delete profile {profile.name!r}: "
+                f"{active} active queue item(s) still reference it. "
+                "Cancel or finish those items first, or pass "
+                "?force=true to delete anyway (orphaned items will "
+                "fail forever).",
+                details={
+                    "profile_id": profile.id,
+                    "profile_name": profile.name,
+                    "active_item_count": active,
+                },
+            )
     await repo.delete(profile)
 
 
