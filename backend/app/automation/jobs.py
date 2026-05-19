@@ -216,10 +216,11 @@ async def _run_drain_vt_queue(
 
 # ── Registration ─────────────────────────────────────────────
 def register_builtin_jobs(catalogue: JobCatalogue) -> None:
+    """Populate the catalogue with the jobs that ship in-box."""
     # ``JobSpec`` is imported here (not at module scope) to keep the
     # import graph acyclic — see the header import block.
     from app.automation.catalogue import JobSpec
-    """Populate the catalogue with the jobs that ship in-box."""
+
     catalogue.register(
         JobSpec(
             key="scan_library",

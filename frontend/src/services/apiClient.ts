@@ -38,14 +38,8 @@ class ApiClient {
   private refreshPromise: Promise<AuthTokens | null> | null = null;
 
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
-    // CodeQL alert #1 (js/client-side-request-forgery): the
-    // pre-fix branch ``path.startsWith("http") ? path : …``
-    // let any caller-controlled value reach ``fetch`` as a full
-    // URL. No real caller used the absolute-URL form (every
-    // hook in the app prepends a relative ``/...`` path), so
-    // the escape hatch was dead code AND an SSRF surface for
-    // any future call site that accidentally forwarded a
-    // user-controlled string. Drop it: every request now lands
+    // Reject absolute URLs at the boundary so this client can't
+    // be turned into an SSRF gadget — every request must land
     // under ``API_ROOT``.
     if (path.startsWith("http")) {
       throw new ApiError(0, {
