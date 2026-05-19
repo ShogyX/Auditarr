@@ -1,0 +1,86 @@
+version: 2
+
+updates:
+  # ── Backend (Python) ─────────────────────────────────────────
+  - package-ecosystem: pip
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - backend
+    # Group dev tools together so we get one PR per week for
+    # them rather than one per package.
+    groups:
+      backend-dev-tools:
+        patterns:
+          - "ruff"
+          - "mypy"
+          - "pytest*"
+          - "types-*"
+      backend-runtime:
+        patterns:
+          - "fastapi"
+          - "uvicorn*"
+          - "gunicorn"
+          - "pydantic*"
+          - "sqlalchemy*"
+          - "alembic"
+          - "httpx"
+          - "redis"
+          - "arq"
+          - "structlog"
+          - "typer"
+          - "jinja2"
+
+  # ── Frontend (npm) ───────────────────────────────────────────
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    groups:
+      frontend-types-and-tools:
+        patterns:
+          - "@types/*"
+          - "eslint*"
+          - "prettier"
+          - "vite*"
+          - "vitest*"
+          - "@vitejs/*"
+          - "@playwright/*"
+      frontend-runtime:
+        patterns:
+          - "react*"
+          - "react-dom"
+          - "@tanstack/*"
+          - "zustand"
+          - "react-router*"
+          - "axios"
+          - "tailwindcss"
+
+  # ── GitHub Actions ───────────────────────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - ci
+
+  # ── Docker base image ────────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+      - docker

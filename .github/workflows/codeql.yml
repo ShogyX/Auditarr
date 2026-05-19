@@ -1,0 +1,56 @@
+name: codeql
+
+# Security analysis for Python (backend) and JavaScript / TypeScript
+# (frontend). Runs on every PR, every push to main, and a weekly
+# cron so new advisories surface even without code activity.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 7 * * 1" # Monday 07:23 UTC — off-peak.
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # ``javascript-typescript`` covers both .js and .ts/.tsx.
+        # ``python`` covers backend/. Each runs as a separate job
+        # so the matrix can re-run one language without redoing
+        # the other.
+        language: [python, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # The ``security-and-quality`` suite is the broader one —
+          # security findings plus maintainability rules. Operators
+          # who want signal-only can drop to ``security-extended``
+          # later.
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

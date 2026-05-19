@@ -72,10 +72,16 @@ def test_update_feed_url_default_points_at_shogyx_auditarr() -> None:
     """v1.8.2: the default feed URL points at the real upstream
     repo (ShogyX/Auditarr). Pre-1.8.2 it pointed at a non-existent
     ``auditarr/auditarr`` so any fresh install hit a 404 on
-    check-for-updates until the operator overrode it via the UI."""
+    check-for-updates until the operator overrode it via the UI.
+
+    v1.9 Stage 1 swapped the path from ``releases/latest`` to
+    ``commits/main`` — the updater tracks the branch tip now, not
+    release tags. The repo + scheme assertion stays; only the
+    endpoint changed.
+    """
     s = Settings()
     assert s.update_feed_url == (
-        "https://api.github.com/repos/ShogyX/Auditarr/releases/latest"
+        "https://api.github.com/repos/ShogyX/Auditarr/commits/main"
     )
 
 

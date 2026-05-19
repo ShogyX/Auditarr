@@ -1,0 +1,87 @@
+name: claude-code-review
+
+# Automated PR review by Anthropic's Claude. Opt-in so the job
+# doesn't show red on every PR while the secret isn't wired up.
+#
+# To enable on this repo:
+#   1. Settings → Secrets and variables → Actions
+#        - add secret  ANTHROPIC_API_KEY     with your API key.
+#        - add variable CLAUDE_REVIEW_ENABLED set to ``true``.
+#   2. (Optional) flip the value to ``false`` to pause reviews
+#      without removing the secret.
+#
+# When the variable isn't set or is anything other than ``true``,
+# the job's ``if`` clause causes it to skip — skipped jobs show
+# gray in the PR status panel, not red.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  # claude-code-action authenticates against GitHub via an OIDC
+  # token — without ``id-token: write`` the first call to
+  # ``getOidcToken`` errors with
+  # "Could not fetch an OIDC token. Did you remember to add
+  # ``id-token: write`` to your workflow permissions?".
+  id-token: write
+
+concurrency:
+  # One review per PR, latest commit wins.
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Skip entirely when:
+    #   - the PR is a draft (work-in-progress; don't burn API spend)
+    #   - or ``ANTHROPIC_API_KEY`` isn't set (fork, contributor
+    #     without the secret, or the owner hasn't wired one up)
+    if: >
+      github.event.pull_request.draft == false &&
+      vars.CLAUDE_REVIEW_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the action can diff against the merge
+          # base. ``fetch-depth: 0`` is the simplest correct
+          # answer; CodeQL and dependency-review need it too.
+          fetch-depth: 0
+
+      - name: Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # ``review`` mode posts a single PR review comment with
+          # inline annotations on changed lines. ``assist`` mode is
+          # the alternative — invocation by mentions / commands.
+          mode: review
+          # Scope the review to the project's house style. The
+          # action treats this as additional system-prompt
+          # context on top of its built-in review rubric.
+          prompt: |
+            You are reviewing a pull request for Auditarr, a media
+            library auditor (FastAPI backend + React/TypeScript
+            frontend). House style:
+
+            * Don't suggest comments for the sake of comments.
+              Only flag missing comments where the WHY is
+              genuinely non-obvious.
+            * Prefer concrete inline suggestions over abstract
+              advice.
+            * Flag any security issue at the OWASP top-10 level
+              (SQL injection, XSS, command injection, SSRF,
+              missing authn/authz on a route, secret in code).
+            * Flag any test gap that maps to a code path the diff
+              introduced — but don't ask for tests for trivial
+              renames or doc edits.
+            * Skip nits on whitespace, ordering, or imports —
+              ruff and eslint already catch those.
+
+            If the PR is small or low-risk, a short approval
+            comment is fine.
