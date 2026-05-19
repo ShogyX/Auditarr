@@ -90,7 +90,10 @@ def test_full_chain_reaches_head_without_errors(fresh_db: Path) -> None:
     # the device index table.
     # v1.9 OP-10 bumps to 0030_playback_session_rating_key for
     # the reconciliation column + composite index.
-    assert row[0] == "0030_playback_session_rating_key"
+    # v1.9 Stage 1 (updater commit-based feed) bumps to
+    # 0031_updater_commit_columns for the commit SHA / date
+    # columns on update_checks.
+    assert row[0] == "0031_updater_commit_columns"
 
 
 def test_vt_status_column_exists(fresh_db: Path) -> None:
