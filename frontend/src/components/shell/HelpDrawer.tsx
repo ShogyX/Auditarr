@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
 
-import { Button } from "@/components/ui/Button";
 import { DocBody } from "@/components/ui/DocBody";
 import { Icon } from "@/components/ui/Icon";
 import { Pill } from "@/components/ui/Pill";
@@ -168,23 +167,5 @@ function HelpBody({
         </div>
       ) : null}
     </div>
-  );
-}
-
-/** Inline help button — drop next to any field/title that has docs. */
-export function HelpButton({ helpKey, label }: { helpKey: string; label?: string }) {
-  const open = useHelpStore((s) => s.open);
-  return (
-    <Button
-      type="button"
-      size="sm"
-      variant="ghost"
-      onClick={() => open(helpKey)}
-      aria-label={label ?? "Help"}
-      title={label ?? "Help"}
-    >
-      <Icon name="help" size={12} />
-      {label ? <span className="ml-1">{label}</span> : null}
-    </Button>
   );
 }

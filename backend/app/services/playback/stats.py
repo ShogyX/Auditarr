@@ -150,7 +150,7 @@ class PlaybackStatsService:
                 MediaFile, MediaFile.id == PlaybackEvent.media_file_id
             )
         )
-        count_stmt = self._apply_filters(count_stmt, filt, for_count=True)
+        count_stmt = self._apply_filters(count_stmt, filt)
         total = (await self._session.execute(count_stmt)).scalar_one()
 
         # Bounded pagination.
@@ -176,8 +176,6 @@ class PlaybackStatsService:
         self,
         stmt: "select",
         filt: PlaybackFilter,
-        *,
-        for_count: bool = False,
     ) -> "select":
         if filt.integration_id:
             stmt = stmt.where(

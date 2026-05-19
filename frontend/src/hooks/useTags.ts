@@ -26,16 +26,6 @@ export function useTagSummary() {
   });
 }
 
-export function useTagNames() {
-  // Re-exposed alongside the summary so consumers that only need
-  // names (rule editor autocomplete) don't pay for the count query.
-  return useQuery({
-    queryKey: ["tags", "names"],
-    queryFn: () => apiClient.get<string[]>("/tags"),
-    staleTime: 60_000,
-  });
-}
-
 export function useBulkDeleteTags() {
   const qc = useQueryClient();
   return useMutation({

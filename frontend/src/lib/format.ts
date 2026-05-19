@@ -16,15 +16,6 @@ export const fmtBytes = (n: number | null | undefined): string => {
 
 export const fmtTB = (n: number): string => `${n.toFixed(1)} TB`;
 
-export const fmtTime = (ts: number | null | undefined): string => {
-  if (!ts) return "—";
-  const d = (Date.now() - ts) / 1000;
-  if (d < 60) return `${Math.floor(d)}s ago`;
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-};
-
 export const fmtDur = (s: number | null | undefined): string => {
   if (s == null) return "—";
   const h = Math.floor(s / 3600);
