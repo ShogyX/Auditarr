@@ -1,9 +1,18 @@
 name: claude-code-review
 
-# Automated PR review by Anthropic's Claude. Opt-in: only runs when
-# the repo owner has set the ``ANTHROPIC_API_KEY`` secret (or wired
-# up an OAuth installation), so forks and contributors without a
-# key don't see failing checks.
+# Automated PR review by Anthropic's Claude. Opt-in so the job
+# doesn't show red on every PR while the secret isn't wired up.
+#
+# To enable on this repo:
+#   1. Settings → Secrets and variables → Actions
+#        - add secret  ANTHROPIC_API_KEY     with your API key.
+#        - add variable CLAUDE_REVIEW_ENABLED set to ``true``.
+#   2. (Optional) flip the value to ``false`` to pause reviews
+#      without removing the secret.
+#
+# When the variable isn't set or is anything other than ``true``,
+# the job's ``if`` clause causes it to skip — skipped jobs show
+# gray in the PR status panel, not red.
 
 on:
   pull_request:
@@ -14,6 +23,12 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  # claude-code-action authenticates against GitHub via an OIDC
+  # token — without ``id-token: write`` the first call to
+  # ``getOidcToken`` errors with
+  # "Could not fetch an OIDC token. Did you remember to add
+  # ``id-token: write`` to your workflow permissions?".
+  id-token: write
 
 concurrency:
   # One review per PR, latest commit wins.
@@ -22,9 +37,13 @@ concurrency:
 
 jobs:
   review:
-    # Skip if there's no API key configured — keeps the run from
-    # erroring red on every PR when the secret is unset.
-    if: github.event.pull_request.draft == false
+    # Skip entirely when:
+    #   - the PR is a draft (work-in-progress; don't burn API spend)
+    #   - or ``ANTHROPIC_API_KEY`` isn't set (fork, contributor
+    #     without the secret, or the owner hasn't wired one up)
+    if: >
+      github.event.pull_request.draft == false &&
+      vars.CLAUDE_REVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

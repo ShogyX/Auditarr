@@ -51,7 +51,12 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
-          cache-dependency-glob: backend/uv.lock
+          # ``backend/uv.lock`` is intentionally gitignored — the
+          # comment in the root ``.gitignore`` describes it as
+          # "environments resolved per-host". Cache against the
+          # project file instead so the key still invalidates when
+          # deps change.
+          cache-dependency-glob: backend/pyproject.toml
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -115,3 +120,52 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # ── Security: known CVEs in deps ────────────────────────────────
+  # Replaces ``actions/dependency-review-action`` which requires
+  # GitHub's dependency-graph to be populated for the repo (not
+  # always the case on a fresh public repo). ``pip-audit`` walks
+  # the resolved Python install for OSV/PyPI advisories; ``npm
+  # audit`` does the same for the Node tree. Both are advisory
+  # for now — promote to hard-fail once the backlog is triaged.
+  security-audit:
+    name: Security audit (pip-audit + npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/pyproject.toml
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: pip-audit (advisory)
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          uv sync --extra dev
+          uv pip install pip-audit
+          # Audit the installed environment. Plain ``pip-audit``
+          # walks site-packages and checks each distribution against
+          # OSV / GHSA advisories. We keep this advisory until the
+          # baseline is clean — flipping ``continue-on-error: false``
+          # later turns it into a hard-fail gate.
+          uv run pip-audit
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm audit (advisory)
+        working-directory: frontend
+        continue-on-error: true
+        run: npm audit --audit-level=high
