@@ -388,6 +388,42 @@ async def ai_usage_summary(
     return {"integrations": rows}
 
 
+# v1.9 Stage 9.2 — stale rule suggestions. Registered BEFORE the
+# ``/suggestions/{suggestion_id}`` wildcard for the same reason
+# as ``/suggestions/ai-usage`` above: otherwise FastAPI matches
+# "stale" as a suggestion_id and the endpoint 404s.
+@router.get(
+    "/suggestions/stale",
+    summary="Active rules that look stale (inactive or overzealous)",
+)
+async def list_stale_rule_suggestions(
+    _user: CurrentUser,
+    session: SessionDep,
+) -> dict[str, object]:
+    """v1.9 Stage 9.2 — rule-removal / severity-lowering hints.
+
+    Surfaces two kinds of observations:
+
+      * ``inactive`` — the rule was evaluated recently but
+        matched zero files. Likely a candidate for
+        disable / delete.
+      * ``overzealous`` — the rule fires AND most observed
+        playback in the analysis window was direct_play.
+        Consider lowering severity rather than removing.
+
+    Read-only: this endpoint returns observations only. The
+    operator decides what to do via the existing rule edit /
+    delete surfaces."""
+    from app.services.playback.stale_rule_analyzer import StaleRuleAnalyzer
+
+    analyzer = StaleRuleAnalyzer(session=session)
+    outcome = await analyzer.analyze()
+    return {
+        "suggestions": [s.to_dict() for s in outcome.suggestions],
+        "rules_examined": outcome.rules_examined,
+    }
+
+
 @router.get(
     "/suggestions/{suggestion_id}",
     response_model=RuleSuggestionRead,
@@ -1129,41 +1165,6 @@ async def _next_available_name(
         n += 1
         if n > 100:
             return f"{base} (imported {_dt_now_short()})"
-
-
-# ── v1.9 Stage 9.2 — stale rule suggestions ──────────────────
-
-
-@router.get(
-    "/suggestions/stale",
-    summary="Active rules that look stale (inactive or overzealous)",
-)
-async def list_stale_rule_suggestions(
-    _user: CurrentUser,
-    session: SessionDep,
-) -> dict[str, object]:
-    """v1.9 Stage 9.2 — rule-removal / severity-lowering hints.
-
-    Surfaces two kinds of observations:
-
-      * ``inactive`` — the rule was evaluated recently but
-        matched zero files. Likely a candidate for
-        disable / delete.
-      * ``overzealous`` — the rule fires AND most observed
-        playback in the analysis window was direct_play.
-        Consider lowering severity rather than removing.
-
-    Read-only: this endpoint returns observations only. The
-    operator decides what to do via the existing rule edit /
-    delete surfaces."""
-    from app.services.playback.stale_rule_analyzer import StaleRuleAnalyzer
-
-    analyzer = StaleRuleAnalyzer(session=session)
-    outcome = await analyzer.analyze()
-    return {
-        "suggestions": [s.to_dict() for s in outcome.suggestions],
-        "rules_examined": outcome.rules_examined,
-    }
 
 
 # ── v1.9 Stage 9.3 — AI suggestion generator ────────────────────

@@ -27,6 +27,30 @@ from app.services.repositories import IntegrationRepository
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
 
+def _bazarr_language_tags(payload: Any) -> list[str]:
+    """Map a Bazarr ``/api/system/languages`` response to Auditarr's
+    synthetic ``missing-subs:<code>`` tag set.
+
+    Bazarr <1.4 wraps the array under ``{"data": [...]}``; Bazarr 1.4+
+    returns a bare array. Either is accepted; anything else yields an
+    empty list rather than 500-ing the upstream-tags endpoint.
+    """
+    if isinstance(payload, dict):
+        langs = payload.get("data") or []
+    elif isinstance(payload, list):
+        langs = payload
+    else:
+        langs = []
+    out: list[str] = []
+    for lang in langs:
+        if not isinstance(lang, dict):
+            continue
+        code = lang.get("code2") or lang.get("code3")
+        if code:
+            out.append(f"missing-subs:{str(code).lower()}")
+    return out
+
+
 def _manager(
     session: SessionDep, registry: RegistryDep, bus: EventBusDep
 ) -> IntegrationManager:
@@ -815,12 +839,7 @@ async def list_upstream_tags(
                 # Auditarr generates.
                 response = await client.get("/api/system/languages")
                 response.raise_for_status()
-                langs = (response.json() or {}).get("data") or []
-                tags = [
-                    f"missing-subs:{(lang.get('code2') or lang.get('code3') or '').lower()}"
-                    for lang in langs
-                    if (lang.get("code2") or lang.get("code3"))
-                ]
+                tags = _bazarr_language_tags(response.json())
             else:
                 response = await client.get("/api/v3/tag")
                 response.raise_for_status()
