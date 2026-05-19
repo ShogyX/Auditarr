@@ -47,6 +47,43 @@ updates:
     labels:
       - dependencies
       - frontend
+    # Framework-major bumps (React 19, Tailwind 4, Vite 8,
+    # react-router 7, eslint 10, …) are migrations, not
+    # one-click updates — landing one needs a deliberate
+    # planning pass, a peer-dep audit, and usually a test
+    # suite tweak. Block dependabot from auto-proposing them
+    # so the weekly cycle stays focused on safe-to-merge
+    # patches + minors. Re-evaluate when scheduling each
+    # migration.
+    ignore:
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-router-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tailwindcss"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint-plugin-react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eslint-plugin-react-hooks"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vite"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "vitest"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@vitejs/plugin-react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "zod"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "jsdom"
+        update-types: ["version-update:semver-major"]
     groups:
       frontend-types-and-tools:
         patterns:
