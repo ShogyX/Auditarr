@@ -46,7 +46,7 @@ jobs:
       vars.CLAUDE_REVIEW_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Full history so the action can diff against the merge
           # base. ``fetch-depth: 0`` is the simplest correct
