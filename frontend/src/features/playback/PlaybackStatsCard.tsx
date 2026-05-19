@@ -285,7 +285,10 @@ function DeviceMatrixPanel({ cells }: { cells: DeviceMatrixCell[] }) {
   // cells field. Each cell is also defended against null fields:
   // a null device_kind or decision lands in a single
   // "(unknown)" bucket rather than producing a NaN-keyed entry.
-  const safeCells = Array.isArray(cells) ? cells : [];
+  const safeCells = useMemo(
+    () => (Array.isArray(cells) ? cells : []),
+    [cells],
+  );
   const { devices, decisions, cellMap, maxCount } = useMemo(() => {
     const devs = new Set<string>();
     const decs = new Set<string>();
@@ -371,7 +374,10 @@ function DecisionTrendPanel({ points }: { points: DecisionDayPoint[] }) {
   // A null/undefined ``points``, or individual points with
   // missing fields, must not crash. We map missing day/decision
   // to "(unknown)" buckets and missing count to 0.
-  const safePoints = Array.isArray(points) ? points : [];
+  const safePoints = useMemo(
+    () => (Array.isArray(points) ? points : []),
+    [points],
+  );
   const { days, byDay, decisions, maxTotal } = useMemo(() => {
     const dayMap = new Map<string, Record<string, number>>();
     const decSet = new Set<string>();

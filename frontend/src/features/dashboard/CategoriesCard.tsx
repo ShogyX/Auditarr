@@ -35,7 +35,7 @@
  * unchanged from the pre-1.9 version.
  */
 
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { Card, CardHead } from "@/components/ui/Card";
@@ -216,7 +216,7 @@ export function CategoriesCard() {
 
 // ── Section primitives ─────────────────────────────────────────
 
-function SectionHeading({ children }: { children: React.ReactNode }) {
+function SectionHeading({ children }: { children: ReactNode }) {
   return (
     <h4 className="text-[11.5px] uppercase tracking-wide text-muted-2 font-semibold m-0">
       {children}

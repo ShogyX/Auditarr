@@ -88,7 +88,7 @@ export async function downloadLogsNdjson(params: {
   const tokens =
     JSON.parse(localStorage.getItem("auditarr.auth") || "null")?.state
       ?.tokens ?? null;
-  const headers: HeadersInit = tokens?.accessToken
+  const headers: Record<string, string> = tokens?.accessToken
     ? { Authorization: `Bearer ${tokens.accessToken}` }
     : {};
   const response = await fetch(`/api/v1${path}`, { headers });
