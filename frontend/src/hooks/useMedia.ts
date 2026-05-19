@@ -247,7 +247,34 @@ export interface MediaFilters {
   mtime_after?: string;
   /** ISO 8601 timestamp string. */
   mtime_before?: string;
+  // v1.10 — tag include / exclude filters. ``tags_any`` already
+  // existed (Stage 18) with OR semantics; ``tags_all`` adds AND
+  // semantics, ``tags_none`` is the exclusion list. All three
+  // accept a comma-joined string so the backend can keep one
+  // ``?tags_*=`` shape per filter.
+  tags_any?: string;
+  tags_all?: string;
+  tags_none?: string;
+  // v1.10 — rule include / exclude filters by rule id. Comma-joined.
+  rules_any?: string;
+  rules_all?: string;
+  rules_none?: string;
+  /** Tri-state subtitle filter; ``undefined`` = no filter. */
+  has_subtitles?: boolean;
+  /** One of sd / 480p / 720p / 1080p / 1440p / 2160p (alias: 4k) / 8k / unknown. */
+  resolution_bucket?: ResolutionBucket;
 }
+
+export type ResolutionBucket =
+  | "sd"
+  | "480p"
+  | "720p"
+  | "1080p"
+  | "1440p"
+  | "2160p"
+  | "4k"
+  | "8k"
+  | "unknown";
 
 export type MediaSortKey =
   | "path"

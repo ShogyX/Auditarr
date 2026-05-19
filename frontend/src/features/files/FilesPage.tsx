@@ -147,6 +147,52 @@ export function FilesPage() {
               onToggleColumnFilters={() =>
                 s.setShowColumnFilters(!s.showColumnFilters)
               }
+              tagsInclude={s.tagsInclude}
+              tagsExclude={s.tagsExclude}
+              tagsIncludeAll={s.tagsIncludeAll}
+              onToggleTagInclude={(tag) => {
+                const next = new Set(s.tagsInclude);
+                if (next.has(tag)) next.delete(tag);
+                else next.add(tag);
+                s.setTagsInclude(next);
+              }}
+              onToggleTagExclude={(tag) => {
+                const next = new Set(s.tagsExclude);
+                if (next.has(tag)) next.delete(tag);
+                else next.add(tag);
+                s.setTagsExclude(next);
+              }}
+              onTagsIncludeAll={s.setTagsIncludeAll}
+              rulesInclude={s.rulesInclude}
+              rulesExclude={s.rulesExclude}
+              rulesIncludeAll={s.rulesIncludeAll}
+              onToggleRuleInclude={(id) => {
+                const next = new Set(s.rulesInclude);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                s.setRulesInclude(next);
+              }}
+              onToggleRuleExclude={(id) => {
+                const next = new Set(s.rulesExclude);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                s.setRulesExclude(next);
+              }}
+              onRulesIncludeAll={s.setRulesIncludeAll}
+              hasSubtitles={s.hasSubtitles}
+              onHasSubtitles={s.setHasSubtitles}
+              resolutionBucket={s.resolutionBucket}
+              onResolutionBucket={s.setResolutionBucket}
+              onClearAdvanced={() => {
+                s.setTagsInclude(new Set());
+                s.setTagsExclude(new Set());
+                s.setTagsIncludeAll(false);
+                s.setRulesInclude(new Set());
+                s.setRulesExclude(new Set());
+                s.setRulesIncludeAll(false);
+                s.setHasSubtitles(undefined);
+                s.setResolutionBucket("");
+              }}
             />
 
             <FilesTable

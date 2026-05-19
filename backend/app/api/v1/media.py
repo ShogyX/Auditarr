@@ -111,6 +111,24 @@ async def list_media(
         default=None,
         description="ISO 8601 timestamp. Files with mtime <= this are returned.",
     ),
+    # v1.10 — tag include/exclude filters. ``tags_any`` already
+    # exists from Stage 18; the new pair extends with AND semantics
+    # and an exclusion list. Comma-separated to match the codec /
+    # container precedent.
+    tags_any: str | None = Query(default=None, max_length=1024),
+    tags_all: str | None = Query(default=None, max_length=1024),
+    tags_none: str | None = Query(default=None, max_length=1024),
+    # v1.10 — rule include/exclude filters. Values are rule IDs
+    # (UUIDs); the UI looks them up from /rules so the URL stays
+    # stable across rule renames.
+    rules_any: str | None = Query(default=None, max_length=2048),
+    rules_all: str | None = Query(default=None, max_length=2048),
+    rules_none: str | None = Query(default=None, max_length=2048),
+    has_subtitles: bool | None = Query(default=None),
+    resolution_bucket: str | None = Query(
+        default=None,
+        pattern=r"^(sd|480p|720p|1080p|1440p|2160p|4k|4320p|8k|unknown)$",
+    ),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> MediaPageRead:
@@ -137,6 +155,12 @@ async def list_media(
     parsed_mtime_after = _parse_iso(mtime_after, field_name="mtime_after")
     parsed_mtime_before = _parse_iso(mtime_before, field_name="mtime_before")
 
+    def _split_csv(value: str | None) -> list[str] | None:
+        if value is None:
+            return None
+        items = [piece.strip() for piece in value.split(",") if piece.strip()]
+        return items or None
+
     page = await MediaRepository(session).list(
         filt=MediaFilter(
             library_id=library_id,
@@ -162,6 +186,15 @@ async def list_media(
             size_max=size_max,
             mtime_after=parsed_mtime_after,
             mtime_before=parsed_mtime_before,
+            # v1.10 — tag and rule include/exclude.
+            tags_any=_split_csv(tags_any),
+            tags_all=_split_csv(tags_all),
+            tags_none=_split_csv(tags_none),
+            rules_any=_split_csv(rules_any),
+            rules_all=_split_csv(rules_all),
+            rules_none=_split_csv(rules_none),
+            has_subtitles=has_subtitles,
+            resolution_bucket=resolution_bucket,
         ),
         offset=offset,
         limit=limit,

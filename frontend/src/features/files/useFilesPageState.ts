@@ -35,6 +35,7 @@ import {
   type MediaFileSummary,
   type MediaFilters,
   type MediaSortKey,
+  type ResolutionBucket,
 } from "@/hooks/useMedia";
 import { useScanProgress } from "@/hooks/useScanProgress";
 import { apiClient } from "@/services/apiClient";
@@ -105,6 +106,27 @@ export interface UseFilesPageState {
   activeContainers: Set<string>;
   toggleContainer: (container: string) => void;
   clearCodecsAndContainers: () => void;
+  /* ── v1.10: tag + rule include/exclude axes ─────────────── */
+  tagsInclude: Set<string>;
+  tagsExclude: Set<string>;
+  setTagsInclude: (next: Set<string>) => void;
+  setTagsExclude: (next: Set<string>) => void;
+  /** When ``true`` the include set is interpreted as AND
+   *  (file must carry every listed tag); ``false`` means OR
+   *  (any of the listed tags). Default false to match the
+   *  pre-v1.10 ``tags_any`` shape. */
+  tagsIncludeAll: boolean;
+  setTagsIncludeAll: (v: boolean) => void;
+  rulesInclude: Set<string>;
+  rulesExclude: Set<string>;
+  setRulesInclude: (next: Set<string>) => void;
+  setRulesExclude: (next: Set<string>) => void;
+  rulesIncludeAll: boolean;
+  setRulesIncludeAll: (v: boolean) => void;
+  hasSubtitles: boolean | undefined;
+  setHasSubtitles: (v: boolean | undefined) => void;
+  resolutionBucket: ResolutionBucket | "";
+  setResolutionBucket: (v: ResolutionBucket | "") => void;
 
   /* ── pagination + selection + drawer ───────────────────── */
   page: number;
@@ -165,6 +187,29 @@ export function useFilesPageState(): UseFilesPageState {
   const [activeContainers, setActiveContainers] = useState<Set<string>>(
     () => new Set(),
   );
+  // v1.10 — tag / rule include & exclude axes plus extra column
+  // filters (subs / resolution). All transient; URL persistence
+  // below keeps deep-links working.
+  const [tagsInclude, setTagsInclude] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [tagsExclude, setTagsExclude] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [tagsIncludeAll, setTagsIncludeAll] = useState<boolean>(false);
+  const [rulesInclude, setRulesInclude] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [rulesExclude, setRulesExclude] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [rulesIncludeAll, setRulesIncludeAll] = useState<boolean>(false);
+  const [hasSubtitles, setHasSubtitles] = useState<boolean | undefined>(
+    undefined,
+  );
+  const [resolutionBucket, setResolutionBucket] = useState<
+    ResolutionBucket | ""
+  >("");
 
   // Stage 14.1: dashboard deep-link via ``?severity=warn``.
   // Stage 26: also honor ``?library_id=<id>`` so the dashboard's
@@ -203,6 +248,42 @@ export function useFilesPageState(): UseFilesPageState {
         new Set(container.split(",").map((c) => c.trim()).filter(Boolean)),
       );
     }
+
+    // v1.10 — deep-linkable tag/rule filters and other column axes.
+    const csvToSet = (raw: string | null): Set<string> => {
+      if (!raw) return new Set();
+      return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+    };
+    const tIncAny = csvToSet(sp.get("tags_any"));
+    const tIncAll = csvToSet(sp.get("tags_all"));
+    if (tIncAll.size > 0) {
+      setTagsInclude(tIncAll);
+      setTagsIncludeAll(true);
+    } else if (tIncAny.size > 0) {
+      setTagsInclude(tIncAny);
+      setTagsIncludeAll(false);
+    }
+    const tExc = csvToSet(sp.get("tags_none"));
+    if (tExc.size > 0) setTagsExclude(tExc);
+
+    const rIncAny = csvToSet(sp.get("rules_any"));
+    const rIncAll = csvToSet(sp.get("rules_all"));
+    if (rIncAll.size > 0) {
+      setRulesInclude(rIncAll);
+      setRulesIncludeAll(true);
+    } else if (rIncAny.size > 0) {
+      setRulesInclude(rIncAny);
+      setRulesIncludeAll(false);
+    }
+    const rExc = csvToSet(sp.get("rules_none"));
+    if (rExc.size > 0) setRulesExclude(rExc);
+
+    const subs = sp.get("has_subtitles");
+    if (subs === "true") setHasSubtitles(true);
+    else if (subs === "false") setHasSubtitles(false);
+
+    const res = sp.get("resolution_bucket") as ResolutionBucket | null;
+    if (res) setResolutionBucket(res);
   }, []);
 
   const [page, setPage] = useState<number>(0);
@@ -332,6 +413,36 @@ export function useFilesPageState(): UseFilesPageState {
         perColumnFilters.extension && perColumnFilters.extension.trim()
           ? perColumnFilters.extension.trim()
           : undefined,
+      // v1.10 — tag include/exclude. ``tagsIncludeAll`` picks the
+      // AND-semantic param (``tags_all``); otherwise the existing
+      // OR-semantic ``tags_any`` is used. Empty sets ⇒ no param.
+      tags_any:
+        !tagsIncludeAll && tagsInclude.size > 0
+          ? Array.from(tagsInclude).sort().join(",")
+          : undefined,
+      tags_all:
+        tagsIncludeAll && tagsInclude.size > 0
+          ? Array.from(tagsInclude).sort().join(",")
+          : undefined,
+      tags_none:
+        tagsExclude.size > 0
+          ? Array.from(tagsExclude).sort().join(",")
+          : undefined,
+      // v1.10 — rule include/exclude, same shape.
+      rules_any:
+        !rulesIncludeAll && rulesInclude.size > 0
+          ? Array.from(rulesInclude).sort().join(",")
+          : undefined,
+      rules_all:
+        rulesIncludeAll && rulesInclude.size > 0
+          ? Array.from(rulesInclude).sort().join(",")
+          : undefined,
+      rules_none:
+        rulesExclude.size > 0
+          ? Array.from(rulesExclude).sort().join(",")
+          : undefined,
+      has_subtitles: hasSubtitles,
+      resolution_bucket: resolutionBucket === "" ? undefined : resolutionBucket,
     }),
     [
       libraryId,
@@ -344,6 +455,14 @@ export function useFilesPageState(): UseFilesPageState {
       sort,
       visibleColumns,
       perColumnFilters,
+      tagsInclude,
+      tagsExclude,
+      tagsIncludeAll,
+      rulesInclude,
+      rulesExclude,
+      rulesIncludeAll,
+      hasSubtitles,
+      resolutionBucket,
     ],
   );
 
@@ -368,6 +487,14 @@ export function useFilesPageState(): UseFilesPageState {
     sort,
     page,
     pageSize,
+    tagsInclude,
+    tagsExclude,
+    tagsIncludeAll,
+    rulesInclude,
+    rulesExclude,
+    rulesIncludeAll,
+    hasSubtitles,
+    resolutionBucket,
   ]);
 
   const totalPages = list.data
@@ -507,6 +634,23 @@ export function useFilesPageState(): UseFilesPageState {
     activeContainers,
     toggleContainer,
     clearCodecsAndContainers,
+    // v1.10 — tag / rule include & exclude and column-axis filters.
+    tagsInclude,
+    tagsExclude,
+    setTagsInclude,
+    setTagsExclude,
+    tagsIncludeAll,
+    setTagsIncludeAll,
+    rulesInclude,
+    rulesExclude,
+    setRulesInclude,
+    setRulesExclude,
+    rulesIncludeAll,
+    setRulesIncludeAll,
+    hasSubtitles,
+    setHasSubtitles,
+    resolutionBucket,
+    setResolutionBucket,
     page,
     setPage,
     selected,
