@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.events.bus import get_event_bus
 from app.integrations.manager import IntegrationManager
@@ -43,7 +43,6 @@ from app.main import create_app
 from app.models.integration import Integration
 from app.models.library import Library
 from app.models.playback_device import PlaybackDevice
-from app.models.user import User
 from app.security.secrets import get_secret_box
 from app.services.playback import PlaybackPoller
 from app.services.playback.poller import _derive_client_key

@@ -22,7 +22,6 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -30,9 +29,7 @@ from sqlalchemy import update
 
 from app.events.bus import get_event_bus
 from app.integrations.types import (
-    DiscoveredLibrary,
     HealthReport,
-    IntegrationConfig,
     IntegrationProvider,
     SearchTriggerResult,
     TagSync,
@@ -44,7 +41,6 @@ from app.models.library import Library
 from app.models.media import MediaFile
 from app.models.tag import MediaTag
 from app.models.user import User
-from app.security.secrets import get_secret_box
 from app.storage.base import Base
 from app.storage.cache import get_redis
 from app.storage.database import get_database

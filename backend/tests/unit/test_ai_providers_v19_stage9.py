@@ -25,6 +25,7 @@ import json
 import httpx
 import pytest
 
+from app.services.ai import providers as providers_mod
 from app.services.ai.providers import (
     AIProvider,
     AIProviderConfig,
@@ -55,9 +56,10 @@ def _provider_with_transport(provider, transport: httpx.MockTransport):
     """Monkey-patch async_client to use the MockTransport.
 
     ``providers.py`` imports ``async_client`` at module level
-    so we replace it for the duration of the test."""
-    import app.services.ai.providers as providers_mod
-
+    so we replace it for the duration of the test. The module
+    reference is imported at file scope as ``providers_mod`` so
+    CodeQL's ``py/import-and-import-from`` rule doesn't trip on
+    the duplicate import shape."""
     orig = providers_mod.async_client
 
     def patched(**kwargs):

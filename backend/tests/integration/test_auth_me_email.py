@@ -150,7 +150,7 @@ async def auth_client() -> AsyncIterator[AsyncClient]:
         try:
             await redis.disconnect()
         except Exception:
-            pass
+            pass  # best-effort cleanup in test helper
         bus.clear()
 
 

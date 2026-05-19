@@ -97,9 +97,11 @@ export function LibraryEditDialog({
     }
   }
 
+  // ``library`` is narrowed to non-null by the early-return above,
+  // so the modal is always open when this code runs.
   return (
     <Modal
-      open={library !== null}
+      open
       onOpenChange={onOpenChange}
       ariaLabel={`Edit library ${library.name}`}
       size="md"

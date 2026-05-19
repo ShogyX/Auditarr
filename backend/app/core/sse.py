@@ -133,7 +133,7 @@ async def _parse_event_block(block: str) -> SseEvent | None:
             try:
                 retry_ms = int(value)
             except ValueError:
-                pass
+                pass  # client disconnected during keepalive; not actionable
 
     if not data_lines:
         return None

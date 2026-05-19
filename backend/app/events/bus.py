@@ -44,7 +44,7 @@ class EventBus:
             try:
                 self._subs[name].remove(handler)
             except ValueError:
-                pass
+                pass  # handler already removed by a concurrent unsubscribe
 
         return _unsubscribe
 

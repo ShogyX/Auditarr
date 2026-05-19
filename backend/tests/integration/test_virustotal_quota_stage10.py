@@ -72,8 +72,11 @@ class _RecordingBus(EventBus):
     override ``publish`` to skip the dispatch and just collect."""
 
     def __init__(self) -> None:
-        # NOTE: deliberately don't call super().__init__() — we
-        # don't need the subscriber registry, just the buffer.
+        # Call ``super().__init__()`` even though this test double
+        # never touches the subscriber registry — the base init
+        # just allocates an empty dict + lock, so it's cheap and it
+        # silences CodeQL's ``py/missing-call-to-init`` rule.
+        super().__init__()
         self.events: list[DomainEvent] = []
 
     async def publish(self, event: DomainEvent) -> None:

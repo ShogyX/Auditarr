@@ -41,11 +41,14 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          # The ``security-and-quality`` suite is the broader one —
-          # security findings plus maintainability rules. Operators
-          # who want signal-only can drop to ``security-extended``
-          # later.
-          queries: security-and-quality
+          # ``config-file`` carries the suite selection plus a
+          # ``paths-ignore`` list. The suite is still
+          # ``security-and-quality``; the config additionally
+          # excludes alembic migrations (~100 false-positive
+          # ``unused-global-variable`` alerts on alembic's
+          # ``revision`` / ``down_revision`` / ``branch_labels`` /
+          # ``depends_on`` module constants).
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@v4

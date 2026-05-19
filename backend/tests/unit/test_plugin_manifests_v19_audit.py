@@ -41,6 +41,7 @@ def _plugin_root() -> Path:
             ):
                 return candidate2
     pytest.skip("backend/plugins directory not found from test location")
+    raise AssertionError("unreachable")  # pytest.skip raises; this keeps the return type honest
 
 
 def _discover_manifests() -> list[tuple[str, Path]]:

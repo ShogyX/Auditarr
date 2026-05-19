@@ -38,7 +38,22 @@ class ApiClient {
   private refreshPromise: Promise<AuthTokens | null> | null = null;
 
   async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
-    const url = path.startsWith("http") ? path : `${API_ROOT}${path}`;
+    // CodeQL alert #1 (js/client-side-request-forgery): the
+    // pre-fix branch ``path.startsWith("http") ? path : …``
+    // let any caller-controlled value reach ``fetch`` as a full
+    // URL. No real caller used the absolute-URL form (every
+    // hook in the app prepends a relative ``/...`` path), so
+    // the escape hatch was dead code AND an SSRF surface for
+    // any future call site that accidentally forwarded a
+    // user-controlled string. Drop it: every request now lands
+    // under ``API_ROOT``.
+    if (path.startsWith("http")) {
+      throw new ApiError(0, {
+        code: "client_invalid_path",
+        message: "apiClient only accepts relative paths under /api/v1",
+      });
+    }
+    const url = `${API_ROOT}${path}`;
     const headers = new Headers(init.headers);
     headers.set("accept", "application/json");
     // Stage 32: only default to JSON content-type for non-FormData

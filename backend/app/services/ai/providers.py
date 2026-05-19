@@ -32,7 +32,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-import httpx
 
 from app.core.http import async_client
 
@@ -96,7 +95,8 @@ class AIProvider(Protocol):
 
     async def chat(
         self, config: AIProviderConfig, messages: list[ChatMessage]
-    ) -> ChatResult: ...
+    ) -> ChatResult:
+        pass
 
 
 # ── Implementations ──────────────────────────────────────────────
