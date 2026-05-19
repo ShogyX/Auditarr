@@ -20,10 +20,15 @@ The sentinel/status file protocol is intentionally simple plain text
 so the host script can stay short and avoid Python deps. See
 ``docker/updater/auditarr-update.sh`` (shipped in Stage 11 turn 2)
 for the consumer.
+
+v1.9.x: the default feed is the GitHub ``commits/main`` endpoint, so
+``check_now`` may produce a ``FeedResult`` with ``commit_sha`` set and
+``version`` empty. The comparison branches on which is present.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,10 +46,31 @@ from app.services.repositories.updater import (
 )
 from app.updater.feed import FeedResult, fetch_feed
 from app.updater.install_mode import detect_install_mode
-from app.updater.versioning import is_newer
+from app.updater.versioning import is_newer, is_newer_commit
 from app.utils.datetime import utcnow
 
 log = get_logger("auditarr.updater.service", category="updater")
+
+
+def _parse_installed_commit_date(raw: str | None) -> _dt.datetime | None:
+    """Parse the Settings.app_commit_date string. Empty → None.
+
+    Settings stores the installed commit date as a string so the env
+    override path doesn't need a custom parser; we restore it to a
+    datetime here for the comparison call.
+    """
+    if not raw:
+        return None
+    value = raw.strip().replace("Z", "+00:00")
+    if not value:
+        return None
+    try:
+        dt = _dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt
 
 
 @dataclass(slots=True)
@@ -76,6 +102,16 @@ class UpdaterStatus:
     # unmanaged (where the operator's external config tool drives the
     # upgrade).
     manual_apply_command: str | None
+    # v1.9.x — commit-based feed identity. ``installed_commit_sha`` is
+    # what the running build resolved at import time (git, env var, or
+    # ``"unknown"``); ``latest_commit_sha``/``latest_commit_date`` are
+    # what the most recent successful feed check returned. All four
+    # default to ``None`` so installs operating in version-tag mode
+    # keep working unchanged.
+    installed_commit_sha: str | None = None
+    latest_commit_sha: str | None = None
+    latest_commit_date: str | None = None
+    latest_commit_message: str | None = None
 
 
 # Stage 1.6 (v1.9.1) — Docker install update instructions surfaced
@@ -110,13 +146,23 @@ class UpdaterService:
 
     # ── Check ───────────────────────────────────────────────────
     async def check_now(self) -> UpdateCheck:
-        """Hit the feed, persist a row, emit event if newer."""
+        """Hit the feed, persist a row, emit event if newer.
+
+        Branches on which identity the feed carries:
+
+        * ``commit_sha`` present → compare against the installed
+          commit SHA + date (v1.9.x commit feed, default).
+        * ``version`` present → compare against the installed
+          version string (release-tag feed; back-compat).
+        """
         feed_result = await fetch_feed(self._settings.update_feed_url)
         now = utcnow()
         row = UpdateCheck(
             checked_at=now,
             ok=feed_result.ok,
             latest_version=feed_result.version,
+            latest_commit_sha=feed_result.commit_sha,
+            latest_commit_date=feed_result.commit_date,
             changelog=feed_result.changelog,
             detail=feed_result.detail,
             feed_url=self._settings.update_feed_url,
@@ -124,25 +170,48 @@ class UpdaterService:
         await self._checks.add(row)
         await self._session.commit()
 
-        if (
-            feed_result.ok
-            and feed_result.version
-            and is_newer(feed_result.version, self._settings.app_version)
-            and self._bus is not None
-        ):
-            await self._bus.emit(
-                "update.available",
-                {
-                    "installed": self._settings.app_version,
-                    "latest": feed_result.version,
-                },
-                source="updater",
-            )
+        if feed_result.ok and self._bus is not None:
+            if feed_result.commit_sha:
+                installed_date = _parse_installed_commit_date(
+                    self._settings.app_commit_date
+                )
+                if is_newer_commit(
+                    feed_result.commit_sha,
+                    self._settings.app_commit_sha,
+                    candidate_date=feed_result.commit_date,
+                    installed_date=installed_date,
+                ):
+                    await self._bus.emit(
+                        "update.available",
+                        {
+                            "installed_commit": self._settings.app_commit_sha,
+                            "latest_commit": feed_result.commit_sha,
+                            "latest_commit_date": (
+                                feed_result.commit_date.isoformat()
+                                if feed_result.commit_date
+                                else None
+                            ),
+                        },
+                        source="updater",
+                    )
+            elif feed_result.version and is_newer(
+                feed_result.version, self._settings.app_version
+            ):
+                await self._bus.emit(
+                    "update.available",
+                    {
+                        "installed": self._settings.app_version,
+                        "latest": feed_result.version,
+                    },
+                    source="updater",
+                )
         log.info(
             "updater.check_complete",
             ok=feed_result.ok,
-            latest=feed_result.version,
-            installed=self._settings.app_version,
+            latest_version=feed_result.version,
+            latest_commit=feed_result.commit_sha,
+            installed_version=self._settings.app_version,
+            installed_commit=self._settings.app_commit_sha,
         )
         return row
 
@@ -150,10 +219,22 @@ class UpdaterService:
     async def get_status(self) -> UpdaterStatus:
         last = await self._checks.latest()
         latest_version = last.latest_version if last and last.ok else None
-        has_update = bool(
-            latest_version
-            and is_newer(latest_version, self._settings.app_version)
-        )
+        latest_commit_sha = last.latest_commit_sha if last and last.ok else None
+        latest_commit_date = last.latest_commit_date if last and last.ok else None
+        latest_commit_message = last.changelog if last and last.ok and latest_commit_sha else None
+        installed_date = _parse_installed_commit_date(self._settings.app_commit_date)
+        if latest_commit_sha:
+            has_update = is_newer_commit(
+                latest_commit_sha,
+                self._settings.app_commit_sha,
+                candidate_date=latest_commit_date,
+                installed_date=installed_date,
+            )
+        else:
+            has_update = bool(
+                latest_version
+                and is_newer(latest_version, self._settings.app_version)
+            )
         # An apply is "in progress" if there's a row in requested/running
         # state. We don't lock; the host script picks the most recent
         # requested row and the status file resolves any ambiguity.
@@ -189,6 +270,12 @@ class UpdaterService:
             install_mode=install_mode,
             apply_enabled=apply_enabled,
             manual_apply_command=manual_apply_command,
+            installed_commit_sha=self._settings.app_commit_sha or None,
+            latest_commit_sha=latest_commit_sha,
+            latest_commit_date=(
+                latest_commit_date.isoformat() if latest_commit_date else None
+            ),
+            latest_commit_message=latest_commit_message,
         )
 
     # ── Apply ───────────────────────────────────────────────────

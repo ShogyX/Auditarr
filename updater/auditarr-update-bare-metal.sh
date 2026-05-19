@@ -121,6 +121,18 @@ derive_release_url() {
     if [[ -n "$RELEASE_URL_TEMPLATE" ]]; then
         return 0
     fi
+    # v1.9.x — commits/<branch> feed: ``to_version`` carries a git SHA
+    # and the archive endpoint accepts the SHA directly. We don't strip
+    # the trailing path segment because GitHub serves the same tarball
+    # regardless of branch — the SHA is the only identifier that
+    # matters.
+    if [[ "$UPDATE_FEED_URL" =~ ^https://api\.github\.com/repos/([^/]+)/([^/]+)/commits/[^/]+$ ]]; then
+        local owner="${BASH_REMATCH[1]}"
+        local repo="${BASH_REMATCH[2]}"
+        RELEASE_URL_TEMPLATE="https://github.com/${owner}/${repo}/archive/%s.tar.gz"
+        log "derived commit-tarball URL template from feed: $RELEASE_URL_TEMPLATE"
+        return 0
+    fi
     if [[ "$UPDATE_FEED_URL" =~ ^https://api\.github\.com/repos/([^/]+)/([^/]+)/releases/latest$ ]]; then
         local owner="${BASH_REMATCH[1]}"
         local repo="${BASH_REMATCH[2]}"

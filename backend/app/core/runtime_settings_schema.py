@@ -236,11 +236,14 @@ RUNTIME_EDITABLE: tuple[RuntimeFieldSpec, ...] = (
         label="Update feed URL",
         description=(
             "JSON endpoint the updater hits to learn about new "
-            "releases."
+            "builds. Defaults to the GitHub commits/main endpoint so "
+            "any newer commit on the upstream branch surfaces as "
+            "'update available'. Point at .../releases/latest to "
+            "track release tags instead."
         ),
         category="updater",
         field_type=str,
-        field_default="https://api.github.com/repos/ShogyX/Auditarr/releases/latest",
+        field_default="https://api.github.com/repos/ShogyX/Auditarr/commits/main",
         field_constraints={
             "min_length": 1,
             "max_length": 1024,

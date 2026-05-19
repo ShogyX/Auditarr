@@ -68,7 +68,13 @@ export function UpdaterPanel() {
   }
 
   const s = status.data;
-  const hasUpdate = s.has_update && s.latest_version;
+  // v1.9.x — commit-feed mode keeps ``latest_version`` null; the
+  // server-computed ``has_update`` is now the only signal we trust
+  // for the "Update available" badge.
+  const latestCommitShort = s.latest_commit_sha ? s.latest_commit_sha.slice(0, 7) : null;
+  const latestIdentity = s.latest_version ?? latestCommitShort;
+  const applyTarget = s.latest_version ?? s.latest_commit_sha ?? null;
+  const hasUpdate = s.has_update && Boolean(applyTarget);
 
   // Stage 19: install-mode aware copy.
   const installModeLabel: Record<typeof s.install_mode, string> = {
@@ -78,11 +84,11 @@ export function UpdaterPanel() {
   };
   const applyButtonText = (() => {
     if (s.apply_in_progress) return "Apply in progress…";
-    if (!s.latest_version) return "Apply";
+    if (!latestIdentity) return "Apply";
     if (s.install_mode === "bare-metal") {
-      return `Apply ${s.latest_version} (systemd)`;
+      return `Apply ${latestIdentity} (systemd)`;
     }
-    return `Apply ${s.latest_version}`;
+    return `Apply ${latestIdentity}`;
   })();
 
   // v1.9.1 Stage 1.6 — Docker installs surface the manual host
@@ -95,7 +101,11 @@ export function UpdaterPanel() {
     <Card>
       <CardHead
         title="Updates"
-        subtitle={`Installed: ${s.installed_version} · ${installModeLabel[s.install_mode]}`}
+        subtitle={
+          `Installed: ${s.installed_version}` +
+          (s.installed_commit_sha ? ` (${s.installed_commit_sha.slice(0, 7)})` : "") +
+          ` · ${installModeLabel[s.install_mode]}`
+        }
         actions={
           <Button
             size="sm"
@@ -141,12 +151,17 @@ export function UpdaterPanel() {
                 <Pill className="text-sev-info border-sev-info/40 bg-sev-info/10">
                   Update available
                 </Pill>
-                <Tag>{s.latest_version}</Tag>
+                {latestIdentity ? <Tag>{latestIdentity}</Tag> : null}
+                {s.latest_commit_date ? (
+                  <span className="text-[11.5px] text-muted-2" title={s.latest_commit_date}>
+                    {new Date(s.latest_commit_date).toLocaleDateString()}
+                  </span>
+                ) : null}
                 {showDockerManualBlock ? null : (
                   <Button
                     size="sm"
                     variant="primary"
-                    onClick={() => s.latest_version && requestApply.mutate(s.latest_version)}
+                    onClick={() => applyTarget && requestApply.mutate(applyTarget)}
                     disabled={requestApply.isPending || s.apply_in_progress || !s.apply_enabled}
                     title={
                       !s.apply_enabled
@@ -218,8 +233,8 @@ function ApplyRow({
   return (
     <div className="flex items-center gap-2 text-[12px]">
       <Pill className={applyStatusClass(apply.status)}>{apply.status}</Pill>
-      <span className="font-mono">
-        {apply.from_version ?? "?"} → {apply.to_version}
+      <span className="font-mono" title={`${apply.from_version ?? "?"} → ${apply.to_version}`}>
+        {shortenIdentity(apply.from_version) ?? "?"} → {shortenIdentity(apply.to_version)}
       </span>
       <span className="text-muted-2">{new Date(apply.started_at).toLocaleString()}</span>
       {apply.error ? (
@@ -247,6 +262,14 @@ function ApplyRow({
       ) : null}
     </div>
   );
+}
+
+// 40-hex git SHA → 7-char short SHA for tabular display. Versions
+// (e.g. ``1.9.0``) and other identifiers pass through untouched.
+function shortenIdentity(identity: string | null | undefined): string | null {
+  if (!identity) return null;
+  if (/^[0-9a-f]{40}$/i.test(identity)) return identity.slice(0, 7);
+  return identity;
 }
 
 function applyStatusClass(status: string): string {

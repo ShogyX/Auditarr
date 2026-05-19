@@ -33,6 +33,34 @@ def _default_app_version() -> str:
         return "0.0.0-dev"
 
 
+def _default_app_commit_sha() -> str:
+    """Resolve at call time so the test suite can monkeypatch
+    ``app.__commit__`` between cases. Returns ``"unknown"`` when the
+    package is imported from a non-git source tree and no
+    ``AUDITARR_COMMIT_SHA`` env var was set — the updater treats
+    "unknown" the same way it treats the ``0.0.0-dev`` version
+    sentinel: always surface as "update available"."""
+    try:
+        from app import __commit__
+
+        return __commit__ or "unknown"
+    except ImportError:
+        return "unknown"
+
+
+def _default_app_commit_date() -> str:
+    """ISO-8601 timestamp of the installed commit, or empty string
+    when unknown. Stored as a string in Settings so the env-var
+    override path (``AUDITARR_APP_COMMIT_DATE``) doesn't need a
+    custom parser."""
+    try:
+        from app import __commit_date__
+
+        return __commit_date__.isoformat() if __commit_date__ else ""
+    except ImportError:
+        return ""
+
+
 class Settings(BaseSettings):
     """Top-level Auditarr configuration."""
 
@@ -132,11 +160,28 @@ class Settings(BaseSettings):
     app_version: str = Field(
         default_factory=lambda: _default_app_version()
     )
-    # Where the updater pulls release metadata from. The default points
-    # at the project's GitHub Releases JSON; operators can swap to a
-    # private mirror by setting AUDITARR_UPDATE_FEED_URL.
+    # v1.9.x — the updater now tracks the latest commit on the
+    # configured branch instead of the latest release tag, so
+    # contributors and self-hosters notice fixes the moment they land
+    # on ``main`` rather than waiting for the next tag. These two
+    # fields identify the *installed* commit; the feed identifies the
+    # *upstream* commit. They default to whatever
+    # :mod:`app` resolved at import time (env vars first, then
+    # ``git rev-parse HEAD``, then ``"unknown"``).
+    app_commit_sha: str = Field(
+        default_factory=lambda: _default_app_commit_sha()
+    )
+    app_commit_date: str = Field(
+        default_factory=lambda: _default_app_commit_date()
+    )
+    # Where the updater pulls upstream metadata from. v1.9.x default
+    # points at the GitHub *commits* API for the ``main`` branch (any
+    # newer commit triggers "update available"). Operators who prefer
+    # release-tag cadence can swap back to
+    # ``.../releases/latest`` — the feed module accepts both shapes,
+    # plus a generic ``{"version": "..."}`` shape for private mirrors.
     update_feed_url: str = (
-        "https://api.github.com/repos/ShogyX/Auditarr/releases/latest"
+        "https://api.github.com/repos/ShogyX/Auditarr/commits/main"
     )
     # Polling interval for the cron tick that checks the feed.
     update_check_interval_minutes: int = 60

@@ -168,5 +168,89 @@ async def test_payload_with_neither_known_key(patch_httpx) -> None:
     patch_httpx["transport"] = _build_transport({"foo": "bar"})
     result = await fetch_feed("https://example.test/feed")
     assert result.ok is False
-    assert "tag_name" in (result.detail or "")
-    assert "version" in (result.detail or "")
+    # The fallback path is the generic normalizer, which reports
+    # "missing 'version' or 'commit_sha'".
+    detail = (result.detail or "").lower()
+    assert "version" in detail or "commit_sha" in detail
+
+
+# ── GitHub commits shape (v1.9.x default) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_github_commits_shape(patch_httpx) -> None:
+    """``/repos/<owner>/<repo>/commits/<branch>`` returns one commit
+    with a ``sha`` + ``commit`` envelope. The normalizer pulls SHA,
+    message, and committer date out."""
+    patch_httpx["transport"] = _build_transport({
+        "sha": "abc1234567890abcdef",
+        "html_url": "https://github.com/x/y/commit/abc1234567890abcdef",
+        "commit": {
+            "message": "Fix scan worker double-count",
+            "committer": {"date": "2026-05-18T10:30:45Z"},
+            "author": {"date": "2026-05-18T10:30:45Z"},
+        },
+    })
+    result = await fetch_feed("https://api.github.com/x/y/commits/main")
+    assert result.ok is True
+    assert result.commit_sha == "abc1234567890abcdef"
+    assert result.commit_message == "Fix scan worker double-count"
+    assert result.commit_date is not None
+    assert result.commit_date.year == 2026
+    assert result.commit_date.month == 5
+    assert result.commit_date.day == 18
+    # Version-tag fields stay empty so the service knows it's a
+    # commit-mode result.
+    assert result.version is None
+    # The commit message is mirrored into ``changelog`` so the UI
+    # "release notes" panel keeps working unchanged.
+    assert result.changelog == "Fix scan worker double-count"
+
+
+@pytest.mark.asyncio
+async def test_github_commits_falls_back_to_author_date(patch_httpx) -> None:
+    """A force-push can leave only the author's date populated. The
+    normalizer must still produce a parseable timestamp."""
+    patch_httpx["transport"] = _build_transport({
+        "sha": "feedface",
+        "commit": {
+            "message": "Force-pushed fixup",
+            "committer": None,
+            "author": {"date": "2026-04-01T00:00:00Z"},
+        },
+    })
+    result = await fetch_feed("https://api.github.com/x/y/commits/main")
+    assert result.ok is True
+    assert result.commit_sha == "feedface"
+    assert result.commit_date is not None and result.commit_date.month == 4
+
+
+@pytest.mark.asyncio
+async def test_github_commits_missing_sha(patch_httpx) -> None:
+    patch_httpx["transport"] = _build_transport({
+        "sha": "",
+        "commit": {"message": "x", "committer": {"date": "2026-05-01T00:00:00Z"}},
+    })
+    result = await fetch_feed("https://api.github.com/x/y/commits/main")
+    # Empty SHA → shape detection falls through to generic, which
+    # rejects too. The point: we don't pass empty SHAs back as ``ok=True``.
+    assert result.ok is False
+
+
+@pytest.mark.asyncio
+async def test_generic_feed_can_carry_commit_metadata(patch_httpx) -> None:
+    """Self-hosted mirrors can expose commit identity alongside the
+    legacy ``version`` field — the generic normalizer surfaces both."""
+    patch_httpx["transport"] = _build_transport({
+        "version": "1.9.0",
+        "changelog": "Big rewrite.",
+        "commit_sha": "0123abcd",
+        "commit_date": "2026-05-18T10:30:45Z",
+        "commit_message": "Tagged 1.9.0",
+    })
+    result = await fetch_feed("https://mirror.test/feed")
+    assert result.ok is True
+    assert result.version == "1.9.0"
+    assert result.commit_sha == "0123abcd"
+    assert result.commit_date is not None
+    assert result.commit_message == "Tagged 1.9.0"
