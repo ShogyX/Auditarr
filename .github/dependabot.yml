@@ -70,6 +70,11 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "eslint"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "@eslint/js"
+        # ``@eslint/js`` ships in lockstep with ``eslint`` and has a
+        # peerOptional dep on the same major. Bumping it alone
+        # breaks ``npm ci`` against the eslint@9 we're pinned at.
+        update-types: ["version-update:semver-major"]
       - dependency-name: "eslint-plugin-react"
         update-types: ["version-update:semver-major"]
       - dependency-name: "eslint-plugin-react-hooks"
