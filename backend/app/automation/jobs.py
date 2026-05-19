@@ -12,19 +12,15 @@ WorkerSettings startup hook.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# ``JobCatalogue`` is only used as a type hint (``from __future__ import
-# annotations`` keeps annotation strings unevaluated). Pushing the
-# runtime ``JobSpec`` import into ``register_builtin_jobs`` breaks the
-# static import cycle between this module and
-# ``app.automation.catalogue`` — catalogue already imports
-# ``register_builtin_jobs`` lazily inside a function for the same
-# reason.
-if TYPE_CHECKING:
-    from app.automation.catalogue import JobCatalogue
+# ``JobSpec`` + ``JobCatalogue`` live in ``app.automation.types``
+# rather than ``app.automation.catalogue`` so this module has no
+# import edge back into ``catalogue`` (which would itself reach
+# ``jobs`` to populate the singleton).
+from app.automation.types import JobCatalogue, JobSpec
 from app.core.exceptions import NotFoundError
 from app.integrations.manager import IntegrationManager
 from app.integrations.tag_sync import IntegrationTagSync
@@ -217,10 +213,6 @@ async def _run_drain_vt_queue(
 # ── Registration ─────────────────────────────────────────────
 def register_builtin_jobs(catalogue: JobCatalogue) -> None:
     """Populate the catalogue with the jobs that ship in-box."""
-    # ``JobSpec`` is imported here (not at module scope) to keep the
-    # import graph acyclic — see the header import block.
-    from app.automation.catalogue import JobSpec
-
     catalogue.register(
         JobSpec(
             key="scan_library",
