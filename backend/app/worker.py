@@ -48,8 +48,16 @@ async def scan_library(
     *,
     mode: str = "full",
     follow_symlinks: bool = False,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Run a scan for a single library and return the report as a dict."""
+    """Run a scan for a single library and return the report as a dict.
+
+    When ``run_id`` is provided (the API enqueue path), the worker
+    reuses the pre-created ScanRun row instead of creating a new one,
+    so the row the API returned to the caller advances ``queued`` →
+    ``running`` → terminal status. Older enqueues without a ``run_id``
+    fall back to the legacy "create a new row" behaviour.
+    """
     db = ctx["db"]
     bus = ctx["bus"]
     ffprobe = ctx["ffprobe"]
@@ -59,9 +67,33 @@ async def scan_library(
         if library is None:
             log.warning("worker.scan_library_missing", library_id=library_id)
             return {"status": "missing", "library_id": library_id}
+        run = None
+        if run_id is not None:
+            from app.services.repositories import ScanRepository
+
+            run = await ScanRepository(session).get(run_id)
+            if run is None:
+                log.warning(
+                    "worker.scan_library_run_missing",
+                    library_id=library_id,
+                    run_id=run_id,
+                )
+            elif run.status != "queued":
+                # Duplicate or stale enqueue: another worker already
+                # advanced this row (or the reaper failed it). Don't
+                # run a second scan against the same id.
+                log.warning(
+                    "worker.scan_library_run_not_queued",
+                    library_id=library_id,
+                    run_id=run_id,
+                    status=run.status,
+                )
+                return {"status": run.status, "run_id": run.id}
         scanner = Scanner(session=session, event_bus=bus, ffprobe=ffprobe)
         report = await scanner.scan(
-            library, options=ScanOptions(mode=mode, follow_symlinks=follow_symlinks)
+            library,
+            options=ScanOptions(mode=mode, follow_symlinks=follow_symlinks),
+            run=run,
         )
         await session.commit()
 

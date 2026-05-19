@@ -126,6 +126,7 @@ async def trigger_scan(
                 library.id,
                 mode=body.mode,
                 follow_symlinks=body.follow_symlinks,
+                run_id=run.id,
                 _job_id=f"scan_library:{run.id}",
             )
             if job is None:

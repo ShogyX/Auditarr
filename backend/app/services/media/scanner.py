@@ -83,18 +83,35 @@ class Scanner:
         self._scans = ScanRepository(session)
 
     async def scan(
-        self, library: Library, *, options: ScanOptions | None = None
+        self,
+        library: Library,
+        *,
+        options: ScanOptions | None = None,
+        run: ScanRun | None = None,
     ) -> ScanReport:
+        """Run a scan against ``library``.
+
+        When ``run`` is provided (the async/queued path), Scanner mutates
+        the existing row from ``queued`` → ``running`` instead of creating
+        a new ScanRun. The API pre-creates the row before enqueueing so
+        callers can poll progress against a stable id; without reuse the
+        pre-created queued row would never advance and the per-library
+        single-flight check would 409 forever.
+        """
         opts = options or ScanOptions()
 
-        run = ScanRun(
-            library_id=library.id,
-            mode=opts.mode,
-            status="running",
-            started_at=utcnow(),
-            options={"follow_symlinks": opts.follow_symlinks},
-        )
-        await self._scans.add(run)
+        if run is None:
+            run = ScanRun(
+                library_id=library.id,
+                mode=opts.mode,
+                status="running",
+                started_at=utcnow(),
+                options={"follow_symlinks": opts.follow_symlinks},
+            )
+            await self._scans.add(run)
+        else:
+            run.status = "running"
+            run.started_at = utcnow()
         await self._session.commit()  # make the row visible to UI watchers
 
         await self._bus.emit(
