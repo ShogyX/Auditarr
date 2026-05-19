@@ -1,8 +1,9 @@
 """First-boot admin bootstrap.
 
 If ``AUDITARR_BOOTSTRAP_ADMIN_USERNAME`` and ``AUDITARR_BOOTSTRAP_ADMIN_PASSWORD``
-are set in the environment AND no users exist yet, the lifespan creates an
-admin account so the operator never gets locked out of a fresh install.
+are set (either as shell env or in ``backend/.env``) AND no users exist
+yet, the lifespan creates an admin account so the operator never gets
+locked out of a fresh install.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import os
 
 from app.core.logging import get_logger
+from app.core.settings import get_settings
 from app.security import Role, hash_password
 from app.services.repositories import UserRepository
 from app.storage.database import Database
@@ -18,10 +20,24 @@ log = get_logger("auditarr.bootstrap", category="security")
 
 
 async def bootstrap_admin_if_needed(database: Database) -> None:
-    username = os.environ.get("AUDITARR_BOOTSTRAP_ADMIN_USERNAME", "").strip()
-    password = os.environ.get("AUDITARR_BOOTSTRAP_ADMIN_PASSWORD", "")
-    email = os.environ.get(
-        "AUDITARR_BOOTSTRAP_ADMIN_EMAIL", f"{username}@auditarr.local"
+    settings = get_settings()
+    # Prefer the Settings layer (which honours ``backend/.env``) and fall
+    # back to ``os.environ`` so containerised deployments that pass these
+    # via ``-e`` / ``environment:`` keep working even when no .env file
+    # is present.
+    username = (
+        settings.bootstrap_admin_username
+        or os.environ.get("AUDITARR_BOOTSTRAP_ADMIN_USERNAME", "")
+    ).strip()
+    password = (
+        settings.bootstrap_admin_password
+        or os.environ.get("AUDITARR_BOOTSTRAP_ADMIN_PASSWORD", "")
+    )
+    email = (
+        settings.bootstrap_admin_email
+        or os.environ.get(
+            "AUDITARR_BOOTSTRAP_ADMIN_EMAIL", f"{username}@auditarr.local"
+        )
     ).strip()
 
     from app.models.user import User
