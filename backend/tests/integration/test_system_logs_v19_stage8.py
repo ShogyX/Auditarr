@@ -202,7 +202,17 @@ async def test_service_filter_narrows_by_category(env) -> None:
         "/api/v1/system/logs?service=api", headers=headers
     )
     body = r.json()
-    events = {rec["event"] for rec in body["records"]}
+    # The `api.request` access-log event the API middleware emits for
+    # THIS request also lands in the buffer with category=api now that
+    # the deferred logger correctly routes module-top loggers through
+    # stdlib (previously it bypassed the buffer). Filter to just the
+    # events this test seeded, same pattern as
+    # `test_records_are_ordered_newest_first` above.
+    events = {
+        rec["event"]
+        for rec in body["records"]
+        if rec["event"] in ("api-evt", "worker-evt", "api-evt-2")
+    }
     assert events == {"api-evt", "api-evt-2"}
 
 

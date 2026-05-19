@@ -42,7 +42,7 @@ import datetime as _dt
 import difflib
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession

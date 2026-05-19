@@ -135,12 +135,16 @@ describe("LogsPage", () => {
     render(withProviders(<LogsPage />));
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1));
 
+    // "worker" was removed from SERVICE_OPTIONS (the backend never
+    // emits that category — it uses "queue" for worker-process logs
+    // and "automation" for scheduler-style work). Use "queue" here,
+    // which is one of the values the realigned dropdown now offers.
     fireEvent.change(screen.getByLabelText("service filter"), {
-      target: { value: "worker" },
+      target: { value: "queue" },
     });
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
     const url = apiGet.mock.calls.at(-1)?.[0] as string;
-    expect(url).toContain("service=worker");
+    expect(url).toContain("service=queue");
   });
 
   it("changing the level filter adds level= query param", async () => {
