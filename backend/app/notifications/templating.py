@@ -32,13 +32,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from jinja2 import Environment, StrictUndefined, TemplateError
+from jinja2 import Environment, StrictUndefined, TemplateError, select_autoescape
 
 # StrictUndefined catches typos in templates loudly instead of producing
 # silently-empty strings. We catch ``TemplateError`` in the dispatcher
 # and fall back to the default rendering on failure.
+#
+# autoescape: current providers (SMTP text body, JSON webhook payloads)
+# don't HTML-render the output, so escaping is a no-op functionally.
+# We enable ``select_autoescape`` anyway as defence-in-depth — a future
+# plugin that decides to set ``html_body`` from the same template
+# would otherwise be a silent XSS foot-gun. The autoescape filter
+# only fires for ``.html`` / ``.xml`` template names; the bare-string
+# templates used here keep their current behaviour.
 _env = Environment(
-    autoescape=False,
+    autoescape=select_autoescape(("html", "htm", "xml")),
     undefined=StrictUndefined,
     trim_blocks=True,
     lstrip_blocks=True,

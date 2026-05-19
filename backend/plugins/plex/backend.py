@@ -56,7 +56,12 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
-from xml.etree import ElementTree as ET
+# ``defusedxml`` rather than the stdlib ``xml.etree.ElementTree`` —
+# the data we parse here comes from a Plex server over HTTP; while
+# the operator nominally trusts that server, a compromised or MITM'd
+# response could trigger billion-laughs / quadratic-blowup expansion
+# in the stock parser. defusedxml is the drop-in hardened fork.
+from defusedxml import ElementTree as ET
 
 import httpx
 
