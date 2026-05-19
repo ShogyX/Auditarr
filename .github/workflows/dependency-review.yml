@@ -1,0 +1,35 @@
+name: dependency-review
+
+# Inspect dependency changes on every PR. Flags packages with known
+# CVEs, license drift, and licenses that don't match the repo's
+# allow-list. Read-only — never blocks unless the operator wires
+# it into a branch-protection required status.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Flag anything ``high`` or worse. ``moderate`` adds a lot
+          # of noise from npm advisories without commensurate signal.
+          fail-on-severity: high
+          comment-summary-in-pr: always
+          # License audit — block GPL-class viral licenses while
+          # keeping the permissive ones unrestricted. Extend or
+          # shrink the list once policy is settled.
+          allow-licenses: >-
+            MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC,
+            CC0-1.0, Unlicense, MPL-2.0, Python-2.0, 0BSD

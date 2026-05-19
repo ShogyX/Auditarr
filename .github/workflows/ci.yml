@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel in-flight runs of the same workflow on the same branch when
+# new commits land. Saves CI minutes and keeps the queue honest —
+# the latest commit is what reviewers care about.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest + ruff + mypy)
+    runs-on: ubuntu-latest
+
+    services:
+      # The async repository tests stash state under
+      # ``redis://localhost:6379/15`` (see backend/tests/conftest.py).
+      # A bare ``redis:7-alpine`` is enough — no extra config needed.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      AUDITARR_REDIS_URL: redis://localhost:6379/15
+      # Tests inject their own per-case sqlite URL via monkeypatch,
+      # but pytest collection runs ``app/main.py`` imports under
+      # the default settings. Point those at an in-memory sqlite
+      # so a CI runner without postgres still passes collection.
+      AUDITARR_DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      AUDITARR_SECRET_KEY: ci-test-key-must-be-at-least-sixteen-chars
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install backend
+        working-directory: backend
+        run: uv sync --extra dev
+
+      # ── Lint + type ───────────────────────────────────────────
+      # Both currently surface a large backlog of pre-existing
+      # findings; we run them with continue-on-error so CI shows
+      # the count without blocking a PR while the backlog gets
+      # whittled down. Tighten to hard-fail later by removing the
+      # flag.
+      - name: Ruff (advisory)
+        working-directory: backend
+        continue-on-error: true
+        run: uv run ruff check .
+
+      - name: Mypy (advisory)
+        working-directory: backend
+        continue-on-error: true
+        run: uv run mypy app
+
+      # ── Tests ─────────────────────────────────────────────────
+      - name: Pytest
+        working-directory: backend
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend (lint + typecheck + test + build)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

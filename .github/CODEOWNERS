@@ -1,0 +1,29 @@
+# Default owner for everything not matched below.
+*                                @ShogyX
+
+# ── Backend ──────────────────────────────────────────────────
+/backend/                         @ShogyX
+/backend/app/api/                 @ShogyX
+/backend/app/services/            @ShogyX
+/backend/app/models/              @ShogyX
+/backend/migrations/              @ShogyX
+/backend/app/integrations/        @ShogyX
+/backend/app/updater/             @ShogyX
+/backend/tests/                   @ShogyX
+
+# ── Frontend ─────────────────────────────────────────────────
+/frontend/                        @ShogyX
+/frontend/src/features/           @ShogyX
+/frontend/src/hooks/              @ShogyX
+
+# ── Infrastructure / install scripts ─────────────────────────
+/updater/                         @ShogyX
+/docker/                          @ShogyX
+/install-bare-metal.sh            @ShogyX
+/install-docker.sh                @ShogyX
+/install.sh                       @ShogyX
+/Dockerfile                       @ShogyX
+/docker-compose.yml               @ShogyX
+
+# ── CI + repo meta ───────────────────────────────────────────
+/.github/                         @ShogyX
