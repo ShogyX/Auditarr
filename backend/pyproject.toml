@@ -43,6 +43,11 @@ dependencies = [
   "pyyaml>=6.0.2",
   "markdown-it-py>=3.0.0",
   "cryptography>=43.0.0",
+  # Used by the Plex provider to parse the smart-playlist XML feed.
+  # ``xml.etree.ElementTree`` is XXE-safe by default on modern
+  # CPython but still vulnerable to billion-laughs / DoS-style
+  # entity expansion; defusedxml is the drop-in hardened fork.
+  "defusedxml>=0.7.1",
 ]
 
 [project.optional-dependencies]

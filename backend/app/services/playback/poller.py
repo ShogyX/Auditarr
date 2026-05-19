@@ -1005,7 +1005,12 @@ def _derive_client_key(
     kind = (device_kind or "").strip()
     name = (device_name or "").strip()
     composite = f"{kind}::{name}"
-    return hashlib.sha1(composite.encode("utf-8")).hexdigest()[:16]
+    # SHA-1 here generates a stable short id for a (kind, name) pair
+    # — not a cryptographic identity proof. ``usedforsecurity=False``
+    # silences the SAST flag without changing the digest.
+    return hashlib.sha1(
+        composite.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
 
 
 def _ensure_utc_aware(value: _dt.datetime) -> _dt.datetime:

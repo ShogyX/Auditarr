@@ -681,7 +681,13 @@ def _dedup_key_for_ai(
     import hashlib
 
     canonical = json.dumps(definition, sort_keys=True, separators=(",", ":"))
-    digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+    # SHA-1 here is a dedup keying choice, not a cryptographic
+    # signature. ``usedforsecurity=False`` tells the runtime + linters
+    # that collisions don't grant any attack capability — the worst
+    # outcome is a duplicate suggestion the operator dismisses.
+    digest = hashlib.sha1(
+        canonical.encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     # Keep the provider_kind + name fragment so the dedup_key is
     # debuggable; the hash provides the actual uniqueness.
     safe_name = name[:64].replace(":", "_")
