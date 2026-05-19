@@ -158,6 +158,12 @@ async def _seed(
         "output": {"container": "mkv", "replace_input": False},
         "routing_target": routing_target,
     }
+    if routing_target == "tdarr":
+        # Tdarr routing requires a provider_profile_id (the plugin
+        # / flow id). Inject a stub so ProfileDefinition validates.
+        profile_settings["provider_metadata"] = {
+            "provider_profile_id": "tdarr-plugin-stub",
+        }
     if extra_settings:
         profile_settings.update(extra_settings)
     profile = OptimizationProfile(
