@@ -155,3 +155,62 @@ def test_apply_sentinel_defaults_to_data_dir_when_state_dir_unset(
         "updater",
         "apply.request",
     )
+
+
+# ── frontend_dist blank-string coercion ─────────────────────────
+
+
+def test_frontend_dist_blank_string_coerces_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AUDITARR_FRONTEND_DIST=`` in a .env file would otherwise
+    coerce to ``Path('.')`` (the cwd), which always ``.exists()``
+    and silently activates the SPA mount — swallowing ``GET /``
+    and other routes the backend would otherwise serve."""
+    monkeypatch.setenv("AUDITARR_FRONTEND_DIST", "")
+    s = Settings()
+    assert s.frontend_dist is None
+
+
+def test_frontend_dist_real_path_passthrough(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A real path is still accepted (Path coercion intact)."""
+    monkeypatch.setenv("AUDITARR_FRONTEND_DIST", str(tmp_path))
+    s = Settings()
+    assert s.frontend_dist == tmp_path
+
+
+# ── bootstrap admin fields ──────────────────────────────────────
+
+
+def test_bootstrap_admin_defaults_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defaults are empty strings — the bootstrap step treats blank
+    username/password as 'no bootstrap requested'. Force blank in
+    case the developer's ``backend/.env`` sets them."""
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_USERNAME", "")
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_PASSWORD", "")
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_EMAIL", "")
+    s = Settings()
+    assert s.bootstrap_admin_username == ""
+    assert s.bootstrap_admin_password == ""
+    assert s.bootstrap_admin_email == ""
+
+
+def test_bootstrap_admin_reads_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AUDITARR_BOOTSTRAP_ADMIN_*`` env vars populate the Settings
+    fields, which the bootstrap step then reads via ``get_settings()``.
+    This is what makes ``backend/.env`` work for bootstrap creds —
+    pre-fix, ``bootstrap.py`` only read ``os.environ`` directly and
+    silently ignored anything that came in via the .env file."""
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_USERNAME", "alice")
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_PASSWORD", "hunter2-very-long")
+    monkeypatch.setenv("AUDITARR_BOOTSTRAP_ADMIN_EMAIL", "alice@example.com")
+    s = Settings()
+    assert s.bootstrap_admin_username == "alice"
+    assert s.bootstrap_admin_password == "hunter2-very-long"
+    assert s.bootstrap_admin_email == "alice@example.com"

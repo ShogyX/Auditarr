@@ -96,6 +96,28 @@ class Settings(BaseSettings):
     docs_dir: Path = Path("./docs")
     frontend_dist: Path | None = None
 
+    # ── Bootstrap admin (first-boot account) ───────────────────
+    # When set AND no users exist yet, ``app.security.bootstrap``
+    # creates an admin account during the API lifespan so operators
+    # never get locked out of a fresh install. Read here (via the
+    # Settings layer) so values in ``backend/.env`` work the same
+    # as shell environment variables — previously these were only
+    # read via ``os.environ`` which silently ignored ``.env``.
+    bootstrap_admin_username: str = ""
+    bootstrap_admin_password: str = ""
+    bootstrap_admin_email: str = ""
+
+    @field_validator("frontend_dist", mode="before")
+    @classmethod
+    def _coerce_blank_frontend_dist(cls, v: object) -> object:
+        # ``AUDITARR_FRONTEND_DIST=`` in a .env file would otherwise
+        # coerce to ``Path('.')`` (the cwd), which always ``.exists()``
+        # — the SPA mount then swallows ``GET /`` and other routes the
+        # backend would otherwise serve. Treat blank as "not set".
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
     # ── Updater (Stage 11) ─────────────────────────────────────
     # The version this build identifies as. v1.8.1: defaults to the
     # ``app.__version__`` constant so we don't drift — pre-1.8.1 the

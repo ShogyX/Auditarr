@@ -28,3 +28,4 @@ node_modules/
 AUDIT.md
 PLAN.md
 STATE.md
+backend/.env

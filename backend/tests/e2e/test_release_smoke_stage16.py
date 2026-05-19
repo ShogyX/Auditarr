@@ -189,12 +189,16 @@ async def test_release_smoke_full_walk(smoke_client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_version_is_1_8_3(smoke_client: AsyncClient) -> None:
-    """The release artifact ships at 1.8.3 — verified at the
-    Python ``__version__`` level (the source of truth) and via
-    the application log on startup."""
-    assert __version__ == "1.8.3", (
-        f"expected __version__=\'1.8.3\', got {__version__!r}"
+async def test_release_version_is_set(smoke_client: AsyncClient) -> None:
+    """``__version__`` is the source of truth for the release artifact
+    and must be a non-empty PEP 440-ish string. Pinning the exact
+    value here just makes every bump break the test, so we assert
+    the shape instead."""
+    assert isinstance(__version__, str) and __version__, (
+        f"expected non-empty __version__, got {__version__!r}"
+    )
+    assert __version__[0].isdigit(), (
+        f"expected __version__ to start with a digit, got {__version__!r}"
     )
 
 
@@ -209,10 +213,9 @@ async def test_health_reports_version(smoke_client: AsyncClient) -> None:
     resp = await smoke_client.get("/api/v1/health")
     assert resp.status_code == 200
     body = resp.json()
-    # The health envelope is allowed to vary across versions;
-    # we only assert the version field is present + 1.7.0.
-    assert body.get("version") == "1.8.3", (
-        f"health.version should be 1.7.0; got {body.get('version')!r}"
+    assert body.get("version") == __version__, (
+        f"health.version should match {__version__!r}; "
+        f"got {body.get('version')!r}"
     )
 
 
