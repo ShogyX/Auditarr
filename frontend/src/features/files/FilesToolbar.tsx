@@ -25,6 +25,9 @@ import {
   type FilesColumnKey,
 } from "@/stores/filesPrefsStore";
 
+import type { ResolutionBucket } from "@/hooks/useMedia";
+
+import { AdvancedFilterMenu } from "./AdvancedFilterMenu";
 import { CATEGORY_OPTIONS } from "./filesShared";
 import { CodecFilterMenu } from "./CodecFilterMenu";
 import { ColumnVisibilityMenu } from "./ColumnVisibilityMenu";
@@ -70,6 +73,26 @@ export interface FilesToolbarProps {
    *  the same on a fresh install. */
   showColumnFilters?: boolean;
   onToggleColumnFilters?: () => void;
+  /** v1.10 — Advanced filter axes (tags + rules include/exclude,
+   *  subtitles tri-state, resolution bucket). All optional so test
+   *  mounts that don't care about the menu still type-check. */
+  tagsInclude?: Set<string>;
+  tagsExclude?: Set<string>;
+  tagsIncludeAll?: boolean;
+  onToggleTagInclude?: (tag: string) => void;
+  onToggleTagExclude?: (tag: string) => void;
+  onTagsIncludeAll?: (v: boolean) => void;
+  rulesInclude?: Set<string>;
+  rulesExclude?: Set<string>;
+  rulesIncludeAll?: boolean;
+  onToggleRuleInclude?: (ruleId: string) => void;
+  onToggleRuleExclude?: (ruleId: string) => void;
+  onRulesIncludeAll?: (v: boolean) => void;
+  hasSubtitles?: boolean | undefined;
+  onHasSubtitles?: (v: boolean | undefined) => void;
+  resolutionBucket?: ResolutionBucket | "";
+  onResolutionBucket?: (v: ResolutionBucket | "") => void;
+  onClearAdvanced?: () => void;
 }
 
 export function FilesToolbar(props: FilesToolbarProps) {
@@ -158,6 +181,40 @@ export function FilesToolbar(props: FilesToolbarProps) {
         onToggleContainer={onToggleContainer}
         onClear={onClearCodecsAndContainers}
       />
+
+      {/* v1.10 — Advanced filter popover lives next to the codec
+          menu so all the "narrow the view" affordances cluster
+          together visually. Only renders when the page passes
+          the handlers, so test mounts without these still work. */}
+      {props.onToggleTagInclude &&
+      props.onToggleTagExclude &&
+      props.onToggleRuleInclude &&
+      props.onToggleRuleExclude &&
+      props.onHasSubtitles &&
+      props.onResolutionBucket &&
+      props.onClearAdvanced &&
+      props.onTagsIncludeAll &&
+      props.onRulesIncludeAll ? (
+        <AdvancedFilterMenu
+          tagsInclude={props.tagsInclude ?? new Set()}
+          tagsExclude={props.tagsExclude ?? new Set()}
+          tagsIncludeAll={!!props.tagsIncludeAll}
+          onToggleTagInclude={props.onToggleTagInclude}
+          onToggleTagExclude={props.onToggleTagExclude}
+          onTagsIncludeAll={props.onTagsIncludeAll}
+          rulesInclude={props.rulesInclude ?? new Set()}
+          rulesExclude={props.rulesExclude ?? new Set()}
+          rulesIncludeAll={!!props.rulesIncludeAll}
+          onToggleRuleInclude={props.onToggleRuleInclude}
+          onToggleRuleExclude={props.onToggleRuleExclude}
+          onRulesIncludeAll={props.onRulesIncludeAll}
+          hasSubtitles={props.hasSubtitles}
+          onHasSubtitles={props.onHasSubtitles}
+          resolutionBucket={props.resolutionBucket ?? ""}
+          onResolutionBucket={props.onResolutionBucket}
+          onClearAll={props.onClearAdvanced}
+        />
+      ) : null}
 
       <div className="flex-1" />
 

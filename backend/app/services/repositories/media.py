@@ -114,6 +114,38 @@ class MediaFilter:
     # anything tagged sonarr OR radarr". A future ``tags_all`` flag
     # could add AND semantics if needed; one knob at a time.
     tags_any: list[str] | None = None
+    # v1.10 — include / exclude expansion for tags + rules. All three
+    # tag predicates evaluate independently and AND together: an
+    # operator can say "files tagged ``en`` AND tagged with both
+    # ``hevc-flagged`` and ``audited`` AND NOT tagged ``hide``"
+    # by setting ``tags_any=["en"]`` + ``tags_all=["hevc-flagged",
+    # "audited"]`` + ``tags_none=["hide"]``. Same shape for rules.
+    # All four-valued (None vs empty list vs list-with-blanks vs
+    # real list) — the repository drops blanks and treats empty
+    # lists as "no filter" for consistency with ``tags_any``.
+    tags_all: list[str] | None = None
+    tags_none: list[str] | None = None
+    # Rule predicates accept rule IDs (UUIDs). The frontend looks up
+    # IDs from the rule catalog so the URL stays stable when an
+    # operator renames a rule.
+    rules_any: list[str] | None = None
+    rules_all: list[str] | None = None
+    rules_none: list[str] | None = None
+    # v1.10 — has-subtitles tri-state. ``None`` = no filter, ``True``
+    # = at least one subtitle stream, ``False`` = no subtitle stream.
+    has_subtitles: bool | None = None
+    # v1.10 — resolution bucket mapping ``height``:
+    #   "480p"  : height in [320, 600)
+    #   "720p"  : [600, 1000)
+    #   "1080p" : [1000, 1300)
+    #   "1440p" : [1300, 1700)
+    #   "2160p" : [1700, 3000)
+    #   "8k"    : [3000, ∞)
+    #   "sd"    : height < 320 (DVD rips, mobile sources)
+    #   "unknown": height IS NULL
+    # The buckets cluster around what dashboard composition already
+    # surfaces; anything outside the listed labels is a no-op.
+    resolution_bucket: str | None = None
     # Stage 02 (v1.7): per-column quick filters from the Files
     # table's optional filter row. All eight are independent
     # predicates ANDed with the rest of the WHERE.
@@ -303,6 +335,122 @@ class MediaRepository:
                     )
                     .exists()
                 )
+
+        # v1.10 — ``tags_all``: file must carry every listed name.
+        # One EXISTS per name AND'd together; cheap on tens of names
+        # because each subquery hits the same compound index on
+        # ``(media_file_id, name)``.
+        if filt.tags_all:
+            all_names = [t.strip() for t in filt.tags_all if t and t.strip()]
+            for name in all_names:
+                conditions.append(
+                    select(MediaTag.media_file_id)
+                    .where(
+                        MediaTag.media_file_id == MediaFile.id,
+                        MediaTag.name == name,
+                    )
+                    .exists()
+                )
+
+        # v1.10 — ``tags_none``: file must NOT carry any of these.
+        # NOT EXISTS keeps the result set right when multiple
+        # excluded tags are listed; equivalent to NOT (tags_any).
+        if filt.tags_none:
+            none_names = [
+                t.strip() for t in filt.tags_none if t and t.strip()
+            ]
+            if none_names:
+                conditions.append(
+                    ~select(MediaTag.media_file_id)
+                    .where(
+                        MediaTag.media_file_id == MediaFile.id,
+                        MediaTag.name.in_(none_names),
+                    )
+                    .exists()
+                )
+
+        # v1.10 — rule predicates. ``RuleEvaluation`` rows are the
+        # join: one per (file, rule) match. Same EXISTS / NOT EXISTS
+        # idiom as the tag predicates so the result set isn't
+        # multiplied by joins. The model is imported at module scope.
+        if filt.rules_any or filt.rules_all or filt.rules_none:
+            if filt.rules_any:
+                any_ids = [
+                    r.strip() for r in filt.rules_any if r and r.strip()
+                ]
+                if any_ids:
+                    conditions.append(
+                        select(RuleEvaluation.media_file_id)
+                        .where(
+                            RuleEvaluation.media_file_id == MediaFile.id,
+                            RuleEvaluation.rule_id.in_(any_ids),
+                        )
+                        .exists()
+                    )
+            if filt.rules_all:
+                all_ids = [
+                    r.strip() for r in filt.rules_all if r and r.strip()
+                ]
+                for rule_id in all_ids:
+                    conditions.append(
+                        select(RuleEvaluation.media_file_id)
+                        .where(
+                            RuleEvaluation.media_file_id == MediaFile.id,
+                            RuleEvaluation.rule_id == rule_id,
+                        )
+                        .exists()
+                    )
+            if filt.rules_none:
+                none_ids = [
+                    r.strip() for r in filt.rules_none if r and r.strip()
+                ]
+                if none_ids:
+                    conditions.append(
+                        ~select(RuleEvaluation.media_file_id)
+                        .where(
+                            RuleEvaluation.media_file_id == MediaFile.id,
+                            RuleEvaluation.rule_id.in_(none_ids),
+                        )
+                        .exists()
+                    )
+
+        # v1.10 — boolean and bucket predicates.
+        if filt.has_subtitles is not None:
+            conditions.append(MediaFile.has_subtitles.is_(filt.has_subtitles))
+
+        if filt.resolution_bucket:
+            bucket = filt.resolution_bucket.strip().lower()
+            # Mirrors the dashboard's ``Resolutions`` panel buckets.
+            # Unknown labels intentionally fall through with no
+            # additional predicate — the caller's filter is a no-op
+            # rather than a 5xx, matching the rest of the filter
+            # contract.
+            if bucket == "unknown":
+                conditions.append(MediaFile.height.is_(None))
+            elif bucket == "sd":
+                conditions.append(MediaFile.height < 320)
+            elif bucket == "480p":
+                conditions.append(
+                    and_(MediaFile.height >= 320, MediaFile.height < 600)
+                )
+            elif bucket == "720p":
+                conditions.append(
+                    and_(MediaFile.height >= 600, MediaFile.height < 1000)
+                )
+            elif bucket == "1080p":
+                conditions.append(
+                    and_(MediaFile.height >= 1000, MediaFile.height < 1300)
+                )
+            elif bucket == "1440p":
+                conditions.append(
+                    and_(MediaFile.height >= 1300, MediaFile.height < 1700)
+                )
+            elif bucket in {"2160p", "4k"}:
+                conditions.append(
+                    and_(MediaFile.height >= 1700, MediaFile.height < 3000)
+                )
+            elif bucket in {"4320p", "8k"}:
+                conditions.append(MediaFile.height >= 3000)
 
         # Stage 02 (v1.7): per-column quick filters. All
         # case-insensitive where they're substring filters; strict
