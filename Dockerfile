@@ -11,7 +11,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2 - backend dependency layer (uv)
-FROM ghcr.io/astral-sh/uv:0.5.4-python3.12-bookworm-slim AS backend-deps
+FROM ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm-slim AS backend-deps
 WORKDIR /build/backend
 
 ENV UV_LINK_MODE=copy \
