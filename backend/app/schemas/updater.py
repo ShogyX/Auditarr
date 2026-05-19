@@ -24,6 +24,13 @@ class UpdaterStatusRead(BaseModel):
     # None for bare-metal (Apply button does the work) and unmanaged
     # (operator's own config tool drives the upgrade).
     manual_apply_command: str | None = None
+    # v1.9.x — populated when the configured feed is a commit feed
+    # (the default ``.../commits/main`` URL produces these). The UI
+    # shows the short SHA + commit date when present.
+    installed_commit_sha: str | None = None
+    latest_commit_sha: str | None = None
+    latest_commit_date: str | None = None
+    latest_commit_message: str | None = None
 
 
 class UpdateCheckRead(BaseModel):
@@ -33,6 +40,8 @@ class UpdateCheckRead(BaseModel):
     checked_at: _dt.datetime
     ok: bool
     latest_version: str | None
+    latest_commit_sha: str | None = None
+    latest_commit_date: _dt.datetime | None = None
     changelog: str | None
     detail: str | None
     feed_url: str

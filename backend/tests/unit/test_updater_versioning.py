@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+
 import pytest
 
-from app.updater.versioning import DEV_SENTINEL, is_newer, parse
+from app.updater.versioning import (
+    DEV_SENTINEL,
+    UNKNOWN_COMMIT,
+    is_newer,
+    is_newer_commit,
+    parse,
+)
 
 
 # ── parse ──────────────────────────────────────────────────────
@@ -106,3 +114,87 @@ def test_malformed_candidate_falls_back_to_inequality() -> None:
     a "something changed" notification rather than silently missing it."""
     assert is_newer("nightly-2026-05-11", "nightly-2026-05-10") is True
     assert is_newer("nightly-2026-05-11", "nightly-2026-05-11") is False
+
+
+# ── is_newer_commit (v1.9.x commit-based feed) ─────────────────
+
+
+def _ts(year: int, month: int, day: int) -> _dt.datetime:
+    return _dt.datetime(year, month, day, tzinfo=_dt.timezone.utc)
+
+
+def test_commit_unknown_installed_always_newer() -> None:
+    """The ``"unknown"`` SHA is the commit-equivalent of the
+    ``0.0.0-dev`` version sentinel — any known remote commit wins."""
+    assert is_newer_commit("abc123", UNKNOWN_COMMIT) is True
+    assert is_newer_commit("abc123", "") is True
+
+
+def test_commit_empty_candidate_not_newer() -> None:
+    """Feed didn't return a SHA → nothing to compare against."""
+    assert is_newer_commit("", "abc123") is False
+
+
+def test_commit_same_sha_not_newer() -> None:
+    """Identical SHAs short-circuit before the date comparison.
+    Robust against clock skew between the install host and GitHub."""
+    assert is_newer_commit(
+        "abc123",
+        "abc123",
+        candidate_date=_ts(2026, 6, 1),
+        installed_date=_ts(2026, 5, 1),
+    ) is False
+
+
+def test_commit_remote_strictly_later_date_is_newer() -> None:
+    assert is_newer_commit(
+        "deadbeef",
+        "cafef00d",
+        candidate_date=_ts(2026, 5, 18),
+        installed_date=_ts(2026, 5, 17),
+    ) is True
+
+
+def test_commit_remote_equal_date_is_not_newer() -> None:
+    """Equal dates between different SHAs is the genuine ambiguity
+    case (think: side-branch commit with the same timestamp). The
+    comparator refuses to claim "newer" so operators on a divergent
+    branch don't see false "update available" prompts."""
+    same = _ts(2026, 5, 17)
+    assert is_newer_commit(
+        "deadbeef", "cafef00d",
+        candidate_date=same, installed_date=same,
+    ) is False
+
+
+def test_commit_remote_earlier_date_is_not_newer() -> None:
+    """Operator is on a commit ahead of main shouldn't see an
+    "update available" pointing at an older commit on main."""
+    assert is_newer_commit(
+        "olderaa",
+        "newerbb",
+        candidate_date=_ts(2026, 5, 1),
+        installed_date=_ts(2026, 5, 17),
+    ) is False
+
+
+def test_commit_missing_one_date_falls_back_to_assume_newer() -> None:
+    """One side has no date — different SHAs with missing temporal
+    context surface as 'newer' (same conservative stance the
+    version-string comparator takes for unknown shapes)."""
+    assert is_newer_commit(
+        "deadbeef", "cafef00d",
+        candidate_date=_ts(2026, 5, 18),
+        installed_date=None,
+    ) is True
+    assert is_newer_commit(
+        "deadbeef", "cafef00d",
+        candidate_date=None,
+        installed_date=_ts(2026, 5, 18),
+    ) is True
+
+
+def test_commit_strips_whitespace() -> None:
+    """Defensive — env-var-fed SHAs can come with newlines."""
+    assert is_newer_commit("  abc123 \n", "abc123") is False
+    assert is_newer_commit("abc123", "  abc123 \n") is False

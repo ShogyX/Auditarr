@@ -42,6 +42,11 @@ derive_release_url() {
     local feed_url="$1"
     local current_template="${2:-}"
     local result="$current_template"
+    if [[ -z "$result" && "$feed_url" =~ ^https://api\.github\.com/repos/([^/]+)/([^/]+)/commits/[^/]+$ ]]; then
+        local owner="${BASH_REMATCH[1]}"
+        local repo="${BASH_REMATCH[2]}"
+        result="https://github.com/${owner}/${repo}/archive/%s.tar.gz"
+    fi
     if [[ -z "$result" && "$feed_url" =~ ^https://api\.github\.com/repos/([^/]+)/([^/]+)/releases/latest$ ]]; then
         local owner="${BASH_REMATCH[1]}"
         local repo="${BASH_REMATCH[2]}"
@@ -113,6 +118,34 @@ got="$(derive_release_url "https://api.github.com/repos/foo-bar/baz-qux/releases
 assert_eq "$got" \
     "https://github.com/foo-bar/baz-qux/archive/refs/tags/v%s.tar.gz" \
     "hyphenated owner+repo handled"
+
+# Test 11 — v1.9.x commits/<branch> feed → SHA-tarball URL.
+echo "test_commits_main_feed:"
+got="$(derive_release_url "https://api.github.com/repos/ShogyX/Auditarr/commits/main")"
+assert_eq "$got" \
+    "https://github.com/ShogyX/Auditarr/archive/%s.tar.gz" \
+    "commits/main feed derives SHA tarball URL"
+
+# Test 12 — Non-default branch (commits/develop).
+echo "test_commits_develop_feed:"
+got="$(derive_release_url "https://api.github.com/repos/foo/bar/commits/develop")"
+assert_eq "$got" \
+    "https://github.com/foo/bar/archive/%s.tar.gz" \
+    "commits/develop feed derives SHA tarball URL"
+
+# Test 13 — SHA tarball URL substitutes correctly with a real commit SHA.
+echo "test_sha_tarball_substitution:"
+template="$(derive_release_url "https://api.github.com/repos/ShogyX/Auditarr/commits/main")"
+# shellcheck disable=SC2059
+rendered="$(printf "$template" "70a38e8298050b9dcda5aaaa36826f2cdb2f955d")"
+assert_eq "$rendered" \
+    "https://github.com/ShogyX/Auditarr/archive/70a38e8298050b9dcda5aaaa36826f2cdb2f955d.tar.gz" \
+    "%s substitution produces a SHA-keyed tarball URL"
+
+# Test 14 — Commits feed beats releases feed only when the URL shape matches.
+echo "test_commits_feed_does_not_match_releases:"
+got="$(derive_release_url "https://api.github.com/repos/foo/bar/commits")"
+assert_empty "$got" "commits with no branch segment rejected"
 
 echo
 echo "Result: $PASS passed, $FAIL failed"

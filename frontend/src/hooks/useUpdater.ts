@@ -22,6 +22,14 @@ export interface UpdaterStatus {
   // copy-paste-ready host commands the operator must run to
   // update. Null for bare-metal and unmanaged.
   manual_apply_command?: string | null;
+  // v1.9.x — commit-feed identity. Populated when the configured
+  // feed is the GitHub ``commits/<branch>`` endpoint (default).
+  // ``latest_version`` stays null in that mode and the UI keys off
+  // the short SHA + commit date instead.
+  installed_commit_sha?: string | null;
+  latest_commit_sha?: string | null;
+  latest_commit_date?: string | null;
+  latest_commit_message?: string | null;
 }
 
 export interface UpdateCheck {
@@ -29,6 +37,8 @@ export interface UpdateCheck {
   checked_at: string;
   ok: boolean;
   latest_version: string | null;
+  latest_commit_sha?: string | null;
+  latest_commit_date?: string | null;
   changelog: string | null;
   detail: string | null;
   feed_url: string;

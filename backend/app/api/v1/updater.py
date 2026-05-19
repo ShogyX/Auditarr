@@ -60,6 +60,10 @@ async def get_status(
         install_mode=status_obj.install_mode,
         apply_enabled=status_obj.apply_enabled,
         manual_apply_command=status_obj.manual_apply_command,
+        installed_commit_sha=status_obj.installed_commit_sha,
+        latest_commit_sha=status_obj.latest_commit_sha,
+        latest_commit_date=status_obj.latest_commit_date,
+        latest_commit_message=status_obj.latest_commit_message,
     )
 
 
