@@ -503,6 +503,25 @@ async def generate_webhook_secret(
     if integration is None:
         raise NotFoundError("Integration not found")
 
+    # Refuse to mint a URL the receiver can't dispatch. The
+    # ``/api/v1/webhooks/{kind}/{id}`` endpoint hardcodes a 4-kind
+    # allowlist (sonarr/radarr/plex/jellyfin); rotating a secret
+    # for any other kind would hand the operator a URL that 404s
+    # the moment the upstream posts to it.
+    from app.api.v1.webhooks import WEBHOOK_RECEIVER_KINDS
+
+    if integration.kind not in WEBHOOK_RECEIVER_KINDS:
+        raise ValidationError(
+            f"Integration kind {integration.kind!r} does not accept "
+            "inbound webhooks. Supported kinds: "
+            f"{sorted(WEBHOOK_RECEIVER_KINDS)}.",
+            details={
+                "integration_id": integration.id,
+                "kind": integration.kind,
+                "supported_kinds": sorted(WEBHOOK_RECEIVER_KINDS),
+            },
+        )
+
     # 32 bytes of entropy → 64-char hex string. Comfortably above
     # the practical brute-force threshold for HMAC-SHA256.
     plaintext = secrets.token_hex(32)

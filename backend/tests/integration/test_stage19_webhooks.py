@@ -279,6 +279,43 @@ async def test_webhook_secret_endpoint_returns_plaintext_once(
     assert r2.json()["webhook_secret"] != body["webhook_secret"]
 
 
+# ── 1b: webhook-secret refuses for non-receiver kinds ────────
+@pytest.mark.asyncio
+async def test_webhook_secret_refused_for_non_receiver_kind(
+    client: AsyncClient,
+) -> None:
+    """The receiver only knows sonarr/radarr/plex/jellyfin. Minting
+    a webhook URL for any other kind (bazarr, tdarr, virustotal…)
+    hands the operator a URL that will 404 on the first delivery."""
+    from app.models.integration import Integration
+    from app.storage.database import get_database
+
+    headers = await _admin(client)
+    # Insert a bazarr integration directly to skip preflight/schema —
+    # we only care about the rotate-secret refusal, not the full
+    # bazarr create path.
+    db = get_database()
+    async with db.session() as sess:
+        row = Integration(
+            name="bazarr-stub",
+            kind="bazarr",
+            enabled=True,
+            config={"base_url": "http://stub.test"},
+        )
+        sess.add(row)
+        await sess.commit()
+        integration_id = row.id
+
+    r = await client.post(
+        f"/api/v1/integrations/{integration_id}/webhook-secret",
+        headers=headers,
+    )
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert "bazarr" in body["message"]
+    assert "sonarr" in body["message"]  # supported list cited
+
+
 # ── 2: no secret on integration → 401 ────────────────────────
 @pytest.mark.asyncio
 async def test_webhook_no_secret_returns_401(client: AsyncClient) -> None:

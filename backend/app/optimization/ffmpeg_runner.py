@@ -321,14 +321,41 @@ async def validate_output(
     if not probe.video_codec:
         return False, "output has no video stream"
     if expected_duration_seconds and probe.duration_seconds:
-        ratio = probe.duration_seconds / expected_duration_seconds
-        if ratio < 0.98 or ratio > 1.02:
-            return (
-                False,
-                f"output duration {probe.duration_seconds:.1f}s differs "
-                f"from input {expected_duration_seconds:.1f}s (>2%)",
-            )
+        ok, message = _duration_within_tolerance(
+            probe.duration_seconds, expected_duration_seconds
+        )
+        if not ok:
+            return False, message
     return True, None
+
+
+def _duration_within_tolerance(
+    actual_seconds: float, expected_seconds: float
+) -> tuple[bool, str | None]:
+    """Decide whether a transcode's output duration is close enough
+    to the input.
+
+    Short clips (< 5s) can swing more than 2% from a single frame's
+    worth of drift at the encoder boundary, so a strict 2% relative
+    bound throws false positives like ``"output 1.0s differs from
+    input 1.0s (>2%)"`` on rounded display values that are actually
+    within 20 ms of each other. We pass when EITHER bound holds:
+
+    * the absolute delta is ≤ 0.5 s, OR
+    * the relative delta is ≤ 2 %
+
+    Returns ``(True, None)`` on pass, ``(False, message)`` on fail.
+    """
+    delta = abs(actual_seconds - expected_seconds)
+    rel_tolerance = expected_seconds * 0.02
+    if delta <= rel_tolerance or delta <= 0.5:
+        return True, None
+    return False, (
+        f"output duration {actual_seconds:.3f}s differs from "
+        f"input {expected_seconds:.3f}s (delta {delta:.3f}s; "
+        "tolerance: 2% relative or 0.5s absolute, whichever is "
+        "larger)"
+    )
 
 
 # Expose the module-level convenience for callers.

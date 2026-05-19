@@ -1202,13 +1202,16 @@ async def ai_generate_suggestions(
         no HTTP call was made.
       * ``provider_kind`` / ``provider_integration_id`` — which
         provider was used.
-      * ``error`` — string when the provider call failed or no
-        provider integration is configured.
+      * ``error`` — string when the provider call failed.
 
-    The endpoint surfaces 200 even on provider-level errors —
-    the operator's UI banner reads the ``error`` field. A 5xx
-    would be misleading: the request reached our service
-    correctly; only the AI hand-off failed.
+    Configuration errors (no provider configured, integration
+    missing ``provider_kind``) raise 422 so the UI gets a clear
+    "fix your setup" signal rather than a 200 with an empty
+    counts dict.
+
+    Provider-runtime errors still surface as 200 with ``error``
+    set: the request reached our service correctly; only the
+    downstream AI hand-off failed.
     """
     from app.services.ai.suggestions import AISuggestionService
 
@@ -1218,6 +1221,22 @@ async def ai_generate_suggestions(
             body.provider_integration_id if body else None
         ),
     )
+    # Distinguish "config not ready" from "AI provider misbehaved".
+    # When ``provider_kind`` never got resolved AND counts are zero,
+    # we never reached the provider — it's a config error the
+    # operator must fix, not a transient AI hiccup.
+    if (
+        result.error
+        and result.provider_kind is None
+        and result.candidates_received == 0
+        and result.suggestions_created == 0
+    ):
+        raise ValidationError(
+            result.error,
+            details={
+                "provider_integration_id": result.provider_integration_id,
+            },
+        )
     return {
         "suggestions_created": result.suggestions_created,
         "candidates_received": result.candidates_received,
